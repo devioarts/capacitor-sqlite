@@ -1,4 +1,11 @@
 # Add project specific ProGuard rules here.
+
+# Keep all plugin classes so Capacitor can load them by name at runtime.
+-keep class com.devioarts.capacitor.sqlite.** { *; }
+-keep @com.getcapacitor.annotation.CapacitorPlugin class * { *; }
+-keepclassmembers class * {
+    @com.getcapacitor.annotation.PluginMethod public *;
+}
 # You can control the set of applied configuration files using the
 # proguardFiles setting in build.gradle.
 #

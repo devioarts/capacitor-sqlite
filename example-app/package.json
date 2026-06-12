@@ -10,13 +10,17 @@
   "scripts": {
     "start": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "electron:install": "npm --prefix electron install",
+    "electron:dev": "npm --prefix electron run dev:electron",
+    "electron:start": "npm run build && npm --prefix electron run start"
   },
   "dependencies": {
     "@capacitor/core": "latest",
-    "capacitor-sqlite": "file:..",
     "@capacitor/ios": "^8.0.0",
-    "@capacitor/android": "^8.0.0"
+    "@capacitor/android": "^8.0.0",
+    "@sqlite.org/sqlite-wasm": "3.53.0-build1",
+    "@devioarts/capacitor-sqlite": "file:.."
   },
   "devDependencies": {
     "@capacitor/cli": "latest",

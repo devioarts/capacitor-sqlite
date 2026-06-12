@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "allowSyntheticDefaultImports": true,
+    "declaration": true,
+    "noEmitHelpers": true,
+    "lib": ["es2020"],
+    "module": "commonjs",
+    "noImplicitAny": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "outDir": "build",
+    "rootDir": "..",
+    "sourceMap": true,
+    "strict": true,
+    "target": "ES2017",
+    "types": ["node"]
+  },
+  "include": ["src/**/*", "types/**/*"]
+}

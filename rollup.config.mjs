@@ -4,9 +4,10 @@ export default {
     {
       file: 'dist/plugin.js',
       format: 'iife',
-      name: 'capacitorCapacitorSqlite',
+      name: 'capacitorSqlite',
       globals: {
         '@capacitor/core': 'capacitorExports',
+        '@sqlite.org/sqlite-wasm': 'sqliteWasm',
       },
       sourcemap: true,
       inlineDynamicImports: true,
@@ -18,5 +19,5 @@ export default {
       inlineDynamicImports: true,
     },
   ],
-  external: ['@capacitor/core'],
+  external: ['@capacitor/core', '@sqlite.org/sqlite-wasm'],
 };
