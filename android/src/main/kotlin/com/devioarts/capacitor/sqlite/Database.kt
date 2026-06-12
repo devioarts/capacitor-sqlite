@@ -65,22 +65,22 @@ internal class Database(
     @Throws(Exception::class)
     fun execute(statements: List<String>, transaction: Boolean = true): Long = lock.withLock {
         val handle = requireOpen("execute")
-        val before = SQLiteHelpers.totalChanges(handle)
         if (transaction && handle.inTransaction()) {
             throw IllegalStateException("execute: a transaction is already active on '$name'")
         }
         if (transaction) SQLiteHelpers.beginTransaction(handle)
+        var totalChanges = 0L
         try {
             for (sql in statements) {
                 val trimmed = sql.trim()
-                if (trimmed.isNotEmpty()) SQLiteHelpers.exec(handle, trimmed)
+                if (trimmed.isNotEmpty()) totalChanges += SQLiteHelpers.exec(handle, trimmed)
             }
             if (transaction) SQLiteHelpers.commitTransaction(handle)
         } catch (e: Exception) {
             if (transaction && handle.inTransaction()) SQLiteHelpers.rollbackTransaction(handle)
             throw e
         }
-        SQLiteHelpers.totalChanges(handle) - before
+        totalChanges
     }
 
     // MARK: - Run (single parameterized DML)
@@ -95,12 +95,12 @@ internal class Database(
     @Throws(Exception::class)
     fun runBatch(set: List<Map<String, Any?>>, transaction: Boolean = true): RunResult = lock.withLock {
         val handle = requireOpen("runBatch")
-        val before = SQLiteHelpers.totalChanges(handle)
 
         if (transaction && handle.inTransaction()) {
             throw IllegalStateException("runBatch: a transaction is already active on '$name'")
         }
         if (transaction) SQLiteHelpers.beginTransaction(handle)
+        var totalChanges = 0L
         try {
             for (item in set) {
                 val sql = item["statement"] as? String
@@ -108,7 +108,7 @@ internal class Database(
                 require(sql.trim().isNotEmpty()) { "runBatch: each item must have a non-empty 'statement' key" }
                 @Suppress("UNCHECKED_CAST")
                 val vals = item["values"] as? List<Any?> ?: emptyList()
-                SQLiteHelpers.run(handle, sql, vals)
+                totalChanges += SQLiteHelpers.run(handle, sql, vals).changes
             }
             if (transaction) SQLiteHelpers.commitTransaction(handle)
         } catch (e: Exception) {
@@ -116,7 +116,7 @@ internal class Database(
             throw e
         }
 
-        RunResult(changes = SQLiteHelpers.totalChanges(handle) - before, lastInsertId = 0)
+        RunResult(changes = totalChanges, lastInsertId = 0)
     }
 
     // MARK: - Query

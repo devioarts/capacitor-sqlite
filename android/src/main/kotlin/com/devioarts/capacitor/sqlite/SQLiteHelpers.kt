@@ -16,8 +16,13 @@ internal object SQLiteHelpers {
 
     // MARK: - DDL / no-result execution
 
-    fun exec(db: SQLiteDatabase, sql: String) {
+    fun exec(db: SQLiteDatabase, sql: String): Long {
+        val stmtType = statementType(sql)
+        if (isInsertLike(stmtType) || isUpdateDelete(stmtType)) {
+            return run(db, sql, emptyList()).changes
+        }
         db.execSQL(sql)
+        return 0L
     }
 
     // MARK: - Parameterized DML (single statement)
@@ -26,10 +31,13 @@ internal object SQLiteHelpers {
         val stmt = db.compileStatement(sql)
         try {
             bindValues(stmt, values)
-            val stmtType = sql.trim().uppercase().split("\\s+".toRegex()).firstOrNull() ?: ""
+            val stmtType = statementType(sql)
+            if (isInsertLike(stmtType)) {
+                val lastId = stmt.executeInsert()
+                return RunResult(changes = if (lastId >= 0L) 1L else 0L, lastInsertId = if (lastId >= 0L) lastId else 0L)
+            }
             val changes = stmt.executeUpdateDelete().toLong()
-            val lastId = if ((stmtType == "INSERT" || stmtType == "REPLACE") && changes > 0L) lastInsertRowId(db) else 0L
-            return RunResult(changes = changes, lastInsertId = lastId)
+            return RunResult(changes = changes, lastInsertId = 0L)
         } finally {
             stmt.close()
         }
@@ -89,21 +97,20 @@ internal object SQLiteHelpers {
 
     // MARK: - Helpers
 
-    fun totalChanges(db: SQLiteDatabase): Long =
-        db.rawQuery("SELECT total_changes()", null).use { c ->
-            if (c.moveToFirst()) c.getLong(0) else 0L
-        }
-
     fun vacuum(db: SQLiteDatabase) {
         db.execSQL("VACUUM")
     }
 
     // MARK: - Private
 
-    private fun lastInsertRowId(db: SQLiteDatabase): Long =
-        db.rawQuery("SELECT last_insert_rowid()", null).use { c ->
-            if (c.moveToFirst()) c.getLong(0) else 0L
-        }
+    private fun statementType(sql: String): String =
+        sql.trimStart().split("\\s+".toRegex()).firstOrNull()?.uppercase() ?: ""
+
+    private fun isInsertLike(stmtType: String): Boolean =
+        stmtType == "INSERT" || stmtType == "REPLACE"
+
+    private fun isUpdateDelete(stmtType: String): Boolean =
+        stmtType == "UPDATE" || stmtType == "DELETE"
 
     private fun bindValues(stmt: SQLiteStatement, values: List<Any?>) {
         values.forEachIndexed { i, v ->
