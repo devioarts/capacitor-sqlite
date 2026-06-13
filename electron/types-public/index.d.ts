@@ -10,7 +10,6 @@ import type {
 } from '../../dist/esm/definitions';
 
 export declare class CapacitorSqlite implements CapacitorSqlitePlugin {
-  static readonly pluginMethods: readonly string[];
   getPlatform(): Promise<SqliteResult<{ platform: SqlitePlatform }>>;
   isAvailable(): Promise<SqliteResult<{ available: boolean }>>;
   open(options: OpenOptions): Promise<SqliteResult>;

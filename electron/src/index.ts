@@ -21,7 +21,6 @@ import type {
   SqliteSuccess,
 } from '../../src/definitions';
 
-import { pluginSettings } from './plugin-settings';
 
 type DatabaseSync = InstanceType<typeof SqliteType.DatabaseSync>;
 type SQLiteValue = string | number | boolean | null | Uint8Array | number[];
@@ -192,8 +191,6 @@ function errorCode(err: unknown, fallback: SqliteErrorCode): SqliteErrorCode {
 }
 
 export class CapacitorSqlite implements CapacitorSqlitePlugin {
-  static readonly pluginMethods = pluginSettings.pluginMethods;
-
   private databases = new Map<string, DatabaseEntry>();
   // Coalesces concurrent open() calls for the same database.
   private pendingOpens = new Map<string, Promise<SqliteResult>>();

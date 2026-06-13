@@ -1,5 +1,7 @@
 # @devioarts/capacitor-sqlite
 
+> **Early release** — This plugin is new and has not been battle-tested in production. Please evaluate it thoroughly before shipping. Bug reports, edge-case findings, and general feedback are very welcome — open an issue or reach out directly.
+
 SQLite plugin for Capacitor — iOS, Android, Web (OPFS), and Electron.
 
 - Schema migrations via `PRAGMA user_version` — each version runs in its own transaction
