@@ -129,6 +129,8 @@ export interface CapacitorSqlitePlugin {
    * Execute one or more SQL statements sequentially.
    * Use for DDL (`CREATE TABLE`, …) or bulk DML without params.
    * `statements` must be a non-empty array.
+   * **Each array element must be a single SQL statement** — multiple semicolon-separated
+   * statements in one string work on iOS/Web but fail on Android/Electron.
    * Statements run in a single transaction by default; pass
    * `transaction: false` to keep prior successful statements if a later one fails.
    * When called inside `beginTransaction()`, pass `transaction: false`;
@@ -141,14 +143,19 @@ export interface CapacitorSqlitePlugin {
    * Returns the number of affected rows and the row ID inserted by this statement.
    * `lastInsertId` is `0` for UPDATE, DELETE, statements that insert no row,
    * and other non-INSERT/REPLACE statements.
-   * `lastInsertId` is a JavaScript number and is precise up to
-   * `Number.MAX_SAFE_INTEGER`.
+   * `lastInsertId` is a JavaScript number and is precise up to `Number.MAX_SAFE_INTEGER`.
+   * **Android caveat:** a multi-value `INSERT INTO t VALUES (…),(…)` always reports
+   * `changes = 1` regardless of the number of inserted rows; other platforms report
+   * the real count. Single-row inserts are correct on all platforms.
    */
   run(options: RunOptions): Promise<SqliteResult<{ changes: number; lastInsertId: number }>>;
 
   /**
    * Execute multiple parameterized statements in a single native call.
    * `lastInsertId` is always `0`; use `run()` when you need the inserted row ID.
+   * **Android caveat:** a multi-value `INSERT INTO t VALUES (…),(…)` always reports
+   * `changes = 1` regardless of the number of inserted rows; other platforms report
+   * the real count.
    * When called inside `beginTransaction()`, pass `transaction: false`;
    * nested transactions return TRANSACTION_FAILED.
    */

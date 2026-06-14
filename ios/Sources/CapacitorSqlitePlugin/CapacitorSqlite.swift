@@ -198,11 +198,14 @@ final class CapacitorSqlite {
     // MARK: - Private helpers
 
     private func requireOpen(_ name: String, context: String) throws -> Database {
+        // Read the Database instance under lock (dictionary access only).
+        // isOpen calls queue.sync internally — do NOT hold lock during that call,
+        // or a busy queue on DB-A would hold the global lock and starve DB-B.
+        let inst: Database?
         lock.lock()
-        let inst = databases[name]
-        let open = inst?.isOpen ?? false
+        inst = databases[name]
         lock.unlock()
-        guard let inst, open else {
+        guard let inst, inst.isOpen else {
             throw CapacitorSqliteError.failed(message: "\(context): '\(name)' is not open")
         }
         return inst

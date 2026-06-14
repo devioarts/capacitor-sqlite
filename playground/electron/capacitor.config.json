@@ -1,0 +1,5 @@
+{
+  "appId": "com.devioarts.capacitor.sqlite",
+  "appName": "cap-sqlite",
+  "webDir": "dist"
+}

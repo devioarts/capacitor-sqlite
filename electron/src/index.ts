@@ -277,7 +277,7 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
       const dbPath = database === ':memory:' ? ':memory:' : this.databasePath(database);
       db = new sqlite.DatabaseSync(dbPath, {
         readOnly: readonly,
-        enableForeignKeyConstraints: true,
+        enableForeignKeyConstraints: !readonly,
       });
 
       if (!readonly) {
@@ -624,7 +624,10 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
 function convertValues(values: SQLiteValues): NodeSQLiteValue[] {
   return values.map((v) => {
     if (Array.isArray(v)) return new Uint8Array(v);
-    if (typeof v === 'boolean') return v ? 1 : 0;
+    if (typeof v === 'boolean') return BigInt(v ? 1 : 0);
+    // node:sqlite binds all JS numbers as REAL (float64). Convert safe integers to
+    // BigInt so node:sqlite stores them as SQLite INTEGER, preserving typeof() semantics.
+    if (typeof v === 'number' && Number.isInteger(v)) return BigInt(v);
     return v as NodeSQLiteValue;
   });
 }

@@ -16,6 +16,11 @@ private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.sel
 
 enum SQLiteHelpers {
 
+    // Sentinel prefix for BLOB columns returned from queries.
+    // The JS layer detects this prefix and decodes back to Uint8Array.
+    // Must stay in sync with BLOB_PREFIX in SQLiteHelpers.kt and index.ts.
+    private static let BLOB_PREFIX = "blob64:"
+
     // MARK: - Lifecycle
 
     static func open(path: String, readonly: Bool = false) throws -> OpaquePointer {
@@ -145,26 +150,65 @@ enum SQLiteHelpers {
         switch value {
         case is NSNull:
             sqlite3_bind_null(stmt, idx)
-        case let v as Double:
-            sqlite3_bind_double(stmt, idx, v)
-        case let v as Float:
-            sqlite3_bind_double(stmt, idx, Double(v))
-        case let v as Int64:
-            sqlite3_bind_int64(stmt, idx, v)
-        case let v as Int:
-            sqlite3_bind_int64(stmt, idx, Int64(v))
-        case let v as Bool:
-            sqlite3_bind_int(stmt, idx, v ? 1 : 0)
+        case let v as NSArray:
+            // A JS plain-number array arrives here when the caller passed Array.from(uint8Array).
+            // Treat every element as a BLOB byte (0-255).
+            var bytes = [UInt8]()
+            bytes.reserveCapacity(v.count)
+            for item in v {
+                guard let n = item as? NSNumber else {
+                    throw SQLiteError.execute("BLOB value at index \(idx) contains a non-number")
+                }
+                bytes.append(UInt8(clamping: n.intValue))
+            }
+            if bytes.isEmpty {
+                // sqlite3_bind_blob with a nil pointer (empty Data) binds NULL, not empty BLOB.
+                sqlite3_bind_zeroblob(stmt, idx, 0)
+            } else {
+                let blobData = Data(bytes)
+                blobData.withUnsafeBytes { ptr in
+                    _ = sqlite3_bind_blob(stmt, idx, ptr.baseAddress, Int32(blobData.count), SQLITE_TRANSIENT)
+                }
+            }
+        case let v as NSNumber:
+            if CFGetTypeID(v) == CFBooleanGetTypeID() {
+                sqlite3_bind_int(stmt, idx, v.boolValue ? 1 : 0)
+            } else {
+                let t = String(cString: v.objCType)
+                if t == "d" || t == "f" {
+                    let d = v.doubleValue
+                    // Capacitor's JSON bridge encodes JS integers as Double-backed NSNumber
+                    // (objCType = "d"), losing integer type information. Restore it by treating
+                    // whole-number doubles as INT64 — consistent with JS Number.isInteger()
+                    // semantics and Android/Web/Electron behaviour.
+                    if !d.isNaN && !d.isInfinite && d == d.rounded(.towardZero)
+                        && d >= Double(Int64.min) && d <= Double(Int64.max) {
+                        sqlite3_bind_int64(stmt, idx, Int64(d))
+                    } else {
+                        sqlite3_bind_double(stmt, idx, d)
+                    }
+                } else {
+                    sqlite3_bind_int64(stmt, idx, v.int64Value)
+                }
+            }
         case let v as String:
             sqlite3_bind_text(stmt, idx, v, -1, SQLITE_TRANSIENT)
         case let v as Data:
-            v.withUnsafeBytes { ptr in
-                _ = sqlite3_bind_blob(stmt, idx, ptr.baseAddress, Int32(v.count), SQLITE_TRANSIENT)
+            if v.isEmpty {
+                sqlite3_bind_zeroblob(stmt, idx, 0)
+            } else {
+                v.withUnsafeBytes { ptr in
+                    _ = sqlite3_bind_blob(stmt, idx, ptr.baseAddress, Int32(v.count), SQLITE_TRANSIENT)
+                }
             }
         case let v as [UInt8]:
-            let d = Data(v)
-            d.withUnsafeBytes { ptr in
-                _ = sqlite3_bind_blob(stmt, idx, ptr.baseAddress, Int32(d.count), SQLITE_TRANSIENT)
+            if v.isEmpty {
+                sqlite3_bind_zeroblob(stmt, idx, 0)
+            } else {
+                let d = Data(v)
+                d.withUnsafeBytes { ptr in
+                    _ = sqlite3_bind_blob(stmt, idx, ptr.baseAddress, Int32(d.count), SQLITE_TRANSIENT)
+                }
             }
         default:
             throw SQLiteError.execute("Unsupported bind value type at index \(idx)")
@@ -203,8 +247,15 @@ enum SQLiteHelpers {
             case SQLITE_TEXT:
                 row[name] = sqlite3_column_text(stmt, i).map { String(cString: $0) } ?? NSNull()
             case SQLITE_BLOB:
-                if let ptr = sqlite3_column_blob(stmt, i) {
-                    row[name] = Array(Data(bytes: ptr, count: Int(sqlite3_column_bytes(stmt, i))))
+                let byteCount = Int(sqlite3_column_bytes(stmt, i))
+                if byteCount == 0 {
+                    // sqlite3_column_blob() returns NULL for zero-length blobs, but the
+                    // column type is SQLITE_BLOB (not SQLITE_NULL), so distinguish from
+                    // SQL NULL by returning the sentinel with empty base64 → Uint8Array(0).
+                    row[name] = BLOB_PREFIX
+                } else if let ptr = sqlite3_column_blob(stmt, i) {
+                    let d = Data(bytes: ptr, count: byteCount)
+                    row[name] = BLOB_PREFIX + d.base64EncodedString()
                 } else {
                     row[name] = NSNull()
                 }

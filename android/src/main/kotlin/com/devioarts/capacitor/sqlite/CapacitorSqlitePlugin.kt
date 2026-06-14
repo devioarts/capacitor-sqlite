@@ -1,5 +1,6 @@
 package com.devioarts.capacitor.sqlite
 
+import android.util.Base64
 import com.getcapacitor.JSArray
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
@@ -275,7 +276,7 @@ class CapacitorSqlitePlugin : Plugin() {
                     for ((key, value) in row) {
                         when (value) {
                             null         -> obj.put(key, JSONObject.NULL)
-                            is ByteArray -> obj.put(key, value.map { it.toInt() and 0xFF })
+                            is ByteArray -> obj.put(key, SQLiteHelpers.BLOB_PREFIX + Base64.encodeToString(value, Base64.NO_WRAP))
                             else         -> obj.put(key, value)
                         }
                     }

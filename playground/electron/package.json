@@ -1,0 +1,31 @@
+{
+  "name": "cap-sqlite",
+  "version": "0.0.1",
+  "type": "commonjs",
+  "main": "dist/main.cjs",
+  "scripts": {
+    "build:main": "esbuild main.ts --bundle --platform=node --external:electron --external:electron-updater --sourcemap --outfile=dist/main.cjs",
+    "build:preload": "esbuild preload.ts --bundle --platform=node --external:electron --sourcemap --outfile=dist/preload.cjs",
+    "build": "npm run build:main && npm run build:preload",
+    "watch": "concurrently \"npm run build:main -- --watch\" \"npm run build:preload -- --watch\"",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder",
+    "dist:mac": "npm run build && electron-builder --mac --x64 --arm64",
+    "dist:win": "npm run build && electron-builder --win --x64",
+    "dist:win:arm64": "npm run build && electron-builder --win --arm64",
+    "dist:linux": "npm run build && electron-builder --linux --x64",
+    "typecheck": "tsc --noEmit",
+    "electron:dev": "concurrently \"vite\" \"npm run watch\" \"wait-on http://localhost:5173 && electron electron/main.cjs\""
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "concurrently": "^10.0.3",
+    "esbuild": "^0.28.1",
+    "electron": "42.4.0",
+    "electron-builder": "^26.0.0",
+    "wait-on": "^9.0.0"
+  }
+}

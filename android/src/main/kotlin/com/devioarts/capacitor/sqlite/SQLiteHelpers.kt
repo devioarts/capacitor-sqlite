@@ -6,6 +6,10 @@ import android.database.sqlite.SQLiteStatement
 
 internal object SQLiteHelpers {
 
+    // Sentinel prefix for BLOB columns returned from queries.
+    // Must stay in sync with BLOB_PREFIX in SQLiteHelpers.swift and index.ts.
+    const val BLOB_PREFIX = "blob64:"
+
     // MARK: - Lifecycle
 
     fun open(path: String, readonly: Boolean = false): SQLiteDatabase {
@@ -34,6 +38,11 @@ internal object SQLiteHelpers {
             val stmtType = statementType(sql)
             if (isInsertLike(stmtType)) {
                 val lastId = stmt.executeInsert()
+                // NOTE: executeInsert() returns the last inserted rowid but NOT the number of
+                // affected rows, so `changes` is reported as 1 for any successful insert. A
+                // multi-row INSERT (VALUES (..),(..) or INSERT…SELECT) therefore under-reports
+                // `changes` here, unlike iOS/Web/Electron which return the real count.
+                // `lastInsertId` is correct in all cases. See README "Cross-platform caveats".
                 return RunResult(changes = if (lastId >= 0L) 1L else 0L, lastInsertId = if (lastId >= 0L) lastId else 0L)
             }
             val changes = stmt.executeUpdateDelete().toLong()
@@ -44,25 +53,74 @@ internal object SQLiteHelpers {
     }
 
     // MARK: - SELECT
-    // NOTE: Android rawQuery() only accepts String[] parameters.
-    // BLOB (ByteArray) parameters cannot be passed directly — they are converted to their
-    // string representation which is not meaningful. Use run() with a prepared statement
-    // for BLOB parameters in DML; for SELECTs filtering on BLOBs, use hex() comparisons.
+    // NOTE: Android rawQuery() only accepts String[] parameters, which causes all bound
+    // values to be stored as TEXT in SQLite. To preserve type semantics (TYPEOF(?) = "integer"
+    // for numbers/booleans, not "text"), non-string non-null primitives are inlined as SQL
+    // literals before rawQuery is called. Only String and null values are passed as rawQuery args.
 
     fun query(db: SQLiteDatabase, sql: String, values: List<Any?>): List<Map<String, Any?>> {
-        val strArgs: Array<String?>? = if (values.isEmpty()) null
-            else values.map { v ->
+        val (finalSql, finalValues) = injectLiterals(sql, values)
+        val strArgs: Array<String?>? = if (finalValues.isEmpty()) null
+            else finalValues.map { v ->
                 when (v) {
-                    null        -> null
-                    is Boolean  -> if (v) "1" else "0"
-                    is String   -> v
-                    is Number   -> v.toString()
-                    is ByteArray -> throw IllegalArgumentException("BLOB query parameters are not supported on Android")
-                    is List<*>  -> throw IllegalArgumentException("BLOB query parameters are not supported on Android")
-                    else        -> throw IllegalArgumentException("Unsupported query value type: ${v::class.java.name}")
+                    null     -> null
+                    is String -> v
+                    else     -> throw IllegalArgumentException("Unsupported query value type: ${v?.javaClass?.name}")
                 }
             }.toTypedArray()
-        return db.rawQuery(sql, strArgs).use { extractRows(it) }
+        return db.rawQuery(finalSql, strArgs).use { extractRows(it) }
+    }
+
+    // Replace '?' placeholders with inline SQL literals for all non-string, non-null types.
+    // BLOBs → X'hex', Booleans → 0/1, Numbers → numeric literal.
+    // String and null values remain as '?' and are passed through rawQuery's String[] args.
+    // Handles single-quoted and double-quoted strings to avoid false '?' matches.
+    private fun injectLiterals(sql: String, values: List<Any?>): Pair<String, List<Any?>> {
+        if (values.none { it is List<*> || it is Boolean || it is Number }) return sql to values
+        val out = StringBuilder(sql.length + 32)
+        val remaining = mutableListOf<Any?>()
+        var paramIdx = 0
+        var i = 0
+        while (i < sql.length) {
+            val ch = sql[i]
+            when (ch) {
+                '\'', '"' -> {
+                    val quote = ch
+                    out.append(ch); i++
+                    while (i < sql.length) {
+                        val c2 = sql[i]
+                        out.append(c2); i++
+                        if (c2 == quote) {
+                            if (i < sql.length && sql[i] == quote) {
+                                out.append(sql[i]); i++  // escaped quote — consume and continue
+                            } else break
+                        }
+                    }
+                }
+                '?' -> {
+                    if (paramIdx < values.size) {
+                        val v = values[paramIdx++]
+                        when {
+                            v is List<*> -> {
+                                val bytes = byteArrayFromList(v, paramIdx)
+                                out.append("X'")
+                                bytes.forEach { b -> out.append("%02x".format(b.toInt() and 0xFF)) }
+                                out.append('\'')
+                            }
+                            v is Boolean -> out.append(if (v) "1" else "0")
+                            v is Long || v is Int -> out.append(v.toString())
+                            v is Double || v is Float -> out.append(v.toString())
+                            else -> { out.append('?'); remaining.add(v) }
+                        }
+                    } else {
+                        out.append('?')
+                    }
+                    i++
+                }
+                else -> { out.append(ch); i++ }
+            }
+        }
+        return out.toString() to remaining
     }
 
     // MARK: - Transactions

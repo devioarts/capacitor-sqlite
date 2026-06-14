@@ -170,6 +170,12 @@ In-memory databases are not persisted. They are destroyed when `close()` is call
 | `null`       | NULL                |
 | `Uint8Array` | BLOB                |
 
+For BLOB parameters prefer `Uint8Array`. A plain `number[]` (each item `0–255`) is also
+accepted by the native (iOS/Android) and Electron implementations, but the **web**
+implementation accepts `Uint8Array` only. Because the Capacitor bridge does not transport
+typed arrays natively, verify your BLOB round-trip on each target platform before relying
+on it in production.
+
 ## Platform notes
 
 |              | iOS                        | Android                   | Web                                   | Electron                  |
@@ -178,6 +184,32 @@ In-memory databases are not persisted. They are destroyed when `close()` is call
 | WAL mode     | ✓                          | ✓                         | Not supported by sqlite-wasm          | ✓                         |
 | `:memory:`   | ✓                          | ✓                         | ✓                                     | ✓                         |
 | Min version  | iOS 15                     | API 21                    | Chrome 86 / Firefox 111 / Safari 15.2 | Electron 32 (Node 24)     |
+
+### Cross-platform caveats
+
+A few behaviours differ between platforms. None block normal use, but they matter for
+correctness-sensitive code:
+
+- **One statement per `execute()` entry.** Each element of `statements[]` should be a
+  single SQL statement. Multiple statements packed into one string (`"INSERT …; INSERT …"`)
+  run fully only on iOS and Web; on Android and Electron only the first statement executes.
+- **`run()` `changes` for multi-row inserts on Android.** A single `INSERT` that adds
+  several rows (`VALUES (..),(..)` or `INSERT … SELECT`) reports `changes: 1` on Android,
+  while iOS/Web/Electron report the real row count. `lastInsertId` is correct everywhere.
+- **BLOB parameters in `query()` are unsupported on Android.** Binding a `Uint8Array` /
+  `number[]` as a `?` value in a `SELECT` throws on Android (the platform's `rawQuery` only
+  accepts string args). It works on iOS/Web/Electron. To filter by a BLOB on Android, compare
+  with `hex()` and a hex string literal/parameter. BLOB binding in `run()`/`runBatch()` works
+  on all platforms.
+- **Numeric storage type on iOS.** Numbers are bound as SQLite REAL on iOS. Columns declared
+  `INTEGER`/`NUMERIC` convert the value back to an integer via affinity (so typed schemas are
+  unaffected), but columns with no declared type retain the REAL type. Other platforms store
+  integer-valued numbers as INTEGER.
+- **Call ordering.** On iOS/Android/Electron, concurrent un-awaited calls to the same
+  database are serialized for safety but not guaranteed to run in call order. Always `await`
+  each call before issuing the next — especially around `beginTransaction` /
+  `commitTransaction`. (The web implementation additionally enforces FIFO ordering per
+  database.)
 
 ## API
 
@@ -342,6 +374,8 @@ execute(options: ExecuteOptions) => Promise<SqliteResult<{ changes: number; }>>
 Execute one or more SQL statements sequentially.
 Use for DDL (`CREATE TABLE`, …) or bulk DML without params.
 `statements` must be a non-empty array.
+**Each array element must be a single SQL statement** — multiple semicolon-separated
+statements in one string work on iOS/Web but fail on Android/Electron.
 Statements run in a single transaction by default; pass
 `transaction: false` to keep prior successful statements if a later one fails.
 When called inside `beginTransaction()`, pass `transaction: false`;
@@ -366,8 +400,10 @@ Execute a single parameterized statement.
 Returns the number of affected rows and the row ID inserted by this statement.
 `lastInsertId` is `0` for UPDATE, DELETE, statements that insert no row,
 and other non-INSERT/REPLACE statements.
-`lastInsertId` is a JavaScript number and is precise up to
-`Number.MAX_SAFE_INTEGER`.
+`lastInsertId` is a JavaScript number and is precise up to `Number.MAX_SAFE_INTEGER`.
+**Android caveat:** a multi-value `INSERT INTO t VALUES (…),(…)` always reports
+`changes = 1` regardless of the number of inserted rows; other platforms report
+the real count. Single-row inserts are correct on all platforms.
 
 | Param         | Type                                              |
 | ------------- | ------------------------------------------------- |
@@ -386,6 +422,9 @@ runBatch(options: RunBatchOptions) => Promise<SqliteResult<{ changes: number; la
 
 Execute multiple parameterized statements in a single native call.
 `lastInsertId` is always `0`; use `run()` when you need the inserted row ID.
+**Android caveat:** a multi-value `INSERT INTO t VALUES (…),(…)` always reports
+`changes = 1` regardless of the number of inserted rows; other platforms report
+the real count.
 When called inside `beginTransaction()`, pass `transaction: false`;
 nested transactions return TRANSACTION_FAILED.
 
