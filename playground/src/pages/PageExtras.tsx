@@ -7,10 +7,14 @@ import { useLogger } from '../components/Logger.tsx';
 const DB = 'extras_demo';
 const SCOPE = 'extras';
 
+// Fallback path shown in the UI — replace with a real absolute path on native.
+const CUSTOM_DIR_PLACEHOLDER = '/tmp/my_custom_dir';
+
 export const PageExtras: React.FC = () => {
   const log = useLogger();
   const [isSetup, setIsSetup] = useState(false);
   const [blobHex, setBlobHex] = useState('deadbeef01020304');
+  const [customDir, setCustomDir] = useState(CUSTOM_DIR_PLACEHOLDER);
 
   // ── lifecycle ──────────────────────────────────────────────────────────────
   const setup = async () => {
@@ -206,6 +210,36 @@ export const PageExtras: React.FC = () => {
     else log.error(SCOPE, 'query failed', r.error);
   };
 
+  // ── custom directory ───────────────────────────────────────────────────────
+  const customDirectoryTest = async () => {
+    const dbName = 'custom_dir_test';
+    const open = await CapacitorSqlite.open({ database: dbName, directory: customDir });
+    if (!open.success) {
+      log.error(SCOPE, `open with directory="${customDir}" failed`, open.error);
+      return;
+    }
+    log.info(SCOPE, `Opened "${dbName}" in "${customDir}" ✓`);
+
+    const create = await CapacitorSqlite.execute({
+      database: dbName,
+      statements: ['CREATE TABLE IF NOT EXISTS t (v TEXT)'],
+    });
+    if (!create.success) { log.error(SCOPE, 'CREATE TABLE failed', create.error); return; }
+
+    const insert = await CapacitorSqlite.run({
+      database: dbName,
+      statement: "INSERT INTO t VALUES ('hello from custom dir')",
+    });
+    if (!insert.success) { log.error(SCOPE, 'INSERT failed', insert.error); return; }
+
+    const q = await CapacitorSqlite.query({ database: dbName, statement: 'SELECT * FROM t' });
+    if (q.success) log.info(SCOPE, `custom dir DB rows`, q.data.rows);
+    else log.error(SCOPE, 'query failed', q.error);
+
+    await CapacitorSqlite.close({ database: dbName });
+    log.info(SCOPE, `Closed "${dbName}" ✓`);
+  };
+
   // ── getVersion on closed DB ────────────────────────────────────────────────
   const versionOnClosed = async () => {
     const r = await CapacitorSqlite.getVersion({ database: 'definitely_closed_' + Date.now() });
@@ -267,6 +301,23 @@ export const PageExtras: React.FC = () => {
           <Button type="yellow" onClick={memoryIsolation}>:memory: isolation</Button>
           <Button type="yellow" onClick={readonlyEnforcement}>Readonly enforcement</Button>
         </div>
+      </div>
+
+      <div className="space-y-2">
+        <h3 className="text-sm font-semibold text-slate-700">Custom directory</h3>
+        <Label label="Absolute path (iOS/Android only — ignored on web)">
+          <Input
+            value={customDir}
+            onChange={(e) => setCustomDir(e.target.value)}
+            placeholder="/absolute/path/to/dir"
+          />
+        </Label>
+        <Button type="yellow" onClick={customDirectoryTest}>
+          Open DB in custom directory
+        </Button>
+        <p className="text-xs text-slate-500">
+          Creates <code>&lt;directory&gt;/custom_dir_test.db</code>. On web this option is ignored — OPFS does not support custom paths.
+        </p>
       </div>
     </div>
   );

@@ -86,6 +86,32 @@ console.log('Rows:', queried.data.rows);
 await CapacitorSqlite.close({ database: 'myapp' });
 ```
 
+## Database file location
+
+By default the plugin stores each database in a per-platform directory:
+
+| Platform | Default path |
+| -------- | ------------ |
+| iOS | `<Documents>/CapacitorSQLite/<name>.db` |
+| Android | `<filesDir>/CapacitorSQLite/<name>.db` |
+| Web | OPFS — `file:<name>.db?vfs=opfs` (origin-scoped, no custom path support) |
+
+The directory is created automatically if it does not exist.
+
+To store a database in a different location on iOS or Android, pass an absolute path via the `directory` option:
+
+```ts
+await CapacitorSqlite.open({
+  database: 'myapp',
+  directory: '/path/to/custom/dir', // iOS/Android only — ignored on web
+});
+// Resulting file: /path/to/custom/dir/myapp.db
+```
+
+> **Web:** the `directory` option has no effect on web. OPFS is origin-scoped and does not expose a filesystem path.
+
+> **`:memory:`:** the `directory` option is ignored for in-memory databases.
+
 ## Migrations
 
 `open()` reads `PRAGMA user_version`, then runs every migration whose `version` exceeds the stored value (ascending order). Each migration runs in its own transaction — if it fails the transaction is rolled back and `open()` returns a failure result. Migrations already applied on previous launches are skipped automatically.
@@ -537,7 +563,8 @@ rollbackTransaction(options: { database: string; }) => Promise<SqliteResult>
 | Prop             | Type                     | Description                                                                                                                                                                                                                                                                            |
 | ---------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **`database`**   | <code>string</code>      | Database file name (without extension).                                                                                                                                                                                                                                                |
-| **`readonly`**   | <code>boolean</code>     |                                                                                                                                                                                                                                                                                        |
+| **`readonly`**   | <code>boolean</code>     | When `true`, opens the database in read-only mode. Write operations (`execute`, `run`, migrations) are rejected and the underlying SQLite file is opened with `SQLITE_OPEN_READONLY` (iOS/Web) or `OPEN_READONLY` (Android). Attempting to reopen an already-open database with a different `readonly` value returns `DB_ALREADY_OPEN`. |
+| **`directory`**  | <code>string</code>      | Absolute path to the directory where the database file is stored. If omitted the plugin uses its default location (`<Documents>/CapacitorSQLite/` on iOS, `<filesDir>/CapacitorSQLite/` on Android). The directory is created automatically if it does not exist. Ignored on web (OPFS does not support custom paths) and for `:memory:` databases. |
 | **`migrations`** | <code>Migration[]</code> | When provided the plugin reads `PRAGMA user_version`, then runs every migration whose `version` is greater than the stored value, in order. After all migrations complete it writes the highest version back. Returns MIGRATION_FAILED if any entry is malformed or a statement fails. |
 
 

@@ -13,6 +13,17 @@ export interface OpenOptions {
   database: string;
   readonly?: boolean;
   /**
+   * Absolute path to the directory where the database file is stored.
+   * If omitted, the plugin uses its default location per platform:
+   * - **iOS**: `<Documents>/CapacitorSQLite/`
+   * - **Android**: `<filesDir>/CapacitorSQLite/`
+   * - **Web**: ignored — OPFS does not support custom paths.
+   *
+   * The directory is created automatically if it does not exist.
+   * Has no effect on `:memory:` databases.
+   */
+  directory?: string;
+  /**
    * When provided the plugin reads `PRAGMA user_version`, then runs every
    * migration whose `version` is greater than the stored value, in order.
    * After all migrations complete it writes the highest version back.

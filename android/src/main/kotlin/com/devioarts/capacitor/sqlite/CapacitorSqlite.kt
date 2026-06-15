@@ -14,11 +14,11 @@ internal class CapacitorSqlite(private val context: Context) {
     // MARK: - open
 
     @Throws(Exception::class)
-    fun open(database: String, readonly: Boolean, migrations: List<Map<String, Any?>>) {
+    fun open(database: String, readonly: Boolean, directory: String?, migrations: List<Map<String, Any?>>) {
         require(database == ":memory:" || database.matches(Regex("^[A-Za-z0-9_-]+\$"))) {
             "Invalid database name '$database'. Use only A–Z, a–z, 0–9, _ or -"
         }
-        val path = if (database == ":memory:") ":memory:" else databasePath(database)
+        val path = if (database == ":memory:") ":memory:" else databasePath(database, directory)
         // Throws on malformed entries — no silent drops.
         val entries = parseMigrations(migrations)
 
@@ -126,8 +126,8 @@ internal class CapacitorSqlite(private val context: Context) {
         return db
     }
 
-    private fun databasePath(name: String): String {
-        val dir = File(context.filesDir, "CapacitorSQLite")
+    private fun databasePath(name: String, directory: String?): String {
+        val dir = if (directory != null) File(directory) else File(context.filesDir, "CapacitorSQLite")
         dir.mkdirs()
         return File(dir, "$name.db").absolutePath
     }

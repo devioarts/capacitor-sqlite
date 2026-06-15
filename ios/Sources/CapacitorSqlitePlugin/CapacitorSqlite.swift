@@ -15,11 +15,11 @@ final class CapacitorSqlite {
 
     // MARK: - open
 
-    func open(database: String, readonly: Bool, migrations: [[String: Any]]) throws {
+    func open(database: String, readonly: Bool, directory: String? = nil, migrations: [[String: Any]]) throws {
         guard database == ":memory:" || database.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil else {
             throw CapacitorSqliteError.failed(message: "Invalid database name '\(database)'. Use only A–Z, a–z, 0–9, _ or -")
         }
-        let path = database == ":memory:" ? ":memory:" : try databasePath(name: database)
+        let path = database == ":memory:" ? ":memory:" : try databasePath(name: database, directory: directory)
         // Throws on malformed entries — no silent drops.
         let entries = try parseMigrations(migrations)
 
@@ -211,12 +211,17 @@ final class CapacitorSqlite {
         return inst
     }
 
-    private func databasePath(name: String) throws -> String {
+    private func databasePath(name: String, directory: String? = nil) throws -> String {
         let fileManager = FileManager.default
-        guard let docs = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
-            throw CapacitorSqliteError.failed(message: "Cannot resolve Documents directory")
+        let dir: URL
+        if let directory {
+            dir = URL(fileURLWithPath: directory, isDirectory: true)
+        } else {
+            guard let docs = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
+                throw CapacitorSqliteError.failed(message: "Cannot resolve Documents directory")
+            }
+            dir = docs.appendingPathComponent("CapacitorSQLite", isDirectory: true)
         }
-        let dir = docs.appendingPathComponent("CapacitorSQLite", isDirectory: true)
         if !fileManager.fileExists(atPath: dir.path) {
             try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
         }

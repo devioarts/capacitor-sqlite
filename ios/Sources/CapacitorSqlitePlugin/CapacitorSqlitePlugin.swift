@@ -86,6 +86,7 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         let readonly   = call.getBool("readonly") ?? false
+        let directory  = call.getString("directory")
         let migrations: [[String: Any]]
         if call.options["migrations"] != nil {
             guard let rawMigrations = call.getArray("migrations") else {
@@ -104,7 +105,7 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             do {
-                try self.impl.open(database: database, readonly: readonly, migrations: migrations)
+                try self.impl.open(database: database, readonly: readonly, directory: directory, migrations: migrations)
                 self.success(call)
             } catch CapacitorSqliteError.failed(let msg) {
                 let code = self.errorCode(for: msg, fallback: msg.contains("Migration") ? "MIGRATION_FAILED" : "OPEN_FAILED")

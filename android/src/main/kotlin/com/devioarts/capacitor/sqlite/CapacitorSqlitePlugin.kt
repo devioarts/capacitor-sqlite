@@ -72,6 +72,7 @@ class CapacitorSqlitePlugin : Plugin() {
         val database = call.getString("database")
             ?: return failure(call, "INVALID_PARAMS", "'database' is required", "open")
         val readonly = call.getBoolean("readonly", false) ?: false
+        val directory = call.getString("directory")
         val migrations = try {
             jsonArrayToListOfMaps(call.getArray("migrations"), "migrations")
         } catch (e: IllegalArgumentException) {
@@ -80,7 +81,7 @@ class CapacitorSqlitePlugin : Plugin() {
 
         bridge.execute {
             try {
-                impl.open(database, readonly, migrations)
+                impl.open(database, readonly, directory, migrations)
                 success(call)
             } catch (e: Exception) {
                 val code = if (e.message?.contains("Migration") == true) "MIGRATION_FAILED" else "OPEN_FAILED"
