@@ -18,3 +18,4 @@ dist-ssr
 # Capacitor generated
 android
 ios
+electron
