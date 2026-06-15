@@ -4,12 +4,16 @@
 
 |  | Count | Status |
 |--|-------|--------|
-| **Automated** | 341 tests · 70 groups | ✅ All passing on iOS · Android · Web · Electron |
+| **Automated** | 359 tests · 72 groups | ✅ All passing on iOS · Android · Web · Electron |
 | **Manual** | 11 scenarios | 🔲 Require OS-level control or native tooling |
 
 Tests are part of the example app (`playground/`).  
 Build and launch it on a target platform, open the **Test Suite** tab, and press **Run All**.  
 Throughput and latency benchmarks run separately from the **Load Tests** tab (10 scenarios).
+
+`npm run verify` checks that the plugin builds for the supported targets. The full
+cross-platform behavioral suite above is run from the playground app on each target
+platform.
 
 ---
 
@@ -31,6 +35,7 @@ Platform-specific quirks are documented in [Platform Notes](#platform-notes).
 | Transactions | tx-01..08 | begin/commit/rollback · nesting guard · visibility within txn |
 | Migrations | mig-01..09 | v1 apply · sequential · idempotence · failure isolation · ordering |
 | Metadata | gv-01..04 | `getVersion` · `vacuum` · `getSchemaVersion` |
+| Directory | dir-01..03 | invalid enum · all logical directories · same DB/different directory guard |
 
 ### Data Types
 
@@ -79,6 +84,7 @@ Platform-specific quirks are documented in [Platform Notes](#platform-notes).
 | Quote Semantics | quote-01..02 | single-quote = string · double-quote = identifier · backtick extension |
 | Column Names | colname-01..03 | space in name · reserved keyword · Unicode characters |
 | Semicolons & Comments | mstmt-01..05 | trailing `;` · `--` inline · `/* */` block · multiple statements |
+| Query Placeholders | qph-01..13 | anonymous `?` typing · comments · quoted identifiers · escaped strings · BLOBs · expressions · Android unsupported forms |
 
 ### PRAGMA & Configuration
 
@@ -115,7 +121,7 @@ Platform-specific quirks are documented in [Platform Notes](#platform-notes).
 | Recovery | rec-01..05 | DB usable after run failure · rollback · syntax error · missing table · 3 consecutive errors |
 | Concurrency | cc-01..05 | 10 parallel open · 10 parallel INSERT · 10 parallel query · rapid open/close · batch + query |
 | Multi-DB | mdb-01..05 | two DBs simultaneously · `:memory:` lifecycle · cross-txn isolation · independent close |
-| Readonly | ro-01..05 | write rejected · read allowed · `execute`/`vacuum` rejected · `getSchemaVersion` allowed |
+| Readonly | ro-01..07 | write rejected · read allowed · `execute`/`runBatch`/`vacuum`/transaction rejected · `getSchemaVersion` allowed |
 
 ### Scale & Real-world
 
@@ -159,9 +165,10 @@ precise timing control, or native profiling tools.
 | `sqlite3_column_blob()` returns NULL for zero-length BLOBs | iOS | blob-03 |
 | `:memory:` DB survives `close()` due to the connection pool | Android | mdb-02 (skip) |
 | `compileStatement` does not support SELECT | Android | run-08 (skip) |
-| `rawQuery(String[])` binds all values as TEXT — fixed by inlining numeric/boolean literals | Android | bool-02 |
+| `rawQuery(String[])` binds all values as TEXT — fixed by scanning anonymous `?` placeholders and inlining typed literals | Android | qph-01..13 |
 | `node:sqlite` stores all JS numbers as REAL — fixed by using `BigInt` for integers | Electron | run-05 · bool-02 |
-| Web WASM does not enforce readonly mode on write operations | Web | ro-01, ro-03, ro-04 (skip) |
+| `directory` accepts logical locations only (`default`, `documents`, `library`, `cache`) | All | manual review · extras tab |
+| `cache` locations are not intended for cloud backup and may be purged by the OS | iOS · Android · Electron | manual review |
 | `NOT IN (…, NULL)` returns no rows — SQL NULL semantics | All | null-07 |
 | Division by zero returns NULL (not an error) | All | cast-05 |
 | Multiple NULLs in a UNIQUE column are allowed | All | null-05 |

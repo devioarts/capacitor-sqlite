@@ -59,6 +59,7 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
 
     private func errorCode(for message: String, fallback: String) -> String {
         if message.contains("not open") { return "DB_NOT_OPEN" }
+        if message.contains("Invalid directory") { return "INVALID_PARAMS" }
         if message.contains("Invalid database name") { return "INVALID_NAME" }
         if message.contains("already open") { return "DB_ALREADY_OPEN" }
         if message.contains("transaction is already active") { return "TRANSACTION_FAILED" }

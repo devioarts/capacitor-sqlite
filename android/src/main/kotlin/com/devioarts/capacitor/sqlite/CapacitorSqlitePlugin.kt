@@ -43,6 +43,11 @@ class CapacitorSqlitePlugin : Plugin() {
         val message = e.message.orEmpty()
         return when {
             message.contains("not open") -> "DB_NOT_OPEN"
+            message.contains("Invalid directory") -> "INVALID_PARAMS"
+            message.contains("placeholder") -> "INVALID_PARAMS"
+            message.contains("bind values") -> "INVALID_PARAMS"
+            message.contains("Unsupported query value type") -> "INVALID_PARAMS"
+            message.contains("Numeric bind value") -> "INVALID_PARAMS"
             message.contains("Invalid database name") -> "INVALID_NAME"
             message.contains("already open") -> "DB_ALREADY_OPEN"
             message.contains("transaction is already active") -> "TRANSACTION_FAILED"

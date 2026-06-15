@@ -14,13 +14,13 @@ import type {
   QueryOptions,
   RunBatchOptions,
   RunOptions,
+  SqliteDirectory,
   SqliteErrorCode,
   SqliteFailure,
   SqlitePlatform,
   SqliteResult,
   SqliteSuccess,
 } from '../../src/definitions';
-
 
 type DatabaseSync = InstanceType<typeof SqliteType.DatabaseSync>;
 type SQLiteValue = string | number | boolean | null | Uint8Array | number[];
@@ -35,10 +35,12 @@ interface RunBatchItem {
 interface DatabaseEntry {
   db: DatabaseSync;
   readonly: boolean;
+  path: string;
   inTransaction: boolean;
 }
 
 const SAFE_DB_NAME = /^[A-Za-z0-9_-]+$/;
+const VALID_DIRECTORIES: readonly SqliteDirectory[] = ['default', 'documents', 'library', 'cache'];
 
 let sqliteModule: typeof SqliteType | null = null;
 let sqliteLoadError: Error | null = null;
@@ -95,6 +97,14 @@ function validateName(value: unknown): string {
     throw new SqliteRuntimeError('INVALID_NAME', `Invalid database name '${value}'. Use only A-Z, a-z, 0-9, _ or -`);
   }
   return value;
+}
+
+function validateDirectory(value: unknown): SqliteDirectory {
+  if (value === undefined) return 'default';
+  if (typeof value === 'string' && (VALID_DIRECTORIES as readonly string[]).includes(value)) {
+    return value as SqliteDirectory;
+  }
+  throw new SqliteRuntimeError('INVALID_PARAMS', "'directory' must be one of: default, documents, library or cache");
 }
 
 function validateSql(value: unknown, label: string): string {
@@ -195,6 +205,7 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
   // Coalesces concurrent open() calls for the same database.
   private pendingOpens = new Map<string, Promise<SqliteResult>>();
   private pendingOpenModes = new Map<string, boolean>();
+  private pendingOpenPaths = new Map<string, string>();
 
   // MARK: - Unified response helpers
 
@@ -228,53 +239,63 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
   async open(options: OpenOptions): Promise<SqliteResult> {
     let database: string;
     let readonly: boolean;
+    let dbPath: string;
     let migrations: Migration[];
     try {
       const opts = assertPlainObject(options, 'open');
       database = validateName(opts.database);
       readonly = opts.readonly === true;
+      const directory = validateDirectory(opts.directory);
+      dbPath = database === ':memory:' ? ':memory:' : this.databasePath(database, directory);
       migrations = validateMigrations(opts.migrations);
     } catch (err) {
       return this.err(errorCode(err, 'INVALID_NAME'), 'open', err);
     }
 
-    const openModeError = this.openModeError(database, readonly);
+    const openModeError = this.openModeError(database, readonly, dbPath);
     if (openModeError) return openModeError;
     if (this.databases.has(database)) return this.okEmpty();
 
     const pending = this.pendingOpens.get(database);
     if (pending) {
       const pendingReadonly = this.pendingOpenModes.get(database);
-      if (pendingReadonly !== readonly) {
+      const pendingPath = this.pendingOpenPaths.get(database);
+      if (pendingReadonly !== readonly || pendingPath !== dbPath) {
         return this.err(
           'DB_ALREADY_OPEN',
           'open',
           new Error(
-            `open: database '${database}' is already opening as ${pendingReadonly ? 'readonly' : 'read/write'}`,
+            `open: database '${database}' is already opening as ${pendingReadonly ? 'readonly' : 'read/write'} at '${pendingPath}'`,
           ),
         );
       }
       return pending;
     }
 
-    const openOp = this._doOpen(database, readonly, migrations).finally(() => {
+    const openOp = this._doOpen(database, readonly, dbPath, migrations).finally(() => {
       this.pendingOpens.delete(database);
       this.pendingOpenModes.delete(database);
+      this.pendingOpenPaths.delete(database);
     });
     this.pendingOpens.set(database, openOp);
     this.pendingOpenModes.set(database, readonly);
+    this.pendingOpenPaths.set(database, dbPath);
     return openOp;
   }
 
-  private async _doOpen(database: string, readonly: boolean, migrations: Migration[]): Promise<SqliteResult> {
+  private async _doOpen(
+    database: string,
+    readonly: boolean,
+    dbPath: string,
+    migrations: Migration[],
+  ): Promise<SqliteResult> {
     let db: DatabaseSync | null = null;
     try {
-      const openModeError = this.openModeError(database, readonly);
+      const openModeError = this.openModeError(database, readonly, dbPath);
       if (openModeError) return openModeError;
       if (this.databases.has(database)) return this.okEmpty();
 
       const sqlite = loadSqlite();
-      const dbPath = database === ':memory:' ? ':memory:' : this.databasePath(database);
       db = new sqlite.DatabaseSync(dbPath, {
         readOnly: readonly,
         enableForeignKeyConstraints: !readonly,
@@ -290,7 +311,7 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
         }
       }
 
-      this.databases.set(database, { db, readonly, inTransaction: false });
+      this.databases.set(database, { db, readonly, path: dbPath, inTransaction: false });
       db = null;
       return this.okEmpty();
     } catch (err) {
@@ -378,7 +399,9 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
     try {
       const opts = assertPlainObject(options, 'vacuum');
       const database = validateName(opts.database);
-      this.requireOpen(database, 'vacuum').exec('VACUUM');
+      const entry = this.requireOpenEntry(database, 'vacuum');
+      this.requireWritable(entry, database, 'vacuum', 'VACUUM_FAILED');
+      entry.db.exec('VACUUM');
       return this.okEmpty();
     } catch (err) {
       return this.err(errorCode(err, 'VACUUM_FAILED'), 'vacuum', err);
@@ -394,6 +417,7 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
       const statements = validateStatements(opts.statements);
       const transaction = opts.transaction !== false;
       const entry = this.requireOpenEntry(database, 'execute');
+      this.requireWritable(entry, database, 'execute', 'EXECUTE_FAILED');
       if (transaction && entry.inTransaction) {
         throw new SqliteRuntimeError('TRANSACTION_FAILED', `execute: a transaction is already active on '${database}'`);
       }
@@ -430,8 +454,9 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
       const database = validateName(opts.database);
       const statement = validateSql(opts.statement, 'statement');
       const values = convertValues(validateValues(opts.values, 'values'));
-      const db = this.requireOpen(database, 'run');
-      const result = db.prepare(statement).run(...values);
+      const entry = this.requireOpenEntry(database, 'run');
+      this.requireWritable(entry, database, 'run', 'EXECUTE_FAILED');
+      const result = entry.db.prepare(statement).run(...values);
       const changes = toNumber(result.changes);
       return this.ok({
         changes,
@@ -451,6 +476,7 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
       const set = validateRunBatchSet(opts.set);
       const transaction = opts.transaction !== false;
       const entry = this.requireOpenEntry(database, 'runBatch');
+      this.requireWritable(entry, database, 'runBatch', 'EXECUTE_FAILED');
       if (transaction && entry.inTransaction) {
         throw new SqliteRuntimeError(
           'TRANSACTION_FAILED',
@@ -506,6 +532,7 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
       const opts = assertPlainObject(options, 'beginTransaction');
       const database = validateName(opts.database);
       const entry = this.requireOpenEntry(database, 'beginTransaction');
+      this.requireWritable(entry, database, 'beginTransaction', 'TRANSACTION_FAILED');
       if (entry.inTransaction) {
         throw new SqliteRuntimeError(
           'TRANSACTION_FAILED',
@@ -588,9 +615,8 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
     }
   }
 
-  private databasePath(name: string): string {
-    const userData = app.getPath('userData') as string;
-    const dir = nodePath.join(userData, 'CapacitorSQLite');
+  private databasePath(name: string, directory: SqliteDirectory): string {
+    const dir = this.directoryPath(directory);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const resolved = nodePath.resolve(dir, `${name}.db`);
     const allowedPrefix = nodePath.resolve(dir) + nodePath.sep;
@@ -598,6 +624,16 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
       throw new SqliteRuntimeError('INVALID_NAME', `Invalid database path for '${name}'`);
     }
     return resolved;
+  }
+
+  private directoryPath(directory: SqliteDirectory): string {
+    if (directory === 'cache') {
+      return nodePath.join(app.getPath('temp') as string, 'capacitor-sqlite', 'CapacitorSQLite');
+    }
+    // `default`, `library`, and `documents` all use userData on Electron. The
+    // `documents` fallback keeps app databases out of the user's visible
+    // Documents folder while still accepting the shared directory enum.
+    return nodePath.join(app.getPath('userData') as string, 'CapacitorSQLite');
   }
 
   private requireOpen(name: string, context: string): DatabaseSync {
@@ -610,13 +646,21 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
     return entry;
   }
 
-  private openModeError(database: string, readonly: boolean): SqliteFailure | null {
+  private requireWritable(entry: DatabaseEntry, database: string, method: string, code: SqliteErrorCode): void {
+    if (entry.readonly) {
+      throw new SqliteRuntimeError(code, `${method}: database '${database}' is open in readonly mode`);
+    }
+  }
+
+  private openModeError(database: string, readonly: boolean, dbPath: string): SqliteFailure | null {
     const existing = this.databases.get(database);
-    if (!existing || existing.readonly === readonly) return null;
+    if (!existing || (existing.readonly === readonly && existing.path === dbPath)) return null;
     return this.err(
       'DB_ALREADY_OPEN',
       'open',
-      new Error(`open: database '${database}' is already open as ${existing.readonly ? 'readonly' : 'read/write'}`),
+      new Error(
+        `open: database '${database}' is already open as ${existing.readonly ? 'readonly' : 'read/write'} at '${existing.path}'`,
+      ),
     );
   }
 }

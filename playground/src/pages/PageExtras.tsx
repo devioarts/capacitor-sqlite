@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { CapacitorSqlite } from '@devioarts/capacitor-sqlite';
+import { CapacitorSqlite, type SqliteDirectory } from '@devioarts/capacitor-sqlite';
 import { Button } from '../components/Button.tsx';
 import { Input, Label } from '../components/Input.tsx';
 import { useLogger } from '../components/Logger.tsx';
@@ -7,14 +7,13 @@ import { useLogger } from '../components/Logger.tsx';
 const DB = 'extras_demo';
 const SCOPE = 'extras';
 
-// Fallback path shown in the UI — replace with a real absolute path on native.
-const CUSTOM_DIR_PLACEHOLDER = '/tmp/my_custom_dir';
+const DIRECTORY_OPTIONS: SqliteDirectory[] = ['default', 'library', 'documents', 'cache'];
 
 export const PageExtras: React.FC = () => {
   const log = useLogger();
   const [isSetup, setIsSetup] = useState(false);
   const [blobHex, setBlobHex] = useState('deadbeef01020304');
-  const [customDir, setCustomDir] = useState(CUSTOM_DIR_PLACEHOLDER);
+  const [customDir, setCustomDir] = useState<SqliteDirectory>('library');
 
   // ── lifecycle ──────────────────────────────────────────────────────────────
   const setup = async () => {
@@ -304,19 +303,25 @@ export const PageExtras: React.FC = () => {
       </div>
 
       <div className="space-y-2">
-        <h3 className="text-sm font-semibold text-slate-700">Custom directory</h3>
-        <Label label="Absolute path (iOS/Android only — ignored on web)">
-          <Input
+        <h3 className="text-sm font-semibold text-slate-700">Directory</h3>
+        <Label label="Logical location">
+          <select
             value={customDir}
-            onChange={(e) => setCustomDir(e.target.value)}
-            placeholder="/absolute/path/to/dir"
-          />
+            onChange={(e) => setCustomDir(e.target.value as SqliteDirectory)}
+            className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
+          >
+            {DIRECTORY_OPTIONS.map((value) => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ))}
+          </select>
         </Label>
         <Button type="yellow" onClick={customDirectoryTest}>
-          Open DB in custom directory
+          Open DB in directory
         </Button>
         <p className="text-xs text-slate-500">
-          Creates <code>&lt;directory&gt;/custom_dir_test.db</code>. On web this option is ignored — OPFS does not support custom paths.
+          Creates <code>custom_dir_test.db</code> in the selected logical location. Web uses OPFS for every option.
         </p>
       </div>
     </div>

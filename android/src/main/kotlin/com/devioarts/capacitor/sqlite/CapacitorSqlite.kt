@@ -1,6 +1,7 @@
 package com.devioarts.capacitor.sqlite
 
 import android.content.Context
+import android.os.Environment
 import java.io.File
 
 internal class CapacitorSqlite(private val context: Context) {
@@ -28,8 +29,8 @@ internal class CapacitorSqlite(private val context: Context) {
         val db = synchronized(this) {
             val existing = databases[database]
             if (existing != null) {
-                require(existing.readonly == readonly) {
-                    "open: '$database' is already open with a different readonly mode"
+                require(existing.readonly == readonly && existing.path == path) {
+                    "open: '$database' is already open with a different readonly mode or directory"
                 }
                 existing
             } else {
@@ -127,7 +128,18 @@ internal class CapacitorSqlite(private val context: Context) {
     }
 
     private fun databasePath(name: String, directory: String?): String {
-        val dir = if (directory != null) File(directory) else File(context.filesDir, "CapacitorSQLite")
+        // Keep this mapping aligned with OpenOptions.directory documentation.
+        // Raw paths are intentionally not accepted across the bridge.
+        val base = when (directory ?: "default") {
+            "default", "library" -> context.filesDir
+            "documents" -> context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
+                ?: File(context.filesDir, "Documents")
+            "cache" -> context.cacheDir
+            else -> throw IllegalArgumentException(
+                "Invalid directory '$directory'. Use default, documents, library or cache"
+            )
+        }
+        val dir = File(base, "CapacitorSQLite")
         dir.mkdirs()
         return File(dir, "$name.db").absolutePath
     }

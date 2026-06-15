@@ -9,6 +9,7 @@ import type {
   QueryOptions,
   RunBatchOptions,
   RunOptions,
+  SqliteDirectory,
   SqliteErrorCode,
   SqliteFailure,
   SqlitePlatform,
@@ -26,6 +27,7 @@ interface DbEntry {
 }
 
 const SAFE_DB_NAME = /^[A-Za-z0-9_-]+$/;
+const VALID_DIRECTORIES: readonly SqliteDirectory[] = ['default', 'documents', 'library', 'cache'];
 const WORKER_READY_TIMEOUT_MS = 10_000;
 
 class SqliteRuntimeError extends Error {
@@ -52,6 +54,14 @@ function validateName(value: unknown): string {
     throw new SqliteRuntimeError('INVALID_NAME', `Invalid database name '${value}'. Use only A-Z, a-z, 0-9, _ or -`);
   }
   return value;
+}
+
+function validateDirectory(value: unknown): SqliteDirectory {
+  if (value === undefined) return 'default';
+  if (typeof value === 'string' && (VALID_DIRECTORIES as readonly string[]).includes(value)) {
+    return value as SqliteDirectory;
+  }
+  throw new SqliteRuntimeError('INVALID_PARAMS', "'directory' must be one of: default, documents, library or cache");
 }
 
 function validateSql(value: unknown, label: string): string {
@@ -212,6 +222,9 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
       const opts = assertPlainObject(options, 'open');
       database = validateName(opts.database);
       readonly = opts.readonly === true;
+      // Web accepts the shared directory enum for API parity, but every value
+      // resolves to the origin-scoped OPFS database URL.
+      validateDirectory(opts.directory);
       migrations = validateMigrations(opts.migrations);
     } catch (err) {
       return this.err(errorCode(err, 'INVALID_NAME'), 'open', err);
@@ -389,6 +402,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
     return this.enqueue(database, async () => {
       try {
         const { entry, promiser } = this.requireOpen(database, 'vacuum');
+        this.requireWritable(entry, database, 'vacuum', 'VACUUM_FAILED');
         const { dbId } = entry;
         await execSql(promiser, dbId, 'VACUUM');
         return this.okEmpty();
@@ -415,6 +429,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
     return this.enqueue(database, async () => {
       try {
         const { entry, promiser } = this.requireOpen(database, 'execute');
+        this.requireWritable(entry, database, 'execute', 'EXECUTE_FAILED');
         if (transaction && entry.inTransaction) {
           throw new SqliteRuntimeError(
             'TRANSACTION_FAILED',
@@ -468,6 +483,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
     return this.enqueue(database, async () => {
       try {
         const { entry, promiser } = this.requireOpen(database, 'run');
+        this.requireWritable(entry, database, 'run', 'EXECUTE_FAILED');
         const { dbId } = entry;
         await execSql(promiser, dbId, statement, values);
         const [row] = await selectRows<{ c: number; id: number }>(
@@ -500,6 +516,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
     return this.enqueue(database, async () => {
       try {
         const { entry, promiser } = this.requireOpen(database, 'runBatch');
+        this.requireWritable(entry, database, 'runBatch', 'EXECUTE_FAILED');
         if (transaction && entry.inTransaction) {
           throw new SqliteRuntimeError(
             'TRANSACTION_FAILED',
@@ -573,6 +590,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
     return this.enqueue(database, async () => {
       try {
         const { entry, promiser } = this.requireOpen(database, 'beginTransaction');
+        this.requireWritable(entry, database, 'beginTransaction', 'TRANSACTION_FAILED');
         if (entry.inTransaction) {
           throw new SqliteRuntimeError(
             'TRANSACTION_FAILED',
@@ -679,6 +697,12 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
       throw new SqliteRuntimeError('UNKNOWN', `${context}: SQLite worker is not initialized for '${name}'`);
     }
     return { entry, promiser: this.promiser };
+  }
+
+  private requireWritable(entry: DbEntry, database: string, method: string, code: SqliteErrorCode): void {
+    if (entry.readonly) {
+      throw new SqliteRuntimeError(code, `${method}: database '${database}' is open in readonly mode`);
+    }
   }
 
   private openModeError(database: string, readonly: boolean): SqliteFailure | null {

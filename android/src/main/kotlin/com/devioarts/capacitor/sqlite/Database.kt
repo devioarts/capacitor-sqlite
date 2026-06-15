@@ -65,6 +65,7 @@ internal class Database(
     @Throws(Exception::class)
     fun execute(statements: List<String>, transaction: Boolean = true): Long = lock.withLock {
         val handle = requireOpen("execute")
+        requireWritable("execute")
         if (transaction && handle.inTransaction()) {
             throw IllegalStateException("execute: a transaction is already active on '$name'")
         }
@@ -87,6 +88,7 @@ internal class Database(
 
     @Throws(Exception::class)
     fun run(statement: String, values: List<Any?> = emptyList()): RunResult = lock.withLock {
+        requireWritable("run")
         SQLiteHelpers.run(requireOpen("run"), statement, values)
     }
 
@@ -95,6 +97,7 @@ internal class Database(
     @Throws(Exception::class)
     fun runBatch(set: List<Map<String, Any?>>, transaction: Boolean = true): RunResult = lock.withLock {
         val handle = requireOpen("runBatch")
+        requireWritable("runBatch")
 
         if (transaction && handle.inTransaction()) {
             throw IllegalStateException("runBatch: a transaction is already active on '$name'")
@@ -140,6 +143,7 @@ internal class Database(
 
     @Throws(Exception::class)
     fun vacuum(): Unit = lock.withLock {
+        requireWritable("vacuum")
         SQLiteHelpers.vacuum(requireOpen("vacuum"))
     }
 
@@ -149,6 +153,7 @@ internal class Database(
     @Throws(Exception::class)
     fun beginTransaction(): Unit = lock.withLock {
         val handle = requireOpen("beginTransaction")
+        requireWritable("beginTransaction")
         if (handle.inTransaction()) {
             throw IllegalStateException("beginTransaction: a transaction is already active on '$name'")
         }
@@ -203,5 +208,9 @@ internal class Database(
         val handle = db
         check(handle != null && handle.isOpen) { "$context: '$name' is not open" }
         return handle
+    }
+
+    private fun requireWritable(context: String) {
+        check(!readonly) { "$context: database '$name' is open in readonly mode" }
     }
 }

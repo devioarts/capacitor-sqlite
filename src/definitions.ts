@@ -1,5 +1,6 @@
 export type SQLiteValue = string | number | boolean | null | Uint8Array;
 export type SQLiteValues = SQLiteValue[];
+export type SqliteDirectory = 'default' | 'documents' | 'library' | 'cache';
 
 export interface Migration {
   /** Target schema version. Migrations run in ascending order. */
@@ -11,18 +12,44 @@ export interface Migration {
 export interface OpenOptions {
   /** Database file name (without extension). */
   database: string;
+  /**
+   * When `true`, opens the database in read-only mode.
+   * Read operations are allowed, while write operations (`execute`, `run`,
+   * `runBatch`, `vacuum`, write transactions, and migrations) return a failure.
+   * Attempting to reopen an already-open database with a different `readonly`
+   * value returns DB_ALREADY_OPEN.
+   */
   readonly?: boolean;
   /**
-   * Absolute path to the directory where the database file is stored.
-   * If omitted, the plugin uses its default location per platform:
-   * - **iOS**: `<Documents>/CapacitorSQLite/`
-   * - **Android**: `<filesDir>/CapacitorSQLite/`
-   * - **Web**: ignored — OPFS does not support custom paths.
+   * Logical storage location for the database file. Raw filesystem paths are
+   * not accepted.
    *
-   * The directory is created automatically if it does not exist.
-   * Has no effect on `:memory:` databases.
+   * - `default` / omitted: recommended persistent app storage
+   *   - iOS: `Library/Application Support/CapacitorSQLite/`
+   *   - Android: `<filesDir>/CapacitorSQLite/`
+   *   - Electron: `app.getPath('userData')/CapacitorSQLite/`
+   *   - Web: OPFS (`file:<name>.db?vfs=opfs`)
+   * - `documents`: user-document location where appropriate
+   *   - iOS: `Documents/CapacitorSQLite/`
+   *   - Android: app-specific external Documents if available, otherwise
+   *     `<filesDir>/Documents/CapacitorSQLite/`
+   *   - Electron: falls back to `userData` to avoid placing app databases in
+   *     the user's Documents folder
+   *   - Web: OPFS fallback
+   * - `library`: persistent app support data
+   *   - iOS: `Library/Application Support/CapacitorSQLite/`
+   *   - Android: `<filesDir>/CapacitorSQLite/`
+   *   - Electron: `userData/CapacitorSQLite/`
+   *   - Web: OPFS fallback
+   * - `cache`: rebuildable data only; the OS may delete it
+   *   - iOS: `Library/Caches/CapacitorSQLite/`
+   *   - Android: `<cacheDir>/CapacitorSQLite/`
+   *   - Electron: `temp/capacitor-sqlite/CapacitorSQLite/`
+   *   - Web: OPFS fallback
+   *
+   * `:memory:` databases ignore this option.
    */
-  directory?: string;
+  directory?: SqliteDirectory;
   /**
    * When provided the plugin reads `PRAGMA user_version`, then runs every
    * migration whose `version` is greater than the stored value, in order.
@@ -47,7 +74,12 @@ export interface RunOptions {
   database: string;
   /** Single parameterized SQL statement. */
   statement: string;
-  /** Positional values bound to `?` placeholders. */
+  /**
+   * Positional values bound to anonymous `?` placeholders, in order.
+   *
+   * Numbered placeholders (`?1`) and named placeholders (`:name`, `@name`,
+   * `$name`) are not part of the cross-platform API contract.
+   */
   values?: SQLiteValues;
 }
 
@@ -60,7 +92,16 @@ export interface RunBatchOptions {
 
 export interface QueryOptions {
   database: string;
+  /** `SELECT` statement using anonymous `?` placeholders for bound values. */
   statement: string;
+  /**
+   * Positional values bound to anonymous `?` placeholders, in order.
+   *
+   * On Android, `query()` uses a small SQL scanner before calling
+   * `rawQuery(String[])` so numeric, boolean, and BLOB values keep their SQLite
+   * types. The scanner ignores `?` inside strings, quoted identifiers, and SQL
+   * comments, and rejects unsupported numbered/named placeholder forms.
+   */
   values?: SQLiteValues;
 }
 
@@ -174,6 +215,8 @@ export interface CapacitorSqlitePlugin {
 
   /**
    * Execute a `SELECT` statement and return rows as plain objects.
+   * Use anonymous `?` placeholders with `values: [...]` for parameters.
+   * Numbered and named placeholders are not guaranteed across platforms.
    * Column names become object keys. Results are in `data.rows`.
    */
   query<T = Record<string, unknown>>(options: QueryOptions): Promise<SqliteResult<{ rows: T[] }>>;

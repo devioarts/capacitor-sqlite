@@ -50,20 +50,21 @@ const isNative = Capacitor.isNativePlatform();
 
 export const CapacitorSqlite: CapacitorSqlitePlugin = isNative
   ? {
-      getPlatform:         ()  => _raw.getPlatform(),
-      isAvailable:         ()  => _raw.isAvailable(),
-      open:                (o) => _raw.open(o),
-      close:               (o) => _raw.close(o),
-      isOpen:              (o) => _raw.isOpen(o),
-      getVersion:          (o) => _raw.getVersion(o),
-      getSchemaVersion:    (o) => _raw.getSchemaVersion(o),
-      vacuum:              (o) => _raw.vacuum(o),
-      execute:             (o) => _raw.execute(o),
-      run:                 (o) => _raw.run({ ...o, values: encodeValues(o.values) }),
-      runBatch:            (o) => _raw.runBatch({
-        ...o,
-        set: o.set.map((s) => ({ ...s, values: encodeValues(s.values) })),
-      }),
+      getPlatform: () => _raw.getPlatform(),
+      isAvailable: () => _raw.isAvailable(),
+      open: (o) => _raw.open(o),
+      close: (o) => _raw.close(o),
+      isOpen: (o) => _raw.isOpen(o),
+      getVersion: (o) => _raw.getVersion(o),
+      getSchemaVersion: (o) => _raw.getSchemaVersion(o),
+      vacuum: (o) => _raw.vacuum(o),
+      execute: (o) => _raw.execute(o),
+      run: (o) => _raw.run({ ...o, values: encodeValues(o.values) }),
+      runBatch: (o) =>
+        _raw.runBatch({
+          ...o,
+          set: o.set.map((s) => ({ ...s, values: encodeValues(s.values) })),
+        }),
       query: async <T>(o: QueryOptions) => {
         const r = await _raw.query<T>({ ...o, values: encodeValues(o.values) });
         if (!r.success) return r;
@@ -72,8 +73,8 @@ export const CapacitorSqlite: CapacitorSqlitePlugin = isNative
           data: { rows: (r.data.rows as Record<string, unknown>[]).map(decodeRow) as unknown as T[] },
         };
       },
-      beginTransaction:    (o) => _raw.beginTransaction(o),
-      commitTransaction:   (o) => _raw.commitTransaction(o),
+      beginTransaction: (o) => _raw.beginTransaction(o),
+      commitTransaction: (o) => _raw.commitTransaction(o),
       rollbackTransaction: (o) => _raw.rollbackTransaction(o),
     }
   : _raw;

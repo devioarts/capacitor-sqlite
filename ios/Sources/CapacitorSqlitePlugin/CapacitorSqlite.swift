@@ -30,7 +30,7 @@ final class CapacitorSqlite {
             lock.lock()
             defer { lock.unlock() }
             if let existing = databases[database] {
-                guard existing.readonly == readonly else {
+                guard existing.readonly == readonly && existing.path == path else {
                     return nil
                 }
                 return existing
@@ -41,7 +41,7 @@ final class CapacitorSqlite {
         }()
         guard let instance else {
             throw CapacitorSqliteError.failed(
-                message: "open: '\(database)' is already open with a different readonly mode"
+                message: "open: '\(database)' is already open with a different readonly mode or directory"
             )
         }
 
@@ -213,15 +213,33 @@ final class CapacitorSqlite {
 
     private func databasePath(name: String, directory: String? = nil) throws -> String {
         let fileManager = FileManager.default
-        let dir: URL
-        if let directory {
-            dir = URL(fileURLWithPath: directory, isDirectory: true)
-        } else {
+        let base: URL
+        // Keep this mapping aligned with OpenOptions.directory documentation.
+        // Raw paths are intentionally not accepted across the bridge.
+        switch directory ?? "default" {
+        case "default", "library":
+            base = try fileManager.url(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: true
+            )
+        case "documents":
             guard let docs = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
                 throw CapacitorSqliteError.failed(message: "Cannot resolve Documents directory")
             }
-            dir = docs.appendingPathComponent("CapacitorSQLite", isDirectory: true)
+            base = docs
+        case "cache":
+            guard let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+                throw CapacitorSqliteError.failed(message: "Cannot resolve Caches directory")
+            }
+            base = caches
+        default:
+            throw CapacitorSqliteError.failed(
+                message: "Invalid directory '\(directory ?? "")'. Use default, documents, library or cache"
+            )
         }
+        let dir = base.appendingPathComponent("CapacitorSQLite", isDirectory: true)
         if !fileManager.fileExists(atPath: dir.path) {
             try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
         }

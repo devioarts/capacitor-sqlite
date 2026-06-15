@@ -71,12 +71,15 @@ internal object SQLiteHelpers {
         return db.rawQuery(finalSql, strArgs).use { extractRows(it) }
     }
 
-    // Replace '?' placeholders with inline SQL literals for all non-string, non-null types.
-    // BLOBs → X'hex', Booleans → 0/1, Numbers → numeric literal.
-    // String and null values remain as '?' and are passed through rawQuery's String[] args.
-    // Handles single-quoted and double-quoted strings to avoid false '?' matches.
+    // Replace anonymous '?' placeholders with inline SQL literals for all
+    // non-string, non-null types. BLOBs -> X'hex', Booleans -> 0/1, Numbers ->
+    // numeric literal. String and null values remain as '?' and are passed
+    // through rawQuery's String[] args.
+    //
+    // This is a small SQL lexer, not a full parser. It only needs to know where
+    // placeholders are legal, so it skips string literals, quoted identifiers,
+    // and SQL comments before counting/replacing '?' markers.
     private fun injectLiterals(sql: String, values: List<Any?>): Pair<String, List<Any?>> {
-        if (values.none { it is List<*> || it is Boolean || it is Number }) return sql to values
         val out = StringBuilder(sql.length + 32)
         val remaining = mutableListOf<Any?>()
         var paramIdx = 0
@@ -84,44 +87,139 @@ internal object SQLiteHelpers {
         while (i < sql.length) {
             val ch = sql[i]
             when (ch) {
-                '\'', '"' -> {
-                    val quote = ch
-                    out.append(ch); i++
-                    while (i < sql.length) {
-                        val c2 = sql[i]
-                        out.append(c2); i++
-                        if (c2 == quote) {
-                            if (i < sql.length && sql[i] == quote) {
-                                out.append(sql[i]); i++  // escaped quote — consume and continue
-                            } else break
-                        }
-                    }
+                '\'', '"', '`' -> i = copyQuoted(sql, out, i, ch)
+                '[' -> i = copyBracketIdentifier(sql, out, i)
+                '-' -> if (i + 1 < sql.length && sql[i + 1] == '-') {
+                    i = copyLineComment(sql, out, i)
+                } else {
+                    out.append(ch)
+                    i++
+                }
+                '/' -> if (i + 1 < sql.length && sql[i + 1] == '*') {
+                    i = copyBlockComment(sql, out, i)
+                } else {
+                    out.append(ch)
+                    i++
                 }
                 '?' -> {
-                    if (paramIdx < values.size) {
-                        val v = values[paramIdx++]
-                        when {
-                            v is List<*> -> {
-                                val bytes = byteArrayFromList(v, paramIdx)
-                                out.append("X'")
-                                bytes.forEach { b -> out.append("%02x".format(b.toInt() and 0xFF)) }
-                                out.append('\'')
-                            }
-                            v is Boolean -> out.append(if (v) "1" else "0")
-                            v is Long || v is Int -> out.append(v.toString())
-                            v is Double || v is Float -> out.append(v.toString())
-                            else -> { out.append('?'); remaining.add(v) }
-                        }
-                    } else {
-                        out.append('?')
+                    if (i + 1 < sql.length && sql[i + 1].isDigit()) {
+                        throw IllegalArgumentException(
+                            "Only anonymous '?' placeholders are supported; numbered placeholders like '?1' are not supported"
+                        )
                     }
+                    require(paramIdx < values.size) {
+                        "Not enough bind values: SQL has more '?' placeholders than values"
+                    }
+                    appendValue(out, remaining, values[paramIdx], paramIdx + 1)
+                    paramIdx++
+                    i++
+                }
+                ':', '@', '$' -> {
+                    if (i + 1 < sql.length && isIdentifierStart(sql[i + 1])) {
+                        throw IllegalArgumentException(
+                            "Only anonymous '?' placeholders are supported; named placeholders are not supported"
+                        )
+                    }
+                    out.append(ch)
                     i++
                 }
                 else -> { out.append(ch); i++ }
             }
         }
+        require(paramIdx == values.size) {
+            "Too many bind values: SQL has $paramIdx anonymous '?' placeholders but ${values.size} values were provided"
+        }
         return out.toString() to remaining
     }
+
+    private fun appendValue(out: StringBuilder, remaining: MutableList<Any?>, value: Any?, idx: Int) {
+        when (value) {
+            is List<*> -> appendBlobLiteral(out, byteArrayFromList(value, idx))
+            is ByteArray -> appendBlobLiteral(out, value)
+            is Boolean -> out.append(if (value) "1" else "0")
+            is Long, is Int, is Short, is Byte -> out.append(value.toString())
+            is Double -> {
+                require(value.isFinite()) { "Numeric bind value at index $idx must be finite" }
+                out.append(value.toString())
+            }
+            is Float -> {
+                require(value.isFinite()) { "Numeric bind value at index $idx must be finite" }
+                out.append(value.toString())
+            }
+            null -> out.append("NULL")
+            is String -> {
+                out.append('?')
+                remaining.add(value)
+            }
+            else -> throw IllegalArgumentException("Unsupported query value type at index $idx: ${value::class.java.name}")
+        }
+    }
+
+    private fun appendBlobLiteral(out: StringBuilder, bytes: ByteArray) {
+        out.append("X'")
+        bytes.forEach { b -> out.append("%02x".format(b.toInt() and 0xFF)) }
+        out.append('\'')
+    }
+
+    private fun copyQuoted(sql: String, out: StringBuilder, start: Int, quote: Char): Int {
+        var i = start
+        out.append(sql[i])
+        i++
+        while (i < sql.length) {
+            val ch = sql[i]
+            out.append(ch)
+            i++
+            if (ch == quote) {
+                if (i < sql.length && sql[i] == quote) {
+                    out.append(sql[i])
+                    i++
+                } else {
+                    break
+                }
+            }
+        }
+        return i
+    }
+
+    private fun copyBracketIdentifier(sql: String, out: StringBuilder, start: Int): Int {
+        var i = start
+        while (i < sql.length) {
+            val ch = sql[i]
+            out.append(ch)
+            i++
+            if (ch == ']') break
+        }
+        return i
+    }
+
+    private fun copyLineComment(sql: String, out: StringBuilder, start: Int): Int {
+        var i = start
+        while (i < sql.length) {
+            val ch = sql[i]
+            out.append(ch)
+            i++
+            if (ch == '\n' || ch == '\r') break
+        }
+        return i
+    }
+
+    private fun copyBlockComment(sql: String, out: StringBuilder, start: Int): Int {
+        var i = start
+        while (i < sql.length) {
+            val ch = sql[i]
+            out.append(ch)
+            i++
+            if (ch == '*' && i < sql.length && sql[i] == '/') {
+                out.append(sql[i])
+                i++
+                break
+            }
+        }
+        return i
+    }
+
+    private fun isIdentifierStart(ch: Char): Boolean =
+        ch == '_' || ch.isLetter()
 
     // MARK: - Transactions
     // All transaction helpers use NON-EXCLUSIVE mode which is compatible with WAL

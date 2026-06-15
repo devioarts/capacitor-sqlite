@@ -1,6 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import { CapacitorSqlite } from '@devioarts/capacitor-sqlite';
-import type { Migration } from '@devioarts/capacitor-sqlite';
+import type { Migration, SqliteDirectory } from '@devioarts/capacitor-sqlite';
 import { Button } from '../components/Button.tsx';
 import { useLogger } from '../components/Logger.tsx';
 import {
@@ -581,6 +581,238 @@ const TESTS: TestCase[] = [
       await silentClose(DB);
     },
   },
+  {
+    id: 'qph-01', group: 'Query Placeholders', name: 'anonymous ? preserves INTEGER, REAL, boolean, TEXT and NULL',
+    fn: async () => {
+      const DB = 'suite_qph01';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      const q = assertOk(await CapacitorSqlite.query({
+        database: DB,
+        statement: 'SELECT TYPEOF(?) AS ti, TYPEOF(?) AS tr, TYPEOF(?) AS tb, ? AS s, ? IS NULL AS n',
+        values: [42, 3.25, true, 'ok', null],
+      }), 'typed placeholder query');
+      const row = q.rows[0] as { ti: string; tr: string; tb: string; s: string; n: number };
+      assertEqual(row.ti, 'integer', 'integer placeholder');
+      assertEqual(row.tr, 'real', 'real placeholder');
+      assertEqual(row.tb, 'integer', 'boolean placeholder stored as integer');
+      assertEqual(row.s, 'ok', 'text placeholder');
+      assertEqual(row.n, 1, 'null placeholder');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'qph-02', group: 'Query Placeholders', name: '? inside line/block comments is ignored',
+    fn: async () => {
+      const DB = 'suite_qph02';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      const q = assertOk(await CapacitorSqlite.query({
+        database: DB,
+        statement: 'SELECT -- ignored ?\n ? AS a, /* ignored ? */ ? AS b',
+        values: [7, 8],
+      }), 'comment placeholder query');
+      const row = q.rows[0] as { a: number; b: number };
+      assertEqual(row.a, 7, 'line comment ignored');
+      assertEqual(row.b, 8, 'block comment ignored');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'qph-03', group: 'Query Placeholders', name: '? inside quoted identifiers is ignored',
+    fn: async () => {
+      const DB = 'suite_qph03';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({
+        database: DB,
+        statements: [
+          'DROP TABLE IF EXISTS t',
+          'CREATE TABLE t ("a?" INTEGER, `b?` INTEGER, [c?] INTEGER)',
+          'INSERT INTO t ("a?", `b?`, [c?]) VALUES (1, 2, 3)',
+        ],
+      }), 'ddl');
+      const q = assertOk(await CapacitorSqlite.query({
+        database: DB,
+        statement: 'SELECT "a?" AS a, `b?` AS b, [c?] AS c FROM t WHERE "a?" = ? AND `b?` = ? AND [c?] = ?',
+        values: [1, 2, 3],
+      }), 'quoted identifier placeholder query');
+      const row = q.rows[0] as { a: number; b: number; c: number };
+      assertEqual(row.a, 1, 'double-quoted identifier');
+      assertEqual(row.b, 2, 'backtick identifier');
+      assertEqual(row.c, 3, 'bracket identifier');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'qph-04', group: 'Query Placeholders', name: '? inside escaped string literal is ignored',
+    fn: async () => {
+      const DB = 'suite_qph04';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      const q = assertOk(await CapacitorSqlite.query({
+        database: DB,
+        statement: "SELECT '?''?' AS literal, ? AS v",
+        values: [11],
+      }), 'escaped string placeholder query');
+      const row = q.rows[0] as { literal: string; v: number };
+      assertEqual(row.literal, "?'?", 'escaped string literal');
+      assertEqual(row.v, 11, 'real placeholder still bound');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'qph-05', group: 'Query Placeholders', name: 'Android rejects unsupported placeholder forms and count mismatch',
+    fn: async () => {
+      const plat = assertOk(await CapacitorSqlite.getPlatform(), 'platform');
+      if (plat.platform !== 'android') return;
+
+      const DB = 'suite_qph05';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertFail(await CapacitorSqlite.query({ database: DB, statement: 'SELECT ?1 AS v', values: [1] }), '?1 placeholder', 'INVALID_PARAMS');
+      assertFail(await CapacitorSqlite.query({ database: DB, statement: 'SELECT :value AS v', values: [1] }), ':name placeholder', 'INVALID_PARAMS');
+      assertFail(await CapacitorSqlite.query({ database: DB, statement: 'SELECT @value AS v', values: [1] }), '@name placeholder', 'INVALID_PARAMS');
+      assertFail(await CapacitorSqlite.query({ database: DB, statement: 'SELECT $value AS v', values: [1] }), '$name placeholder', 'INVALID_PARAMS');
+      assertFail(await CapacitorSqlite.query({ database: DB, statement: 'SELECT ? AS a, ? AS b', values: [1] }), 'missing value', 'INVALID_PARAMS');
+      assertFail(await CapacitorSqlite.query({ database: DB, statement: 'SELECT ? AS a', values: [1, 2] }), 'extra value', 'INVALID_PARAMS');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'qph-06', group: 'Query Placeholders', name: 'BLOB placeholder in query() preserves BLOB type',
+    fn: async () => {
+      const DB = 'suite_qph06';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      const blob = new Uint8Array([0x00, 0x7f, 0x80, 0xff]);
+      const q = assertOk(await CapacitorSqlite.query({
+        database: DB,
+        statement: 'SELECT TYPEOF(?) AS t, LENGTH(?) AS len',
+        values: [blob, blob],
+      }), 'blob placeholder query');
+      const row = q.rows[0] as { t: string; len: number };
+      assertEqual(row.t, 'blob', 'TYPEOF(blob param)');
+      assertEqual(row.len, 4, 'BLOB length');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'qph-07', group: 'Query Placeholders', name: 'placeholder-looking text inside literals is ignored',
+    fn: async () => {
+      const DB = 'suite_qph07';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      const q = assertOk(await CapacitorSqlite.query({
+        database: DB,
+        statement: "SELECT ':name' AS colon, '$name' AS dollar, '@name' AS at, '?1' AS numbered, ? AS v",
+        values: [9],
+      }), 'literal placeholder query');
+      const row = q.rows[0] as { colon: string; dollar: string; at: string; numbered: string; v: number };
+      assertEqual(row.colon, ':name', 'colon literal');
+      assertEqual(row.dollar, '$name', 'dollar literal');
+      assertEqual(row.at, '@name', 'at literal');
+      assertEqual(row.numbered, '?1', 'numbered literal');
+      assertEqual(row.v, 9, 'actual placeholder');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'qph-08', group: 'Query Placeholders', name: '? inside CRLF line comment is ignored',
+    fn: async () => {
+      const DB = 'suite_qph08';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      const q = assertOk(await CapacitorSqlite.query({
+        database: DB,
+        statement: 'SELECT -- ignored ?\r\n ? AS v',
+        values: [12],
+      }), 'crlf comment query');
+      assertEqual((q.rows[0] as { v: number }).v, 12, 'placeholder after CRLF comment');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'qph-09', group: 'Query Placeholders', name: 'anonymous ? works inside CTEs and expressions',
+    fn: async () => {
+      const DB = 'suite_qph09';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      const q = assertOk(await CapacitorSqlite.query({
+        database: DB,
+        statement: 'WITH input(v) AS (SELECT ? UNION ALL SELECT ?) SELECT SUM(v * ?) AS total FROM input',
+        values: [2, 3, 4],
+      }), 'cte expression query');
+      assertEqual((q.rows[0] as { total: number }).total, 20, '(2 + 3) * 4');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'qph-10', group: 'Query Placeholders', name: 'IN-list placeholders preserve numeric order',
+    fn: async () => {
+      const DB = 'suite_qph10';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({
+        database: DB,
+        statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (id INTEGER)', 'INSERT INTO t VALUES (1)', 'INSERT INTO t VALUES (2)', 'INSERT INTO t VALUES (3)'],
+      }), 'seed');
+      const q = assertOk(await CapacitorSqlite.query({
+        database: DB,
+        statement: "SELECT GROUP_CONCAT(id, ',') AS ids FROM t WHERE id IN (?, ?) ORDER BY id",
+        values: [1, 3],
+      }), 'in-list query');
+      assertEqual((q.rows[0] as { ids: string }).ids, '1,3', 'matched IDs');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'qph-11', group: 'Query Placeholders', name: 'mixed string and numeric placeholders keep order',
+    fn: async () => {
+      const DB = 'suite_qph11';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      const q = assertOk(await CapacitorSqlite.query({
+        database: DB,
+        statement: 'SELECT ? AS s1, ? AS n1, ? AS s2, ? AS n2',
+        values: ['left', 10, 'right', 20],
+      }), 'mixed placeholder query');
+      const row = q.rows[0] as { s1: string; n1: number; s2: string; n2: number };
+      assertEqual(row.s1, 'left', 'first string');
+      assertEqual(row.n1, 10, 'first number');
+      assertEqual(row.s2, 'right', 'second string');
+      assertEqual(row.n2, 20, 'second number');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'qph-12', group: 'Query Placeholders', name: 'Android rejects named placeholders even without values',
+    fn: async () => {
+      const plat = assertOk(await CapacitorSqlite.getPlatform(), 'platform');
+      if (plat.platform !== 'android') return;
+
+      const DB = 'suite_qph12';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertFail(await CapacitorSqlite.query({ database: DB, statement: 'SELECT :value AS v' }), ':name placeholder without values', 'INVALID_PARAMS');
+      assertFail(await CapacitorSqlite.query({ database: DB, statement: 'SELECT @value AS v' }), '@name placeholder without values', 'INVALID_PARAMS');
+      assertFail(await CapacitorSqlite.query({ database: DB, statement: 'SELECT $value AS v' }), '$name placeholder without values', 'INVALID_PARAMS');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'qph-13', group: 'Query Placeholders', name: 'Android rejects extra string/null values too',
+    fn: async () => {
+      const plat = assertOk(await CapacitorSqlite.getPlatform(), 'platform');
+      if (plat.platform !== 'android') return;
+
+      const DB = 'suite_qph13';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertFail(await CapacitorSqlite.query({ database: DB, statement: 'SELECT ? AS v', values: ['ok', null] }), 'extra string/null values', 'INVALID_PARAMS');
+      await silentClose(DB);
+    },
+  },
 
   // ── RunBatch (additional) ─────────────────────────────────────────────────
   {
@@ -681,6 +913,47 @@ const TESTS: TestCase[] = [
     },
   },
 
+  // ── Directory ────────────────────────────────────────────────────────────
+  {
+    id: 'dir-01', group: 'Directory', name: 'invalid directory enum → INVALID_PARAMS',
+    fn: async () => {
+      const DB = 'suite_dir01';
+      await silentClose(DB);
+      assertFail(await CapacitorSqlite.open({ database: DB, directory: 'unsafe' as never }), 'open invalid directory', 'INVALID_PARAMS');
+    },
+  },
+  {
+    id: 'dir-02', group: 'Directory', name: 'all logical directories can open and query',
+    fn: async () => {
+      const directories: SqliteDirectory[] = ['default', 'library', 'documents', 'cache'];
+      for (const directory of directories) {
+        const DB = `suite_dir02_${directory}`;
+        await silentClose(DB);
+        assertOk(await CapacitorSqlite.open({ database: DB, directory }), `open ${directory}`);
+        assertOk(await CapacitorSqlite.execute({
+          database: DB,
+          statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (v TEXT)', `INSERT INTO t VALUES ('${directory}')`],
+        }), `seed ${directory}`);
+        const q = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT v FROM t' }), `query ${directory}`);
+        assertEqual((q.rows[0] as { v: string }).v, directory, `${directory} round-trip`);
+        await silentClose(DB);
+      }
+    },
+  },
+  {
+    id: 'dir-03', group: 'Directory', name: 'native/Electron same DB open in different directory → DB_ALREADY_OPEN',
+    fn: async () => {
+      const plat = assertOk(await CapacitorSqlite.getPlatform(), 'platform');
+      if (plat.platform === 'web') return;
+
+      const DB = 'suite_dir03';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB, directory: 'library' }), 'open library');
+      assertFail(await CapacitorSqlite.open({ database: DB, directory: 'cache' }), 'open cache while library open', 'DB_ALREADY_OPEN');
+      await silentClose(DB);
+    },
+  },
+
   // ── Multi-DB ──────────────────────────────────────────────────────────────
   {
     id: 'mdb-01', group: 'Multi-DB', name: 'two DBs open simultaneously — no cross-contamination',
@@ -729,10 +1002,6 @@ const TESTS: TestCase[] = [
   {
     id: 'ro-01', group: 'Readonly', name: 'readonly open — write → error',
     fn: async () => {
-      // Web SQLite WASM does not enforce readonly at the write level — skip.
-      const plat = assertOk(await CapacitorSqlite.getPlatform(), 'getPlatform');
-      if (plat.platform === 'web') return;
-
       const DB = 'suite_ro01';
       await silentClose(DB);
       // Create DB and table with write access first
@@ -763,8 +1032,6 @@ const TESTS: TestCase[] = [
   {
     id: 'ro-03', group: 'Readonly', name: 'readonly + execute() → error',
     fn: async () => {
-      const plat = assertOk(await CapacitorSqlite.getPlatform(), 'getPlatform');
-      if (plat.platform === 'web') return;
       const DB = 'suite_ro03';
       await silentClose(DB);
       assertOk(await CapacitorSqlite.open({ database: DB }), 'open rw');
@@ -778,8 +1045,6 @@ const TESTS: TestCase[] = [
   {
     id: 'ro-04', group: 'Readonly', name: 'readonly + vacuum() → error',
     fn: async () => {
-      const plat = assertOk(await CapacitorSqlite.getPlatform(), 'getPlatform');
-      if (plat.platform === 'web') return;
       const DB = 'suite_ro04';
       await silentClose(DB);
       assertOk(await CapacitorSqlite.open({ database: DB }), 'open rw');
@@ -800,6 +1065,35 @@ const TESTS: TestCase[] = [
       assertOk(await CapacitorSqlite.open({ database: DB, readonly: true }), 'open ro');
       const sv = assertOk(await CapacitorSqlite.getSchemaVersion({ database: DB }), 'getSchemaVersion ro');
       assertEqual(sv.version, 7, 'schema version readable in readonly mode');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'ro-06', group: 'Readonly', name: 'readonly + runBatch() → error',
+    fn: async () => {
+      const DB = 'suite_ro06';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open rw');
+      await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (v TEXT)'] });
+      assertOk(await CapacitorSqlite.close({ database: DB }), 'close rw');
+      assertOk(await CapacitorSqlite.open({ database: DB, readonly: true }), 'open ro');
+      assertFail(
+        await CapacitorSqlite.runBatch({ database: DB, set: [{ statement: 'INSERT INTO t VALUES (?)', values: ['x'] }] }),
+        'runBatch on readonly',
+      );
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'ro-07', group: 'Readonly', name: 'readonly + beginTransaction() → error',
+    fn: async () => {
+      const DB = 'suite_ro07';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open rw');
+      await CapacitorSqlite.execute({ database: DB, statements: ['CREATE TABLE IF NOT EXISTS t (v TEXT)'] });
+      assertOk(await CapacitorSqlite.close({ database: DB }), 'close rw');
+      assertOk(await CapacitorSqlite.open({ database: DB, readonly: true }), 'open ro');
+      assertFail(await CapacitorSqlite.beginTransaction({ database: DB }), 'beginTransaction on readonly', 'TRANSACTION_FAILED');
       await silentClose(DB);
     },
   },

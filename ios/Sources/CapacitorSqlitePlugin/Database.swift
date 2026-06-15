@@ -162,6 +162,7 @@ final class Database {
 
     private func executeUnsafe(statements: [String], transaction: Bool) throws -> Int {
         let handle = try requireOpen("execute")
+        try requireWritable("execute")
         let before = SQLiteHelpers.totalChanges(db: handle)
         if transaction { try beginTransactionUnsafe() }
         do {
@@ -183,6 +184,7 @@ final class Database {
 
     private func runUnsafe(statement: String, values: [Any]) throws -> (changes: Int, lastInsertId: Int64) {
         let handle = try requireOpen("run")
+        try requireWritable("run")
         do {
             return try SQLiteHelpers.run(db: handle, sql: statement, values: values)
         } catch let err as SQLiteError {
@@ -192,6 +194,7 @@ final class Database {
 
     private func runBatchUnsafe(set: [[String: Any]], transaction: Bool) throws -> (changes: Int, lastInsertId: Int64) {
         let handle = try requireOpen("runBatch")
+        try requireWritable("runBatch")
         let before = SQLiteHelpers.totalChanges(db: handle)
 
         if transaction { try beginTransactionUnsafe() }
@@ -242,6 +245,7 @@ final class Database {
 
     private func vacuumUnsafe() throws {
         let handle = try requireOpen("vacuum")
+        try requireWritable("vacuum")
         do {
             try SQLiteHelpers.vacuum(db: handle)
         } catch SQLiteError.execute(let msg) {
@@ -251,6 +255,7 @@ final class Database {
 
     private func beginTransactionUnsafe() throws {
         let handle = try requireOpen("beginTransaction")
+        try requireWritable("beginTransaction")
         guard !inTransaction else {
             throw DatabaseError.transaction("beginTransaction: a transaction is already active on '\(name)'")
         }
@@ -324,6 +329,12 @@ final class Database {
             throw DatabaseError.notOpen("\(context): '\(name)' is not open")
         }
         return handle
+    }
+
+    private func requireWritable(_ context: String) throws {
+        guard !readonly else {
+            throw DatabaseError.execute("\(context): database '\(name)' is open in readonly mode")
+        }
     }
 
     // Called only from within the queue (openUnsafe), so no extra sync needed.
