@@ -1,6 +1,6 @@
 {
   "name": "@devioarts/capacitor-sqlite",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "SQLite database plugin for Capacitor",
   "main": "dist/plugin.cjs.js",
   "module": "dist/esm/index.js",
