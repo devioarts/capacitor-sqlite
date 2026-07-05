@@ -1,6 +1,7 @@
 package com.devioarts.capacitor.sqlite
 
 import android.database.Cursor
+import android.database.DatabaseUtils
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteStatement
 
@@ -39,14 +40,28 @@ internal object SQLiteHelpers {
         val stmt = db.compileStatement(sql)
         try {
             bindValues(stmt, values)
-            val before = totalChanges(db)
-            val stmtType = statementType(sql)
-            if (isInsertLike(stmtType)) {
-                val lastId = stmt.executeInsert()
-                return RunResult(changes = totalChanges(db) - before, lastInsertId = if (lastId >= 0L) lastId else 0L)
+            // total_changes() is a per-connection counter. With WAL connection pooling a
+            // read-only SELECT outside a transaction may run on a pooled read connection —
+            // wrong counter and per-call pool overhead. Pinning the session to the write
+            // connection keeps the counters correct and costs the same single commit as
+            // autocommit.
+            val pinned = !db.inTransaction()
+            if (pinned) db.beginTransactionNonExclusive()
+            try {
+                val before = totalChanges(db)
+                val stmtType = statementType(sql)
+                val result = if (isInsertLike(stmtType)) {
+                    val lastId = stmt.executeInsert()
+                    RunResult(changes = totalChanges(db) - before, lastInsertId = if (lastId >= 0L) lastId else 0L)
+                } else {
+                    stmt.executeUpdateDelete()
+                    RunResult(changes = totalChanges(db) - before, lastInsertId = 0L)
+                }
+                if (pinned) db.setTransactionSuccessful()
+                return result
+            } finally {
+                if (pinned) db.endTransaction()
             }
-            stmt.executeUpdateDelete()
-            return RunResult(changes = totalChanges(db) - before, lastInsertId = 0L)
         } finally {
             stmt.close()
         }
@@ -256,14 +271,12 @@ internal object SQLiteHelpers {
     fun getUserVersion(db: SQLiteDatabase): Int = db.version
 
     fun getSQLiteVersion(db: SQLiteDatabase): String =
-        db.rawQuery("SELECT sqlite_version()", null).use { c ->
-            if (c.moveToFirst()) c.getString(0) else ""
-        }
+        DatabaseUtils.stringForQuery(db, "SELECT sqlite_version()", null)
 
+    // longForQuery = compileStatement + simpleQueryForLong: no Cursor/CursorWindow
+    // allocation, and the compiled statement is served from the connection cache.
     fun totalChanges(db: SQLiteDatabase): Long =
-        db.rawQuery("SELECT total_changes()", null).use { c ->
-            if (c.moveToFirst()) c.getLong(0) else 0L
-        }
+        DatabaseUtils.longForQuery(db, "SELECT total_changes()", null)
 
     fun setUserVersion(db: SQLiteDatabase, version: Int) {
         db.version = version
