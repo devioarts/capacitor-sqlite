@@ -92,6 +92,9 @@ function validateValues(value: unknown, label: string): unknown[] {
     if (!valid) {
       throw new SqliteRuntimeError('INVALID_PARAMS', `'${label}[${index}]' has an unsupported value type`);
     }
+    if (typeof item === 'number' && Number.isInteger(item) && !Number.isSafeInteger(item)) {
+      throw new SqliteRuntimeError('INVALID_PARAMS', `'${label}[${index}]' must be within Number.MAX_SAFE_INTEGER`);
+    }
   });
   return value;
 }
@@ -232,6 +235,9 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
       // resolves to the origin-scoped OPFS database URL.
       validateDirectory(opts.directory);
       migrations = validateMigrations(opts.migrations);
+      if (readonly && migrations.length) {
+        throw new SqliteRuntimeError('MIGRATION_FAILED', 'migrations cannot run when readonly is true');
+      }
     } catch (err) {
       return this.err(errorCode(err, 'INVALID_NAME'), 'open', err);
     }
@@ -287,7 +293,9 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
       const dbId: string = res.dbId;
       openedDbId = dbId;
 
-      if (!readonly) {
+      if (readonly) {
+        await execSql(promiser, dbId, 'PRAGMA query_only = ON');
+      } else {
         await execSql(promiser, dbId, 'PRAGMA foreign_keys = ON');
         if (migrations.length) {
           await this.runMigrations(promiser, dbId, migrations);
@@ -446,13 +454,12 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
         const sp = transaction ? `sp_${++this.spCounter}` : null;
         if (sp) await execSql(promiser, dbId, `SAVEPOINT "${sp}"`);
         try {
-          let total = 0;
+          const before = await getTotalChanges(promiser, dbId);
           for (const sql of statements) {
             const trimmed = sql.trim();
             await execSql(promiser, dbId, trimmed);
-            const [row] = await selectRows<{ c: number }>(promiser, dbId, 'SELECT changes() AS c');
-            total += row?.c ?? 0;
           }
+          const total = (await getTotalChanges(promiser, dbId)) - before;
           if (sp) await execSql(promiser, dbId, `RELEASE "${sp}"`);
           return this.ok({ changes: total });
         } catch (innerErr) {
@@ -491,13 +498,10 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
         const { entry, promiser } = this.requireOpen(database, 'run');
         this.requireWritable(entry, database, 'run', 'EXECUTE_FAILED');
         const { dbId } = entry;
+        const before = await getTotalChanges(promiser, dbId);
         await execSql(promiser, dbId, statement, values);
-        const [row] = await selectRows<{ c: number; id: number }>(
-          promiser,
-          dbId,
-          'SELECT changes() AS c, last_insert_rowid() AS id',
-        );
-        const changes = row?.c ?? 0;
+        const [row] = await selectRows<{ id: number }>(promiser, dbId, 'SELECT last_insert_rowid() AS id');
+        const changes = (await getTotalChanges(promiser, dbId)) - before;
         return this.ok({ changes, lastInsertId: isInsertStatement(statement) && changes > 0 ? (row?.id ?? 0) : 0 });
       } catch (err) {
         return this.err(errorCode(err, 'EXECUTE_FAILED'), 'run', err);
@@ -533,12 +537,11 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
         const sp = transaction ? `sp_${++this.spCounter}` : null;
         if (sp) await execSql(promiser, dbId, `SAVEPOINT "${sp}"`);
         try {
-          let totalChanges = 0;
+          const before = await getTotalChanges(promiser, dbId);
           for (const item of set) {
             await execSql(promiser, dbId, item.statement, item.values ?? []);
-            const [row] = await selectRows<{ c: number }>(promiser, dbId, 'SELECT changes() AS c');
-            totalChanges += row?.c ?? 0;
           }
+          const totalChanges = (await getTotalChanges(promiser, dbId)) - before;
           if (sp) await execSql(promiser, dbId, `RELEASE "${sp}"`);
           return this.ok({ changes: totalChanges, lastInsertId: 0 });
         } catch (innerErr) {
@@ -795,6 +798,11 @@ async function selectRows<T = Record<string, unknown>>(
   const rows = res?.result?.resultRows ?? res?.resultRows;
   if (!Array.isArray(rows)) return [];
   return rows as T[];
+}
+
+async function getTotalChanges(promiser: Promiser, dbId: string): Promise<number> {
+  const [row] = await selectRows<{ c: number }>(promiser, dbId, 'SELECT total_changes() AS c');
+  return row?.c ?? 0;
 }
 
 function isInsertStatement(sql: string): boolean {

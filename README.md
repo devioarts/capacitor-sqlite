@@ -436,7 +436,7 @@ Execute one or more SQL statements sequentially.
 Use for DDL (`CREATE TABLE`, …) or bulk DML without params.
 `statements` must be a non-empty array.
 **Each array element must be a single SQL statement** — multiple semicolon-separated
-statements in one string work on iOS/Web but fail on Android/Electron.
+statements in one string return a failure on every platform.
 Statements run in a single transaction by default; pass
 `transaction: false` to keep prior successful statements if a later one fails.
 When called inside `beginTransaction()`, pass `transaction: false`;
@@ -507,6 +507,8 @@ query<T = Record<string, unknown>>(options: QueryOptions) => Promise<SqliteResul
 Execute a `SELECT` statement and return rows as plain objects.
 Use anonymous `?` placeholders with `values: [...]` for parameters.
 Numbered and named placeholders are not guaranteed across platforms.
+INTEGER result values outside JavaScript's safe integer range are returned
+as strings rather than imprecise numbers.
 Column names become object keys. Results are in `data.rows`.
 
 | Param         | Type                                                  |
@@ -607,10 +609,10 @@ rollbackTransaction(options: { database: string; }) => Promise<SqliteResult>
 
 #### Migration
 
-| Prop             | Type                  | Description                                               |
-| ---------------- | --------------------- | --------------------------------------------------------- |
-| **`version`**    | <code>number</code>   | Target schema version. Migrations run in ascending order. |
-| **`statements`** | <code>string[]</code> | SQL statements executed when upgrading to this version.   |
+| Prop             | Type                  | Description                                                                                             |
+| ---------------- | --------------------- | ------------------------------------------------------------------------------------------------------- |
+| **`version`**    | <code>number</code>   | Target schema version. Migrations run in ascending order.                                               |
+| **`statements`** | <code>string[]</code> | SQL statements executed when upgrading to this version. Each string must contain exactly one statement. |
 
 
 #### ExecuteOptions
@@ -624,11 +626,11 @@ rollbackTransaction(options: { database: string; }) => Promise<SqliteResult>
 
 #### RunOptions
 
-| Prop            | Type                                                  | Description                                                                                                                                                                                       |
-| --------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`database`**  | <code>string</code>                                   |                                                                                                                                                                                                   |
-| **`statement`** | <code>string</code>                                   | Single parameterized SQL statement.                                                                                                                                                               |
-| **`values`**    | <code><a href="#sqlitevalues">SQLiteValues</a></code> | Positional values bound to anonymous `?` placeholders, in order. Numbered placeholders (`?1`) and named placeholders (`:name`, `@name`, `$name`) are not part of the cross-platform API contract. |
+| Prop            | Type                                                  | Description                                                                                                                                                                                                                                                         |
+| --------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`database`**  | <code>string</code>                                   |                                                                                                                                                                                                                                                                     |
+| **`statement`** | <code>string</code>                                   | Single parameterized SQL statement.                                                                                                                                                                                                                                 |
+| **`values`**    | <code><a href="#sqlitevalues">SQLiteValues</a></code> | Positional values bound to anonymous `?` placeholders, in order. Integer `number` values must be within `Number.MAX_SAFE_INTEGER`. Numbered placeholders (`?1`) and named placeholders (`:name`, `@name`, `$name`) are not part of the cross-platform API contract. |
 
 
 #### Uint8Array
@@ -717,11 +719,11 @@ buffer as needed.
 
 #### QueryOptions
 
-| Prop            | Type                                                  | Description                                                                                                                                                                                                                                                                                                                                               |
-| --------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`database`**  | <code>string</code>                                   |                                                                                                                                                                                                                                                                                                                                                           |
-| **`statement`** | <code>string</code>                                   | `SELECT` statement using anonymous `?` placeholders for bound values.                                                                                                                                                                                                                                                                                     |
-| **`values`**    | <code><a href="#sqlitevalues">SQLiteValues</a></code> | Positional values bound to anonymous `?` placeholders, in order. On Android, `query()` uses a small SQL scanner before calling `rawQuery(String[])` so numeric, boolean, and BLOB values keep their SQLite types. The scanner ignores `?` inside strings, quoted identifiers, and SQL comments, and rejects unsupported numbered/named placeholder forms. |
+| Prop            | Type                                                  | Description                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| --------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`database`**  | <code>string</code>                                   |                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| **`statement`** | <code>string</code>                                   | `SELECT` statement using anonymous `?` placeholders for bound values.                                                                                                                                                                                                                                                                                                                                                       |
+| **`values`**    | <code><a href="#sqlitevalues">SQLiteValues</a></code> | Positional values bound to anonymous `?` placeholders, in order. Integer `number` values must be within `Number.MAX_SAFE_INTEGER`. On Android, `query()` uses a small SQL scanner before calling `rawQuery(String[])` so numeric, boolean, and BLOB values keep their SQLite types. The scanner ignores `?` inside strings, quoted identifiers, and SQL comments, and rejects unsupported numbered/named placeholder forms. |
 
 
 ### Type Aliases

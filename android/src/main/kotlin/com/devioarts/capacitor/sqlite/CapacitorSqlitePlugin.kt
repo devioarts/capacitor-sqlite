@@ -1,6 +1,7 @@
 package com.devioarts.capacitor.sqlite
 
 import android.util.Base64
+import java.nio.charset.StandardCharsets
 import com.getcapacitor.JSArray
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
@@ -46,6 +47,7 @@ class CapacitorSqlitePlugin : Plugin() {
             message.contains("Invalid directory") -> "INVALID_PARAMS"
             message.contains("placeholder") -> "INVALID_PARAMS"
             message.contains("bind values") -> "INVALID_PARAMS"
+            message.contains("Integer bind value") -> "INVALID_PARAMS"
             message.contains("Unsupported query value type") -> "INVALID_PARAMS"
             message.contains("Numeric bind value") -> "INVALID_PARAMS"
             message.contains("Invalid database name") -> "INVALID_NAME"
@@ -283,6 +285,7 @@ class CapacitorSqlitePlugin : Plugin() {
                         when (value) {
                             null         -> obj.put(key, JSONObject.NULL)
                             is ByteArray -> obj.put(key, SQLiteHelpers.BLOB_PREFIX + Base64.encodeToString(value, Base64.NO_WRAP))
+                            is String    -> obj.put(key, encodeText(value))
                             else         -> obj.put(key, value)
                         }
                     }
@@ -393,5 +396,13 @@ class CapacitorSqlitePlugin : Plugin() {
         }
         is JSONObject   -> throw IllegalArgumentException("'$label' must not be an object")
         else -> v
+    }
+
+    private fun encodeText(value: String): String {
+        if (!value.startsWith(SQLiteHelpers.BLOB_PREFIX) && !value.startsWith(SQLiteHelpers.TEXT_PREFIX)) {
+            return value
+        }
+        val encoded = Base64.encodeToString(value.toByteArray(StandardCharsets.UTF_8), Base64.NO_WRAP)
+        return SQLiteHelpers.TEXT_PREFIX + encoded
     }
 }

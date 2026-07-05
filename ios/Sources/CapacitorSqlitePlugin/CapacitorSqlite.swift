@@ -22,6 +22,9 @@ final class CapacitorSqlite {
         let path = database == ":memory:" ? ":memory:" : try databasePath(name: database, directory: directory)
         // Throws on malformed entries — no silent drops.
         let entries = try parseMigrations(migrations)
+        if readonly && !entries.isEmpty {
+            throw CapacitorSqliteError.failed(message: "Migrations cannot run when readonly is true")
+        }
 
         // Atomically get-or-create the Database instance under lock.
         // Storing before open() ensures concurrent callers share the same instance,

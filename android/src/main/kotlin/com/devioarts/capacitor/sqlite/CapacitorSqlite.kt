@@ -22,6 +22,9 @@ internal class CapacitorSqlite(private val context: Context) {
         val path = if (database == ":memory:") ":memory:" else databasePath(database, directory)
         // Throws on malformed entries — no silent drops.
         val entries = parseMigrations(migrations)
+        require(!readonly || entries.isEmpty()) {
+            "Migrations cannot run when readonly is true"
+        }
 
         // Atomically get-or-create the Database instance.
         // Storing before open() ensures concurrent callers share the same instance,

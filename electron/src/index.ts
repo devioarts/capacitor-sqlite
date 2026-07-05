@@ -140,6 +140,9 @@ function validateValues(value: unknown, label: string): SQLiteValues {
     if (!valid) {
       throw new SqliteRuntimeError('INVALID_PARAMS', `'${label}[${index}]' has an unsupported value type`);
     }
+    if (typeof item === 'number' && Number.isInteger(item) && !Number.isSafeInteger(item)) {
+      throw new SqliteRuntimeError('INVALID_PARAMS', `'${label}[${index}]' must be within Number.MAX_SAFE_INTEGER`);
+    }
   });
   return value as SQLiteValues;
 }
@@ -254,6 +257,9 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
       const directory = validateDirectory(opts.directory);
       dbPath = database === ':memory:' ? ':memory:' : this.databasePath(database, directory);
       migrations = validateMigrations(opts.migrations);
+      if (readonly && migrations.length) {
+        throw new SqliteRuntimeError('MIGRATION_FAILED', 'migrations cannot run when readonly is true');
+      }
     } catch (err) {
       return this.err(errorCode(err, 'INVALID_NAME'), 'open', err);
     }
@@ -430,11 +436,11 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
       const db = entry.db;
       if (transaction) db.exec('BEGIN');
       try {
-        let total = 0;
+        const before = totalChanges(db);
         for (const sql of statements) {
-          const result = db.prepare(sql.trim()).run();
-          total += toNumber(result.changes);
+          db.prepare(sql.trim()).run();
         }
+        const total = totalChanges(db) - before;
         if (transaction) db.exec('COMMIT');
         return this.ok({ changes: total });
       } catch (innerErr) {
@@ -462,8 +468,9 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
       const values = convertValues(validateValues(opts.values, 'values'));
       const entry = this.requireOpenEntry(database, 'run');
       this.requireWritable(entry, database, 'run', 'EXECUTE_FAILED');
+      const before = totalChanges(entry.db);
       const result = entry.db.prepare(statement).run(...values);
-      const changes = toNumber(result.changes);
+      const changes = totalChanges(entry.db) - before;
       return this.ok({
         changes,
         lastInsertId: isInsertStatement(statement) && changes > 0 ? toNumber(result.lastInsertRowid) : 0,
@@ -493,13 +500,13 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
 
       if (transaction) db.exec('BEGIN');
       try {
-        let totalChanges = 0;
+        const before = totalChanges(db);
         for (const item of set) {
-          const result = db.prepare(item.statement).run(...convertValues(item.values));
-          totalChanges += toNumber(result.changes);
+          db.prepare(item.statement).run(...convertValues(item.values));
         }
+        const changed = totalChanges(db) - before;
         if (transaction) db.exec('COMMIT');
-        return this.ok({ changes: totalChanges, lastInsertId: 0 });
+        return this.ok({ changes: changed, lastInsertId: 0 });
       } catch (innerErr) {
         if (transaction) {
           try {
@@ -524,7 +531,11 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
       const statement = validateSql(opts.statement, 'statement');
       const values = convertValues(validateValues(opts.values, 'values'));
       const db = this.requireOpen(database, 'query');
-      const rows = db.prepare(statement).all(...values) as T[];
+      const stmt = db.prepare(statement);
+      if (typeof stmt.setReadBigInts === 'function') {
+        stmt.setReadBigInts(true);
+      }
+      const rows = stmt.all(...values).map((row) => normalizeRow(row as Record<string, unknown>)) as T[];
       return this.ok({ rows });
     } catch (err) {
       return this.err(errorCode(err, 'QUERY_FAILED'), 'query', err);
@@ -685,6 +696,26 @@ function convertValues(values: SQLiteValues): NodeSQLiteValue[] {
 function toNumber(v: number | bigint | undefined | null): number {
   if (v === undefined || v === null) return 0;
   return typeof v === 'bigint' ? Number(v) : v;
+}
+
+function totalChanges(db: DatabaseSync): number {
+  const row = db.prepare('SELECT total_changes() AS c').get() as { c: number | bigint } | undefined;
+  return toNumber(row?.c);
+}
+
+function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(row)) {
+    out[key] = normalizeValue(row[key]);
+  }
+  return out;
+}
+
+function normalizeValue(value: unknown): unknown {
+  if (typeof value !== 'bigint') return value;
+  const max = BigInt(Number.MAX_SAFE_INTEGER);
+  if (value > max || value < -max) return value.toString();
+  return Number(value);
 }
 
 function isInsertStatement(sql: string): boolean {

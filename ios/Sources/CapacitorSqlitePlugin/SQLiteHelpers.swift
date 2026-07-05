@@ -20,6 +20,8 @@ enum SQLiteHelpers {
     // The JS layer detects this prefix and decodes back to Uint8Array.
     // Must stay in sync with BLOB_PREFIX in SQLiteHelpers.kt and index.ts.
     private static let BLOB_PREFIX = "blob64:"
+    private static let TEXT_PREFIX = "text64:"
+    private static let MAX_SAFE_INTEGER = 9_007_199_254_740_991.0
 
     // MARK: - Lifecycle
 
@@ -72,13 +74,14 @@ enum SQLiteHelpers {
 
         try bind(stmt: stmt, values: values)
 
+        let before = totalChanges(db: db)
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE || rc == SQLITE_ROW else {
             let msg = String(validatingUTF8: sqlite3_errmsg(db)) ?? "step failed"
             throw SQLiteError.execute(msg)
         }
 
-        let changes = Int(sqlite3_changes(db))
+        let changes = totalChanges(db: db) - before
         let stmtType = sql.trimmingCharacters(in: .whitespacesAndNewlines)
             .split(whereSeparator: { $0.isWhitespace })
             .first?
@@ -277,6 +280,9 @@ enum SQLiteHelpers {
                 let t = String(cString: v.objCType)
                 if t == "d" || t == "f" {
                     let d = v.doubleValue
+                    if d.isFinite && d == d.rounded(.towardZero) && abs(d) > MAX_SAFE_INTEGER {
+                        throw SQLiteError.execute("Integer bind value at index \(idx) must be within Number.MAX_SAFE_INTEGER")
+                    }
                     // Capacitor's JSON bridge encodes JS integers as Double-backed NSNumber
                     // (objCType = "d"), losing integer type information. Restore it by treating
                     // whole-number doubles as INT64 — consistent with JS Number.isInteger()
@@ -288,6 +294,9 @@ enum SQLiteHelpers {
                         sqlite3_bind_double(stmt, idx, d)
                     }
                 } else {
+                    if abs(Double(v.int64Value)) > MAX_SAFE_INTEGER {
+                        throw SQLiteError.execute("Integer bind value at index \(idx) must be within Number.MAX_SAFE_INTEGER")
+                    }
                     sqlite3_bind_int64(stmt, idx, v.int64Value)
                 }
             }
@@ -341,11 +350,15 @@ enum SQLiteHelpers {
             let name = String(cString: namePtr)
             switch sqlite3_column_type(stmt, i) {
             case SQLITE_INTEGER:
-                row[name] = sqlite3_column_int64(stmt, i)
+                row[name] = normalizeInteger(sqlite3_column_int64(stmt, i))
             case SQLITE_FLOAT:
                 row[name] = sqlite3_column_double(stmt, i)
             case SQLITE_TEXT:
-                row[name] = sqlite3_column_text(stmt, i).map { String(cString: $0) } ?? NSNull()
+                if let text = sqlite3_column_text(stmt, i).map({ String(cString: $0) }) {
+                    row[name] = encodeText(text)
+                } else {
+                    row[name] = NSNull()
+                }
             case SQLITE_BLOB:
                 let byteCount = Int(sqlite3_column_bytes(stmt, i))
                 if byteCount == 0 {
@@ -366,6 +379,21 @@ enum SQLiteHelpers {
             }
         }
         return row
+    }
+
+    private static func encodeText(_ text: String) -> String {
+        if text.hasPrefix(BLOB_PREFIX) || text.hasPrefix(TEXT_PREFIX),
+           let bytes = text.data(using: .utf8) {
+            return TEXT_PREFIX + bytes.base64EncodedString()
+        }
+        return text
+    }
+
+    private static func normalizeInteger(_ value: Int64) -> Any {
+        if abs(Double(value)) > MAX_SAFE_INTEGER {
+            return String(value)
+        }
+        return value
     }
 }
 // swiftlint:enable identifier_name

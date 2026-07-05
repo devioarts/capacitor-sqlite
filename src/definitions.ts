@@ -5,7 +5,7 @@ export type SqliteDirectory = 'default' | 'documents' | 'library' | 'cache';
 export interface Migration {
   /** Target schema version. Migrations run in ascending order. */
   version: number;
-  /** SQL statements executed when upgrading to this version. */
+  /** SQL statements executed when upgrading to this version. Each string must contain exactly one statement. */
   statements: string[];
 }
 
@@ -76,6 +76,7 @@ export interface RunOptions {
   statement: string;
   /**
    * Positional values bound to anonymous `?` placeholders, in order.
+   * Integer `number` values must be within `Number.MAX_SAFE_INTEGER`.
    *
    * Numbered placeholders (`?1`) and named placeholders (`:name`, `@name`,
    * `$name`) are not part of the cross-platform API contract.
@@ -96,6 +97,7 @@ export interface QueryOptions {
   statement: string;
   /**
    * Positional values bound to anonymous `?` placeholders, in order.
+   * Integer `number` values must be within `Number.MAX_SAFE_INTEGER`.
    *
    * On Android, `query()` uses a small SQL scanner before calling
    * `rawQuery(String[])` so numeric, boolean, and BLOB values keep their SQLite
@@ -182,7 +184,7 @@ export interface CapacitorSqlitePlugin {
    * Use for DDL (`CREATE TABLE`, …) or bulk DML without params.
    * `statements` must be a non-empty array.
    * **Each array element must be a single SQL statement** — multiple semicolon-separated
-   * statements in one string work on iOS/Web but fail on Android/Electron.
+   * statements in one string return a failure on every platform.
    * Statements run in a single transaction by default; pass
    * `transaction: false` to keep prior successful statements if a later one fails.
    * When called inside `beginTransaction()`, pass `transaction: false`;
@@ -217,6 +219,8 @@ export interface CapacitorSqlitePlugin {
    * Execute a `SELECT` statement and return rows as plain objects.
    * Use anonymous `?` placeholders with `values: [...]` for parameters.
    * Numbered and named placeholders are not guaranteed across platforms.
+   * INTEGER result values outside JavaScript's safe integer range are returned
+   * as strings rather than imprecise numbers.
    * Column names become object keys. Results are in `data.rows`.
    */
   query<T = Record<string, unknown>>(options: QueryOptions): Promise<SqliteResult<{ rows: T[] }>>;

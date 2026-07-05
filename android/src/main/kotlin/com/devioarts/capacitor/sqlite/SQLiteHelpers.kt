@@ -9,6 +9,8 @@ internal object SQLiteHelpers {
     // Sentinel prefix for BLOB columns returned from queries.
     // Must stay in sync with BLOB_PREFIX in SQLiteHelpers.swift and index.ts.
     const val BLOB_PREFIX = "blob64:"
+    const val TEXT_PREFIX = "text64:"
+    private const val MAX_SAFE_INTEGER = 9007199254740991.0
 
     // MARK: - Lifecycle
 
@@ -140,13 +142,25 @@ internal object SQLiteHelpers {
             is List<*> -> appendBlobLiteral(out, byteArrayFromList(value, idx))
             is ByteArray -> appendBlobLiteral(out, value)
             is Boolean -> out.append(if (value) "1" else "0")
-            is Long, is Int, is Short, is Byte -> out.append(value.toString())
+            is Long -> {
+                require(!isUnsafeInteger(value)) {
+                    "Integer bind value at index $idx must be within Number.MAX_SAFE_INTEGER"
+                }
+                out.append(value.toString())
+            }
+            is Int, is Short, is Byte -> out.append(value.toString())
             is Double -> {
                 require(value.isFinite()) { "Numeric bind value at index $idx must be finite" }
+                require(!isUnsafeInteger(value)) {
+                    "Integer bind value at index $idx must be within Number.MAX_SAFE_INTEGER"
+                }
                 out.append(value.toString())
             }
             is Float -> {
                 require(value.isFinite()) { "Numeric bind value at index $idx must be finite" }
+                require(!isUnsafeInteger(value.toDouble())) {
+                    "Integer bind value at index $idx must be within Number.MAX_SAFE_INTEGER"
+                }
                 out.append(value.toString())
             }
             null -> out.append("NULL")
@@ -358,10 +372,26 @@ internal object SQLiteHelpers {
             val idx = i + 1
             when (v) {
                 null            -> stmt.bindNull(idx)
-                is Long         -> stmt.bindLong(idx, v)
+                is Long         -> {
+                    require(!isUnsafeInteger(v)) {
+                        "Integer bind value at index $idx must be within Number.MAX_SAFE_INTEGER"
+                    }
+                    stmt.bindLong(idx, v)
+                }
                 is Int          -> stmt.bindLong(idx, v.toLong())
-                is Double       -> stmt.bindDouble(idx, v)
-                is Float        -> stmt.bindDouble(idx, v.toDouble())
+                is Double       -> {
+                    require(!isUnsafeInteger(v)) {
+                        "Integer bind value at index $idx must be within Number.MAX_SAFE_INTEGER"
+                    }
+                    stmt.bindDouble(idx, v)
+                }
+                is Float        -> {
+                    val d = v.toDouble()
+                    require(!isUnsafeInteger(d)) {
+                        "Integer bind value at index $idx must be within Number.MAX_SAFE_INTEGER"
+                    }
+                    stmt.bindDouble(idx, d)
+                }
                 is Boolean      -> stmt.bindLong(idx, if (v) 1L else 0L)
                 is String       -> stmt.bindString(idx, v)
                 is ByteArray    -> stmt.bindBlob(idx, v)
@@ -383,6 +413,12 @@ internal object SQLiteHelpers {
         }.toByteArray()
     }
 
+    private fun isUnsafeInteger(value: Double): Boolean =
+        value.isFinite() && value % 1.0 == 0.0 && kotlin.math.abs(value) > MAX_SAFE_INTEGER
+
+    private fun isUnsafeInteger(value: Long): Boolean =
+        value > MAX_SAFE_INTEGER.toLong() || value < -MAX_SAFE_INTEGER.toLong()
+
     private fun extractRows(cursor: Cursor): List<Map<String, Any?>> {
         val rows = mutableListOf<Map<String, Any?>>()
         while (cursor.moveToNext()) {
@@ -390,7 +426,7 @@ internal object SQLiteHelpers {
             for (i in 0 until cursor.columnCount) {
                 val name = cursor.getColumnName(i)
                 row[name] = when (cursor.getType(i)) {
-                    Cursor.FIELD_TYPE_INTEGER -> cursor.getLong(i)
+                    Cursor.FIELD_TYPE_INTEGER -> normalizeInteger(cursor.getLong(i))
                     Cursor.FIELD_TYPE_FLOAT   -> cursor.getDouble(i)
                     Cursor.FIELD_TYPE_STRING  -> cursor.getString(i)
                     Cursor.FIELD_TYPE_BLOB    -> cursor.getBlob(i)
@@ -401,4 +437,7 @@ internal object SQLiteHelpers {
         }
         return rows
     }
+
+    private fun normalizeInteger(value: Long): Any =
+        if (isUnsafeInteger(value)) value.toString() else value
 }

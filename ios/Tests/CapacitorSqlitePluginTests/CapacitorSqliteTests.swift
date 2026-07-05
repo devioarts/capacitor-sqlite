@@ -266,6 +266,13 @@ class CapacitorSqliteTests: XCTestCase {
         XCTAssertThrowsError(try impl.open(database: ":memory:", readonly: false, migrations: migrations))
     }
 
+    func testReadonlyWithMigrationsThrows() {
+        let migrations: [[String: Any]] = [
+            ["version": 1, "statements": ["CREATE TABLE t (id INTEGER PRIMARY KEY)"]]
+        ]
+        XCTAssertThrowsError(try impl.open(database: ":memory:", readonly: true, migrations: migrations))
+    }
+
     // MARK: - Param binding
 
     func testBindInteger() throws {
@@ -276,17 +283,14 @@ class CapacitorSqliteTests: XCTestCase {
         XCTAssertEqual(rows[0]["v"] as? Int64, 42)
     }
 
-    func testBindIntegerAtInt64OverflowBoundaryDoesNotCrash() throws {
+    func testBindUnsafeIntegerThrowsInsteadOfCrashing() throws {
         try impl.open(database: ":memory:", readonly: false, migrations: [])
         try impl.execute(database: ":memory:", statements: ["CREATE TABLE t (v)"])
 
         let tooLargeForInt64 = pow(2.0, 63.0)
-        XCTAssertNoThrow(
+        XCTAssertThrowsError(
             try impl.run(database: ":memory:", statement: "INSERT INTO t VALUES (?)", values: [tooLargeForInt64])
         )
-
-        let rows = try impl.query(database: ":memory:", statement: "SELECT typeof(v) AS t FROM t", values: [])
-        XCTAssertEqual(rows[0]["t"] as? String, "real")
     }
 
     func testExecuteRejectsMultipleStatementsInOneString() throws {
@@ -332,6 +336,32 @@ class CapacitorSqliteTests: XCTestCase {
         _ = try impl.run(database: ":memory:", statement: "INSERT INTO t VALUES (?)", values: [data])
         let rows = try impl.query(database: ":memory:", statement: "SELECT v FROM t", values: [])
         XCTAssertEqual(rows[0]["v"] as? String, "blob64:" + data.base64EncodedString())
+    }
+
+    func testTextStartingWithBlobSentinelIsEscaped() throws {
+        try impl.open(database: ":memory:", readonly: false, migrations: [])
+        try impl.execute(database: ":memory:", statements: ["CREATE TABLE t (v TEXT)"])
+        _ = try impl.run(database: ":memory:", statement: "INSERT INTO t VALUES (?)", values: ["blob64:test"])
+        let rows = try impl.query(database: ":memory:", statement: "SELECT v FROM t", values: [])
+        XCTAssertEqual(rows[0]["v"] as? String, "text64:" + Data("blob64:test".utf8).base64EncodedString())
+    }
+
+    func testUnsafeIntegerResultReturnsString() throws {
+        try impl.open(database: ":memory:", readonly: false, migrations: [])
+        try impl.execute(database: ":memory:", statements: [
+            "CREATE TABLE t (v INTEGER)",
+            "INSERT INTO t VALUES (9223372036854775807)"
+        ])
+        let rows = try impl.query(database: ":memory:", statement: "SELECT v FROM t", values: [])
+        XCTAssertEqual(rows[0]["v"] as? String, "9223372036854775807")
+    }
+
+    func testRunDdlReturnsZeroChangesAfterInsert() throws {
+        try impl.open(database: ":memory:", readonly: false, migrations: [])
+        try impl.execute(database: ":memory:", statements: ["CREATE TABLE t (v TEXT)"])
+        _ = try impl.run(database: ":memory:", statement: "INSERT INTO t VALUES (?)", values: ["a"])
+        let result = try impl.run(database: ":memory:", statement: "CREATE TABLE u (v TEXT)", values: [])
+        XCTAssertEqual(result.changes, 0)
     }
 
     // MARK: - Foreign keys
