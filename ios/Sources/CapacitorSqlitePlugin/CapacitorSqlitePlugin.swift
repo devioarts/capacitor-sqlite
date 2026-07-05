@@ -33,6 +33,11 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     private func failure(_ call: CAPPluginCall, code: String, message: String, method: String) {
+        let details: [String: Any] = [
+            "nativeCode": code,
+            "nativeMessage": message,
+            "source": "ios-native"
+        ]
         resolve(call, payload: [
             "success": false,
             "error": [
@@ -40,7 +45,7 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
                 "message": message,
                 "platform": "ios",
                 "method": method,
-                "details": [:]
+                "details": details
             ] as [String: Any]
         ])
     }
@@ -145,7 +150,10 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
             failure(call, code: "INVALID_PARAMS", message: "'database' is required", method: "isOpen")
             return
         }
-        success(call, data: ["open": impl.isOpen(database: database)])
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            self.success(call, data: ["open": self.impl.isOpen(database: database)])
+        }
     }
 
     // MARK: - getVersion

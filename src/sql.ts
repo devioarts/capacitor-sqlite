@@ -22,6 +22,18 @@ export function assertSingleSqlStatement(sql: string, label: string): void {
   }
 }
 
+export function sqlStatementType(sql: string): string {
+  const first = readKeyword(sql, skipIgnorable(sql, 0));
+  if (!first) return '';
+  if (first.keyword !== 'WITH') return first.keyword;
+  return withMainStatementType(sql, first.end) || first.keyword;
+}
+
+export function isInsertStatement(sql: string): boolean {
+  const type = sqlStatementType(sql);
+  return type === 'INSERT' || type === 'REPLACE';
+}
+
 function hasTailContent(sql: string, start: number): boolean {
   for (let i = start; i < sql.length; i++) {
     const ch = sql[i];
@@ -39,6 +51,108 @@ function hasTailContent(sql: string, start: number): boolean {
     return true;
   }
   return false;
+}
+
+function withMainStatementType(sql: string, start: number): string {
+  let i = skipIgnorable(sql, start);
+  const maybeRecursive = readKeyword(sql, i);
+  if (maybeRecursive?.keyword === 'RECURSIVE') {
+    i = skipIgnorable(sql, maybeRecursive.end);
+  }
+
+  while (i < sql.length) {
+    i = skipIdentifier(sql, i);
+    if (i >= sql.length) return '';
+
+    i = skipIgnorable(sql, i);
+    if (sql[i] === '(') {
+      i = skipParenthesized(sql, i);
+      if (i >= sql.length) return '';
+      i = skipIgnorable(sql, i);
+    }
+
+    const asKeyword = readKeyword(sql, i);
+    if (asKeyword?.keyword !== 'AS') return '';
+    i = skipIgnorable(sql, asKeyword.end);
+
+    const materialized = readKeyword(sql, i);
+    if (materialized?.keyword === 'NOT') {
+      const next = readKeyword(sql, skipIgnorable(sql, materialized.end));
+      if (next?.keyword === 'MATERIALIZED') {
+        i = skipIgnorable(sql, next.end);
+      }
+    } else if (materialized?.keyword === 'MATERIALIZED') {
+      i = skipIgnorable(sql, materialized.end);
+    }
+
+    if (sql[i] !== '(') return '';
+    i = skipIgnorable(sql, skipParenthesized(sql, i));
+    if (sql[i] === ',') {
+      i = skipIgnorable(sql, i + 1);
+      continue;
+    }
+
+    return readKeyword(sql, i)?.keyword ?? '';
+  }
+  return '';
+}
+
+function skipIgnorable(sql: string, start: number): number {
+  let i = start;
+  while (i < sql.length) {
+    const ch = sql[i];
+    if (/\s/.test(ch) || ch === ';') {
+      i++;
+      continue;
+    }
+    if (ch === '-' && sql[i + 1] === '-') {
+      i = skipLineComment(sql, i) + 1;
+      continue;
+    }
+    if (ch === '/' && sql[i + 1] === '*') {
+      i = skipBlockComment(sql, i) + 1;
+      continue;
+    }
+    return i;
+  }
+  return i;
+}
+
+function readKeyword(sql: string, start: number): { keyword: string; end: number } | null {
+  if (!/[A-Za-z_]/.test(sql[start] ?? '')) return null;
+  let end = start + 1;
+  while (end < sql.length && /[A-Za-z0-9_]/.test(sql[end])) end++;
+  return { keyword: sql.slice(start, end).toUpperCase(), end };
+}
+
+function skipIdentifier(sql: string, start: number): number {
+  let i = skipIgnorable(sql, start);
+  if (sql[i] === "'" || sql[i] === '"' || sql[i] === '`') return skipQuoted(sql, i, sql[i]) + 1;
+  if (sql[i] === '[') return skipBracketIdentifier(sql, i) + 1;
+  while (i < sql.length && /[A-Za-z0-9_$]/.test(sql[i])) i++;
+  return i;
+}
+
+function skipParenthesized(sql: string, start: number): number {
+  let depth = 0;
+  for (let i = start; i < sql.length; i++) {
+    const ch = sql[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      i = skipQuoted(sql, i, ch);
+    } else if (ch === '[') {
+      i = skipBracketIdentifier(sql, i);
+    } else if (ch === '-' && sql[i + 1] === '-') {
+      i = skipLineComment(sql, i);
+    } else if (ch === '/' && sql[i + 1] === '*') {
+      i = skipBlockComment(sql, i);
+    } else if (ch === '(') {
+      depth++;
+    } else if (ch === ')') {
+      depth--;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return sql.length;
 }
 
 function skipQuoted(sql: string, start: number, quote: string): number {

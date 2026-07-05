@@ -19,6 +19,7 @@ final class CapacitorSqlite {
         guard database == ":memory:" || database.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil else {
             throw CapacitorSqliteError.failed(message: "Invalid database name '\(database)'. Use only A–Z, a–z, 0–9, _ or -")
         }
+        let key = databaseKey(database)
         let path = database == ":memory:" ? ":memory:" : try databasePath(name: database, directory: directory)
         // Throws on malformed entries — no silent drops.
         let entries = try parseMigrations(migrations)
@@ -32,14 +33,14 @@ final class CapacitorSqlite {
         let instance: Database? = {
             lock.lock()
             defer { lock.unlock() }
-            if let existing = databases[database] {
-                guard existing.readonly == readonly && existing.path == path else {
+            if let existing = databases[key] {
+                guard existing.readonly == readonly && sameDatabasePath(existing.path, path) else {
                     return nil
                 }
                 return existing
             }
             let newInstance = Database(name: database, path: path, readonly: readonly)
-            databases[database] = newInstance
+            databases[key] = newInstance
             return newInstance
         }()
         guard let instance else {
@@ -51,14 +52,13 @@ final class CapacitorSqlite {
         do {
             try instance.open(migrations: entries)
         } catch DatabaseError.open(let msg) {
-            // Remove from map so a retry can create a fresh instance.
-            lock.lock(); databases.removeValue(forKey: database); lock.unlock()
+            removeFailedOpen(key: key, instance: instance)
             throw CapacitorSqliteError.failed(message: msg)
         } catch DatabaseError.migration(let msg) {
-            lock.lock(); databases.removeValue(forKey: database); lock.unlock()
+            removeFailedOpen(key: key, instance: instance)
             throw CapacitorSqliteError.failed(message: msg)
         } catch {
-            lock.lock(); databases.removeValue(forKey: database); lock.unlock()
+            removeFailedOpen(key: key, instance: instance)
             throw CapacitorSqliteError.failed(message: "open: \(error)")
         }
     }
@@ -69,7 +69,7 @@ final class CapacitorSqlite {
         let instance: Database? = {
             lock.lock()
             defer { lock.unlock() }
-            return databases[database]
+            return databases[databaseKey(database)]
         }()
         guard let instance else {
             throw CapacitorSqliteError.failed(message: "close: '\(database)' is not open")
@@ -79,7 +79,7 @@ final class CapacitorSqlite {
         } catch DatabaseError.close(let msg) {
             throw CapacitorSqliteError.failed(message: msg)
         }
-        lock.lock(); databases.removeValue(forKey: database); lock.unlock()
+        lock.lock(); databases.removeValue(forKey: databaseKey(database)); lock.unlock()
     }
 
     // MARK: - isOpen
@@ -87,7 +87,7 @@ final class CapacitorSqlite {
     func isOpen(database: String) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return databases[database]?.isOpen ?? false
+        return databases[databaseKey(database)]?.isOpen ?? false
     }
 
     // MARK: - getVersion
@@ -206,12 +206,30 @@ final class CapacitorSqlite {
         // or a busy queue on DB-A would hold the global lock and starve DB-B.
         let inst: Database?
         lock.lock()
-        inst = databases[name]
+        inst = databases[databaseKey(name)]
         lock.unlock()
         guard let inst, inst.isOpen else {
             throw CapacitorSqliteError.failed(message: "\(context): '\(name)' is not open")
         }
         return inst
+    }
+
+    private func removeFailedOpen(key: String, instance: Database) {
+        lock.lock()
+        defer { lock.unlock() }
+        // Only remove the instance that failed. A concurrent retry may already
+        // have replaced the map entry after the failed open released its queue.
+        if databases[key] === instance && !instance.isOpen {
+            databases.removeValue(forKey: key)
+        }
+    }
+
+    private func databaseKey(_ name: String) -> String {
+        name == ":memory:" ? name : name.lowercased()
+    }
+
+    private func sameDatabasePath(_ lhs: String, _ rhs: String) -> Bool {
+        lhs == rhs || lhs.lowercased() == rhs.lowercased()
     }
 
     private func databasePath(name: String, directory: String? = nil) throws -> String {
@@ -251,9 +269,13 @@ final class CapacitorSqlite {
 
     /// Parses migration definitions; throws on any malformed entry instead of silently dropping it.
     private func parseMigrations(_ raw: [[String: Any]]) throws -> [MigrationEntry] {
-        try raw.enumerated().map { (idx, item) in
+        var seenVersions = Set<Int>()
+        return try raw.enumerated().map { (idx, item) in
             guard let version = item["version"] as? Int, version > 0 else {
                 throw CapacitorSqliteError.failed(message: "Migration at index \(idx): 'version' must be a positive integer")
+            }
+            guard seenVersions.insert(version).inserted else {
+                throw CapacitorSqliteError.failed(message: "Migration at index \(idx): duplicate version \(version)")
             }
             guard let statements = item["statements"] as? [String], !statements.isEmpty else {
                 throw CapacitorSqliteError.failed(message: "Migration at index \(idx): 'statements' must be a non-empty [String]")

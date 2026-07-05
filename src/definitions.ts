@@ -3,21 +3,25 @@ export type SQLiteValues = SQLiteValue[];
 export type SqliteDirectory = 'default' | 'documents' | 'library' | 'cache';
 
 export interface Migration {
-  /** Target schema version. Migrations run in ascending order. */
+  /** Target schema version. Must be unique within an `open()` call. Migrations run in ascending order. */
   version: number;
   /** SQL statements executed when upgrading to this version. Each string must contain exactly one statement. */
   statements: string[];
 }
 
 export interface OpenOptions {
-  /** Database file name (without extension). */
+  /**
+   * Database file name (without extension). On iOS and Electron, open database
+   * registry keys are matched case-insensitively to avoid two handles pointing
+   * at the same file on case-insensitive filesystems.
+   */
   database: string;
   /**
    * When `true`, opens the database in read-only mode.
    * Read operations are allowed, while write operations (`execute`, `run`,
    * `runBatch`, `vacuum`, write transactions, and migrations) return a failure.
    * Attempting to reopen an already-open database with a different `readonly`
-   * value returns DB_ALREADY_OPEN.
+   * value or `directory` returns DB_ALREADY_OPEN.
    */
   readonly?: boolean;
   /**
@@ -54,7 +58,8 @@ export interface OpenOptions {
    * When provided the plugin reads `PRAGMA user_version`, then runs every
    * migration whose `version` is greater than the stored value, in order.
    * After all migrations complete it writes the highest version back.
-   * Returns MIGRATION_FAILED if any entry is malformed or a statement fails.
+   * Returns MIGRATION_FAILED if any entry is malformed, versions are duplicated,
+   * or a statement fails.
    */
   migrations?: Migration[];
 }
@@ -133,6 +138,11 @@ export interface SqliteError {
   message: string;
   platform: SqlitePlatform;
   method: string;
+  /**
+   * Platform diagnostic metadata. All implementations include `nativeCode`,
+   * `nativeMessage`, and `source`; callers should treat additional keys as
+   * platform-specific debugging hints.
+   */
   details?: Record<string, unknown>;
 }
 
@@ -162,7 +172,7 @@ export interface CapacitorSqlitePlugin {
    * Open (or create) a database. If `migrations` are supplied, pending
    * migrations are applied before the promise resolves.
    * Returns MIGRATION_FAILED if a migration entry
-   * is malformed or a migration statement fails.
+   * is malformed, versions are duplicated, or a migration statement fails.
    */
   open(options: OpenOptions): Promise<SqliteResult>;
 
@@ -197,19 +207,14 @@ export interface CapacitorSqlitePlugin {
    * Returns the number of affected rows and the row ID inserted by this statement.
    * `lastInsertId` is `0` for UPDATE, DELETE, statements that insert no row,
    * and other non-INSERT/REPLACE statements.
+   * Leading SQL comments and common `WITH ... INSERT` CTE forms are detected as inserts.
    * `lastInsertId` is a JavaScript number and is precise up to `Number.MAX_SAFE_INTEGER`.
-   * **Android caveat:** a multi-value `INSERT INTO t VALUES (…),(…)` always reports
-   * `changes = 1` regardless of the number of inserted rows; other platforms report
-   * the real count. Single-row inserts are correct on all platforms.
    */
   run(options: RunOptions): Promise<SqliteResult<{ changes: number; lastInsertId: number }>>;
 
   /**
    * Execute multiple parameterized statements in a single native call.
    * `lastInsertId` is always `0`; use `run()` when you need the inserted row ID.
-   * **Android caveat:** a multi-value `INSERT INTO t VALUES (…),(…)` always reports
-   * `changes = 1` regardless of the number of inserted rows; other platforms report
-   * the real count.
    * When called inside `beginTransaction()`, pass `transaction: false`;
    * nested transactions return TRANSACTION_FAILED.
    */

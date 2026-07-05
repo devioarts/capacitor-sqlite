@@ -41,6 +41,15 @@ class CapacitorSqliteTests: XCTestCase {
         XCTAssertThrowsError(try impl.open(database: ":memory:", readonly: true, migrations: []))
     }
 
+    func testOpenFileDatabaseNameIsCaseInsensitiveForRegistry() throws {
+        try impl.open(database: "CaseAliasTest", readonly: false, migrations: [])
+        XCTAssertNoThrow(try impl.open(database: "casealiastest", readonly: false, migrations: []))
+        XCTAssertThrowsError(try impl.open(database: "casealiastest", readonly: true, migrations: []))
+        XCTAssertTrue(impl.isOpen(database: "casealiastest"))
+        try impl.close(database: "casealiastest")
+        XCTAssertFalse(impl.isOpen(database: "CaseAliasTest"))
+    }
+
     func testCloseDatabase() throws {
         try impl.open(database: ":memory:", readonly: false, migrations: [])
         XCTAssertNoThrow(try impl.close(database: ":memory:"))
@@ -102,6 +111,38 @@ class CapacitorSqliteTests: XCTestCase {
         let rows = try impl.query(database: ":memory:", statement: "SELECT * FROM users", values: [])
         XCTAssertEqual(rows.count, 1)
         XCTAssertEqual(rows[0]["name"] as? String, "Alice")
+    }
+
+    func testRunCteInsertReturnsLastInsertId() throws {
+        try impl.open(database: ":memory:", readonly: false, migrations: [])
+        try impl.execute(database: ":memory:", statements: [
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"
+        ])
+
+        let result = try impl.run(
+            database: ":memory:",
+            statement: "WITH cte(name) AS (SELECT ?) INSERT INTO users (name) SELECT name FROM cte",
+            values: ["Bob"]
+        )
+
+        XCTAssertEqual(result.changes, 1)
+        XCTAssertEqual(result.lastInsertId, 1)
+    }
+
+    func testRunCommentPrefixedInsertReturnsLastInsertId() throws {
+        try impl.open(database: ":memory:", readonly: false, migrations: [])
+        try impl.execute(database: ":memory:", statements: [
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"
+        ])
+
+        let result = try impl.run(
+            database: ":memory:",
+            statement: "/* lead */ INSERT INTO users (name) VALUES (?)",
+            values: ["Cara"]
+        )
+
+        XCTAssertEqual(result.changes, 1)
+        XCTAssertEqual(result.lastInsertId, 1)
     }
 
     func testRunBatch() throws {
@@ -248,6 +289,14 @@ class CapacitorSqliteTests: XCTestCase {
     func testMigrationMissingStatementsThrows() {
         let migrations: [[String: Any]] = [
             ["version": 1]
+        ]
+        XCTAssertThrowsError(try impl.open(database: ":memory:", readonly: false, migrations: migrations))
+    }
+
+    func testDuplicateMigrationVersionsThrow() {
+        let migrations: [[String: Any]] = [
+            ["version": 1, "statements": ["CREATE TABLE v1a (id INTEGER PRIMARY KEY)"]],
+            ["version": 1, "statements": ["CREATE TABLE v1b (id INTEGER PRIMARY KEY)"]]
         ]
         XCTAssertThrowsError(try impl.open(database: ":memory:", readonly: false, migrations: migrations))
     }

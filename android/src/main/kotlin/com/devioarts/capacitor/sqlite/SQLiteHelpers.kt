@@ -39,18 +39,14 @@ internal object SQLiteHelpers {
         val stmt = db.compileStatement(sql)
         try {
             bindValues(stmt, values)
+            val before = totalChanges(db)
             val stmtType = statementType(sql)
             if (isInsertLike(stmtType)) {
                 val lastId = stmt.executeInsert()
-                // NOTE: executeInsert() returns the last inserted rowid but NOT the number of
-                // affected rows, so `changes` is reported as 1 for any successful insert. A
-                // multi-row INSERT (VALUES (..),(..) or INSERT…SELECT) therefore under-reports
-                // `changes` here, unlike iOS/Web/Electron which return the real count.
-                // `lastInsertId` is correct in all cases. See README "Cross-platform caveats".
-                return RunResult(changes = if (lastId >= 0L) 1L else 0L, lastInsertId = if (lastId >= 0L) lastId else 0L)
+                return RunResult(changes = totalChanges(db) - before, lastInsertId = if (lastId >= 0L) lastId else 0L)
             }
-            val changes = stmt.executeUpdateDelete().toLong()
-            return RunResult(changes = changes, lastInsertId = 0L)
+            stmt.executeUpdateDelete()
+            return RunResult(changes = totalChanges(db) - before, lastInsertId = 0L)
         } finally {
             stmt.close()
         }
@@ -264,6 +260,11 @@ internal object SQLiteHelpers {
             if (c.moveToFirst()) c.getString(0) else ""
         }
 
+    fun totalChanges(db: SQLiteDatabase): Long =
+        db.rawQuery("SELECT total_changes()", null).use { c ->
+            if (c.moveToFirst()) c.getLong(0) else 0L
+        }
+
     fun setUserVersion(db: SQLiteDatabase, version: Int) {
         db.version = version
     }
@@ -358,14 +359,122 @@ internal object SQLiteHelpers {
         return sql.length - 1
     }
 
-    private fun statementType(sql: String): String =
-        sql.trimStart().split("\\s+".toRegex()).firstOrNull()?.uppercase() ?: ""
+    fun statementType(sql: String): String {
+        val first = readKeyword(sql, skipIgnorable(sql, 0)) ?: return ""
+        if (first.keyword != "WITH") return first.keyword
+        return withMainStatementType(sql, first.end) ?: first.keyword
+    }
 
     private fun isInsertLike(stmtType: String): Boolean =
         stmtType == "INSERT" || stmtType == "REPLACE"
 
     private fun isUpdateDelete(stmtType: String): Boolean =
         stmtType == "UPDATE" || stmtType == "DELETE"
+
+    private data class Keyword(val keyword: String, val end: Int)
+
+    private fun withMainStatementType(sql: String, start: Int): String? {
+        var i = skipIgnorable(sql, start)
+        val maybeRecursive = readKeyword(sql, i)
+        if (maybeRecursive?.keyword == "RECURSIVE") {
+            i = skipIgnorable(sql, maybeRecursive.end)
+        }
+
+        while (i < sql.length) {
+            i = skipIdentifier(sql, i)
+            if (i >= sql.length) return null
+
+            i = skipIgnorable(sql, i)
+            if (sql[i] == '(') {
+                i = skipParenthesized(sql, i)
+                if (i >= sql.length) return null
+                i = skipIgnorable(sql, i)
+            }
+
+            val asKeyword = readKeyword(sql, i)
+            if (asKeyword?.keyword != "AS") return null
+            i = skipIgnorable(sql, asKeyword.end)
+
+            val materialized = readKeyword(sql, i)
+            if (materialized?.keyword == "NOT") {
+                val next = readKeyword(sql, skipIgnorable(sql, materialized.end))
+                if (next?.keyword == "MATERIALIZED") {
+                    i = skipIgnorable(sql, next.end)
+                }
+            } else if (materialized?.keyword == "MATERIALIZED") {
+                i = skipIgnorable(sql, materialized.end)
+            }
+
+            if (i >= sql.length || sql[i] != '(') return null
+            i = skipIgnorable(sql, skipParenthesized(sql, i))
+            if (i < sql.length && sql[i] == ',') {
+                i = skipIgnorable(sql, i + 1)
+                continue
+            }
+            return readKeyword(sql, i)?.keyword
+        }
+        return null
+    }
+
+    private fun skipIgnorable(sql: String, start: Int): Int {
+        var i = start
+        while (i < sql.length) {
+            val ch = sql[i]
+            if (ch.isWhitespace() || ch == ';') {
+                i++
+                continue
+            }
+            if (ch == '-' && i + 1 < sql.length && sql[i + 1] == '-') {
+                i = skipLineComment(sql, i) + 1
+                continue
+            }
+            if (ch == '/' && i + 1 < sql.length && sql[i + 1] == '*') {
+                i = skipBlockComment(sql, i) + 1
+                continue
+            }
+            return i
+        }
+        return i
+    }
+
+    private fun readKeyword(sql: String, start: Int): Keyword? {
+        if (start >= sql.length || !isIdentifierStart(sql[start])) return null
+        var end = start + 1
+        while (end < sql.length && isIdentifierPart(sql[end])) end++
+        return Keyword(sql.substring(start, end).uppercase(), end)
+    }
+
+    private fun skipIdentifier(sql: String, start: Int): Int {
+        var i = skipIgnorable(sql, start)
+        if (i >= sql.length) return i
+        if (sql[i] == '\'' || sql[i] == '"' || sql[i] == '`') return skipQuoted(sql, i, sql[i]) + 1
+        if (sql[i] == '[') return skipBracketIdentifier(sql, i) + 1
+        while (i < sql.length && (isIdentifierPart(sql[i]) || sql[i] == '$')) i++
+        return i
+    }
+
+    private fun skipParenthesized(sql: String, start: Int): Int {
+        var depth = 0
+        var i = start
+        while (i < sql.length) {
+            when (sql[i]) {
+                '\'', '"', '`' -> i = skipQuoted(sql, i, sql[i])
+                '[' -> i = skipBracketIdentifier(sql, i)
+                '-' -> if (i + 1 < sql.length && sql[i + 1] == '-') i = skipLineComment(sql, i)
+                '/' -> if (i + 1 < sql.length && sql[i + 1] == '*') i = skipBlockComment(sql, i)
+                '(' -> depth++
+                ')' -> {
+                    depth--
+                    if (depth == 0) return i + 1
+                }
+            }
+            i++
+        }
+        return sql.length
+    }
+
+    private fun isIdentifierPart(ch: Char): Boolean =
+        isIdentifierStart(ch) || ch.isDigit()
 
     private fun bindValues(stmt: SQLiteStatement, values: List<Any?>) {
         values.forEachIndexed { i, v ->

@@ -1,4 +1,4 @@
-const external = ['electron', 'node:sqlite', 'fs', 'path'];
+const external = ['electron', 'node:sqlite', 'fs', 'path', 'worker_threads'];
 
 // tsc --project electron/tsconfig.json uses rootDir: ".." (project root),
 // so output mirrors the full tree under electron/build/:
@@ -21,6 +21,17 @@ export default [
     output: [
       {
         file: 'electron/dist/plugin-settings.js',
+        format: 'cjs',
+        sourcemap: true,
+      },
+    ],
+    external,
+  },
+  {
+    input: 'electron/build/electron/src/worker.js',
+    output: [
+      {
+        file: 'electron/dist/worker.cjs.js',
         format: 'cjs',
         sourcemap: true,
       },

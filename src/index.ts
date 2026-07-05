@@ -62,12 +62,17 @@ async function nativeCall<T extends Record<string, unknown>>(
   } catch (err) {
     return {
       success: false,
+      // These failures originate in the JS bridge wrapper before native code is called.
       error: {
         code: 'INVALID_PARAMS',
         message: err instanceof Error ? err.message : String(err),
         platform: Capacitor.getPlatform() as 'ios' | 'android',
         method,
-        details: {},
+        details: {
+          nativeCode: 'INVALID_PARAMS',
+          nativeMessage: err instanceof Error ? err.message : String(err),
+          source: 'capacitor-js-bridge',
+        },
       },
     };
   }

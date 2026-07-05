@@ -46,8 +46,7 @@ internal class CapacitorSqlite(private val context: Context) {
         try {
             db.open(entries)
         } catch (e: Exception) {
-            // Remove from map so a retry can create a fresh instance.
-            synchronized(this) { databases.remove(database) }
+            removeFailedOpen(database, db)
             throw e
         }
     }
@@ -130,6 +129,16 @@ internal class CapacitorSqlite(private val context: Context) {
         return db
     }
 
+    private fun removeFailedOpen(database: String, db: Database) {
+        synchronized(this) {
+            // Only remove the instance that failed. A concurrent retry may already
+            // have replaced the map entry after the failed open released its lock.
+            if (databases[database] === db && !db.isOpen) {
+                databases.remove(database)
+            }
+        }
+    }
+
     private fun databasePath(name: String, directory: String?): String {
         // Keep this mapping aligned with OpenOptions.directory documentation.
         // Raw paths are intentionally not accepted across the bridge.
@@ -148,11 +157,15 @@ internal class CapacitorSqlite(private val context: Context) {
     }
 
     /// Parses migration definitions; throws on any malformed entry instead of silently dropping it.
-    private fun parseMigrations(raw: List<Map<String, Any?>>): List<MigrationEntry> =
-        raw.mapIndexed { index, item ->
+    private fun parseMigrations(raw: List<Map<String, Any?>>): List<MigrationEntry> {
+        val seenVersions = mutableSetOf<Int>()
+        return raw.mapIndexed { index, item ->
             val version = (item["version"] as? Number)?.toInt()
             require(version != null && version > 0) {
                 "Migration at index $index: 'version' must be a positive integer"
+            }
+            require(seenVersions.add(version)) {
+                "Migration at index $index: duplicate version $version"
             }
             val rawStatements = item["statements"] as? List<*>
             require(!rawStatements.isNullOrEmpty()) {
@@ -166,4 +179,5 @@ internal class CapacitorSqlite(private val context: Context) {
             }
             MigrationEntry(version, statements)
         }
+    }
 }

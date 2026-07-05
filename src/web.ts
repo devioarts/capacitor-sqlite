@@ -16,7 +16,8 @@ import type {
   SqliteResult,
   SqliteSuccess,
 } from './definitions';
-import { assertSingleSqlStatement } from './sql.js';
+import { findDuplicateMigrationVersion } from './migrations.js';
+import { assertSingleSqlStatement, isInsertStatement } from './sql.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Promiser = (type: string, args?: any) => Promise<any>;
@@ -111,7 +112,7 @@ function validateMigrations(value: unknown): Migration[] {
   if (!Array.isArray(value)) {
     throw new SqliteRuntimeError('MIGRATION_FAILED', "'migrations' must be an array");
   }
-  return value.map((item, index) => {
+  const migrations = value.map((item, index) => {
     if (typeof item !== 'object' || item === null || Array.isArray(item)) {
       throw new SqliteRuntimeError('MIGRATION_FAILED', `Migration at index ${index}: entry must be an object`);
     }
@@ -133,6 +134,14 @@ function validateMigrations(value: unknown): Migration[] {
     );
     return { version: migration.version as number, statements };
   });
+  const duplicate = findDuplicateMigrationVersion(migrations);
+  if (duplicate) {
+    throw new SqliteRuntimeError(
+      'MIGRATION_FAILED',
+      `Migration at index ${duplicate.index}: duplicate version ${duplicate.version}`,
+    );
+  }
+  return migrations;
 }
 
 function validateRunBatchSet(value: unknown): { statement: string; values?: unknown[] }[] {
@@ -183,7 +192,17 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
   }
 
   private err(code: SqliteErrorCode, method: string, err: unknown): SqliteFailure {
-    return { success: false, error: { code, message: extractMessage(err), platform: 'web', method, details: {} } };
+    const message = extractMessage(err);
+    return {
+      success: false,
+      error: {
+        code,
+        message,
+        platform: 'web',
+        method,
+        details: { nativeCode: code, nativeMessage: message, source: 'web-sqlite-wasm' },
+      },
+    };
   }
 
   private enqueue<T>(database: string, fn: () => Promise<T>): Promise<T> {
@@ -192,13 +211,16 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
       () => fn(),
       () => fn(),
     );
-    this.dbQueues.set(
-      database,
-      next.then(
-        () => undefined,
-        () => undefined,
-      ),
+    const tail = next.then(
+      () => undefined,
+      () => undefined,
     );
+    this.dbQueues.set(database, tail);
+    tail.finally(() => {
+      if (this.dbQueues.get(database) === tail && !this.openDbs.has(database) && !this.pendingOpens.has(database)) {
+        this.dbQueues.delete(database);
+      }
+    });
     return next;
   }
 
@@ -242,33 +264,34 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
       return this.err(errorCode(err, 'INVALID_NAME'), 'open', err);
     }
 
-    const openModeError = this.openModeError(database, readonly);
-    if (openModeError) return openModeError;
-    if (this.openDbs.has(database)) return this.okEmpty();
+    return this.enqueue(database, async () => {
+      const openModeError = this.openModeError(database, readonly);
+      if (openModeError) return openModeError;
+      if (this.openDbs.has(database)) return this.okEmpty();
 
-    // Coalesce concurrent open() calls for the same database name.
-    const pending = this.pendingOpens.get(database);
-    if (pending) {
-      const pendingReadonly = this.pendingOpenModes.get(database);
-      if (pendingReadonly !== readonly) {
-        return this.err(
-          'DB_ALREADY_OPEN',
-          'open',
-          new Error(
-            `open: database '${database}' is already opening as ${pendingReadonly ? 'readonly' : 'read/write'}`,
-          ),
-        );
+      const pending = this.pendingOpens.get(database);
+      if (pending) {
+        const pendingReadonly = this.pendingOpenModes.get(database);
+        if (pendingReadonly !== readonly) {
+          return this.err(
+            'DB_ALREADY_OPEN',
+            'open',
+            new Error(
+              `open: database '${database}' is already opening as ${pendingReadonly ? 'readonly' : 'read/write'}`,
+            ),
+          );
+        }
+        return pending;
       }
-      return pending;
-    }
 
-    const openOp = this._doOpen(database, readonly, migrations).finally(() => {
-      this.pendingOpens.delete(database);
-      this.pendingOpenModes.delete(database);
+      const openOp = this._doOpen(database, readonly, migrations).finally(() => {
+        this.pendingOpens.delete(database);
+        this.pendingOpenModes.delete(database);
+      });
+      this.pendingOpens.set(database, openOp);
+      this.pendingOpenModes.set(database, readonly);
+      return openOp;
     });
-    this.pendingOpens.set(database, openOp);
-    this.pendingOpenModes.set(database, readonly);
-    return openOp;
   }
 
   private async _doOpen(database: string, readonly: boolean, migrations: Migration[]): Promise<SqliteResult> {
@@ -342,7 +365,6 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
         const { dbId } = entry;
         await promiser('close', { dbId });
         this.openDbs.delete(database);
-        this.dbQueues.delete(database);
         return this.okEmpty();
       } catch (err) {
         return this.err(errorCode(err, 'CLOSE_FAILED'), 'close', err);
@@ -730,16 +752,42 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
     if (!this.initPromise) {
       this.initPromise = new Promise<Promiser>((resolve, reject) => {
         const holder: { ref?: Promiser } = {};
-        const timeout = window.setTimeout(() => {
+        let worker: Worker | undefined;
+        let settled = false;
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        const clearReadyTimeout = () => {
+          if (timeout !== undefined) {
+            globalThis.clearTimeout(timeout);
+            timeout = undefined;
+          }
+        };
+        timeout = globalThis.setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          worker?.terminate();
           reject(new Error(`sqlite worker did not become ready within ${WORKER_READY_TIMEOUT_MS}ms`));
         }, WORKER_READY_TIMEOUT_MS);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        holder.ref = sqlite3Worker1Promiser({
-          onready: () => {
-            window.clearTimeout(timeout);
-            resolve(holder.ref as Promiser);
-          },
-        }) as any;
+        try {
+          const configuredWorker = sqlite3Worker1Promiser.defaultConfig.worker;
+          worker = typeof configuredWorker === 'function' ? configuredWorker() : configuredWorker;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          holder.ref = sqlite3Worker1Promiser({
+            worker,
+            onready: () => {
+              if (settled) return;
+              settled = true;
+              clearReadyTimeout();
+              resolve(holder.ref as Promiser);
+            },
+          }) as any;
+        } catch (err) {
+          if (!settled) {
+            settled = true;
+            clearReadyTimeout();
+            worker?.terminate();
+            reject(err);
+          }
+        }
       })
         .then((p) => {
           this.promiser = p;
@@ -803,9 +851,4 @@ async function selectRows<T = Record<string, unknown>>(
 async function getTotalChanges(promiser: Promiser, dbId: string): Promise<number> {
   const [row] = await selectRows<{ c: number }>(promiser, dbId, 'SELECT total_changes() AS c');
   return row?.c ?? 0;
-}
-
-function isInsertStatement(sql: string): boolean {
-  const stmtType = sql.trim().split(/\s+/, 1)[0]?.toUpperCase();
-  return stmtType === 'INSERT' || stmtType === 'REPLACE';
 }

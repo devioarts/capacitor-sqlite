@@ -1,6 +1,6 @@
 # Contributing
 
-This guide provides instructions for contributing to this Capacitor plugin.
+This guide provides instructions for contributing to this Capacitor SQLite plugin.
 
 ## Developing
 
@@ -9,15 +9,15 @@ This guide provides instructions for contributing to this Capacitor plugin.
 1. Fork and clone the repo.
 1. Install the dependencies.
 
-    ```shell
-    npm install
-    ```
+   ```shell
+   npm install
+   ```
 
 1. Install SwiftLint if you're on macOS.
 
-    ```shell
-    brew install swiftlint
-    ```
+   ```shell
+   brew install swiftlint
+   ```
 
 ### Scripts
 
@@ -29,6 +29,10 @@ It will compile the TypeScript code from `src/` into ESM JavaScript in `dist/esm
 
 Then, Rollup will bundle the code into a single file at `dist/plugin.js`. This file is used in apps without bundlers by including it as a script in `index.html`.
 
+#### `npm run test:p2`
+
+Runs the current automated regression gate: SQL guard tests, iOS XCTest, Android unit tests, Web/Electron builds, and migration validation tests. Use this before launching the playground manually.
+
 #### `npm run verify`
 
 Build and validate the web and native projects.
@@ -39,7 +43,11 @@ This is useful to run in CI to verify that the plugin builds for all platforms.
 
 Check formatting and code quality, autoformat/autofix if possible.
 
-This template is integrated with ESLint, Prettier, and SwiftLint. Using these tools is completely optional, but the [Capacitor Community](https://github.com/capacitor-community/) strives to have consistent code style and structure for easier cooperation.
+The project uses ESLint, Prettier, SwiftLint, Xcode, and Gradle checks. SwiftLint warnings may remain non-fatal, but serious lint errors should be fixed before review.
+
+### Playground
+
+The playground is the manual integration surface. Run the automated gate before starting it, then use the scenarios in `TESTING.md` to cover Web OPFS, Electron, iOS, and Android behaviour that cannot be fully simulated by unit tests.
 
 ## Publishing
 

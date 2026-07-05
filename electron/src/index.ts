@@ -1,724 +1,188 @@
 // Electron main-process plugin for @devioarts/capacitor-sqlite.
-// Use the generated electron-main.ts (npm run update) for automatic setup.
+// Import @devioarts/capacitor-sqlite/electron/settings from Capacitor Electron
+// tooling, or register this class manually in your app's main-process IPC layer.
 
 import { app } from 'electron';
-import * as fs from 'fs';
-import type * as SqliteType from 'node:sqlite';
 import * as nodePath from 'path';
+import { Worker } from 'worker_threads';
 
 import type {
   CapacitorSqlitePlugin,
   ExecuteOptions,
-  Migration,
   OpenOptions,
   QueryOptions,
   RunBatchOptions,
   RunOptions,
-  SqliteDirectory,
   SqliteErrorCode,
   SqliteFailure,
   SqlitePlatform,
   SqliteResult,
-  SqliteSuccess,
 } from '../../src/definitions';
-import { assertSingleSqlStatement } from '../../src/sql';
 
-type DatabaseSync = InstanceType<typeof SqliteType.DatabaseSync>;
-type SQLiteValue = string | number | boolean | null | Uint8Array | number[];
-type NodeSQLiteValue = null | number | string | bigint | Uint8Array;
-type SQLiteValues = SQLiteValue[];
+type WorkerMethod = Exclude<keyof CapacitorSqlitePlugin, 'getPlatform'>;
+type AnySqliteResult = SqliteResult<Record<string, unknown>>;
 
-interface RunBatchItem {
-  statement: string;
-  values: SQLiteValues;
+interface WorkerRequest {
+  id: number;
+  method: WorkerMethod;
+  options: unknown;
 }
 
-interface DatabaseEntry {
-  db: DatabaseSync;
-  readonly: boolean;
-  path: string;
-  inTransaction: boolean;
+interface WorkerResponse {
+  id: number;
+  result: AnySqliteResult;
 }
 
-const SAFE_DB_NAME = /^[A-Za-z0-9_-]+$/;
-const VALID_DIRECTORIES: readonly SqliteDirectory[] = ['default', 'documents', 'library', 'cache'];
-
-let sqliteModule: typeof SqliteType | null = null;
-let sqliteLoadError: Error | null = null;
-
-class SqliteRuntimeError extends Error {
-  constructor(
-    readonly code: SqliteErrorCode,
-    message: string,
-  ) {
-    super(message);
-  }
-}
-
-function loadSqlite(): typeof SqliteType {
-  if (sqliteModule) return sqliteModule;
-  if (sqliteLoadError) {
-    throw new SqliteRuntimeError('NOT_AVAILABLE', sqliteLoadError.message);
-  }
-
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    sqliteModule = require('node:sqlite') as typeof SqliteType;
-    return sqliteModule;
-  } catch {
-    sqliteLoadError = new Error(
-      'capacitor-sqlite: node:sqlite is not available. Electron with Node 24+ is required. ' +
-        `Current Node version: ${process.version}`,
-    );
-    throw new SqliteRuntimeError('NOT_AVAILABLE', sqliteLoadError.message);
-  }
-}
-
-function isSqliteAvailable(): boolean {
-  try {
-    loadSqlite();
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function assertPlainObject(value: unknown, method: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new SqliteRuntimeError('INVALID_PARAMS', `${method}: options must be a plain object`);
-  }
-  return value as Record<string, unknown>;
-}
-
-function validateName(value: unknown): string {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new SqliteRuntimeError('INVALID_PARAMS', "'database' is required");
-  }
-  if (value !== ':memory:' && !SAFE_DB_NAME.test(value)) {
-    throw new SqliteRuntimeError('INVALID_NAME', `Invalid database name '${value}'. Use only A-Z, a-z, 0-9, _ or -`);
-  }
-  return value;
-}
-
-function validateDirectory(value: unknown): SqliteDirectory {
-  if (value === undefined) return 'default';
-  if (typeof value === 'string' && (VALID_DIRECTORIES as readonly string[]).includes(value)) {
-    return value as SqliteDirectory;
-  }
-  throw new SqliteRuntimeError('INVALID_PARAMS', "'directory' must be one of: default, documents, library or cache");
-}
-
-function validateSql(value: unknown, label: string, code: SqliteErrorCode = 'INVALID_PARAMS'): string {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new SqliteRuntimeError(code, `'${label}' is required`);
-  }
-  try {
-    assertSingleSqlStatement(value, `'${label}'`);
-  } catch (err) {
-    throw new SqliteRuntimeError(code, err instanceof Error ? err.message : String(err));
-  }
-  return value;
-}
-
-function isByteArray(value: unknown): value is number[] {
-  return Array.isArray(value) && value.every((item) => Number.isInteger(item) && item >= 0 && item <= 255);
-}
-
-function validateValues(value: unknown, label: string): SQLiteValues {
-  if (value === undefined) return [];
-  if (!Array.isArray(value)) {
-    throw new SqliteRuntimeError('INVALID_PARAMS', `'${label}' must be an array`);
-  }
-  value.forEach((item, index) => {
-    const valid =
-      item === null ||
-      typeof item === 'string' ||
-      typeof item === 'boolean' ||
-      item instanceof Uint8Array ||
-      isByteArray(item) ||
-      (typeof item === 'number' && Number.isFinite(item));
-    if (!valid) {
-      throw new SqliteRuntimeError('INVALID_PARAMS', `'${label}[${index}]' has an unsupported value type`);
-    }
-    if (typeof item === 'number' && Number.isInteger(item) && !Number.isSafeInteger(item)) {
-      throw new SqliteRuntimeError('INVALID_PARAMS', `'${label}[${index}]' must be within Number.MAX_SAFE_INTEGER`);
-    }
-  });
-  return value as SQLiteValues;
-}
-
-function validateStatements(value: unknown): string[] {
-  if (!Array.isArray(value) || value.length === 0) {
-    throw new SqliteRuntimeError('INVALID_PARAMS', "'statements' must be a non-empty array");
-  }
-  return value.map((item, index) => validateSql(item, `statements[${index}]`));
-}
-
-function validateMigrations(value: unknown): Migration[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value)) {
-    throw new SqliteRuntimeError('MIGRATION_FAILED', "'migrations' must be an array");
-  }
-  return value.map((item, index) => {
-    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
-      throw new SqliteRuntimeError('MIGRATION_FAILED', `Migration at index ${index}: entry must be an object`);
-    }
-    const migration = item as Record<string, unknown>;
-    if (!Number.isInteger(migration.version) || (migration.version as number) < 1) {
-      throw new SqliteRuntimeError(
-        'MIGRATION_FAILED',
-        `Migration at index ${index}: 'version' must be a positive integer`,
-      );
-    }
-    if (!Array.isArray(migration.statements) || migration.statements.length === 0) {
-      throw new SqliteRuntimeError(
-        'MIGRATION_FAILED',
-        `Migration at index ${index}: 'statements' must be a non-empty array`,
-      );
-    }
-    const statements = migration.statements.map((sql, statementIndex) =>
-      validateSql(sql, `migrations[${index}].statements[${statementIndex}]`, 'MIGRATION_FAILED'),
-    );
-    return { version: migration.version as number, statements };
-  });
-}
-
-function validateRunBatchSet(value: unknown): RunBatchItem[] {
-  if (!Array.isArray(value) || value.length === 0) {
-    throw new SqliteRuntimeError('INVALID_PARAMS', "'set' must be a non-empty array");
-  }
-  return value.map((item, index) => {
-    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
-      throw new SqliteRuntimeError('INVALID_PARAMS', `set[${index}] must be an object`);
-    }
-    const batchItem = item as Record<string, unknown>;
-    return {
-      statement: validateSql(batchItem.statement, `set[${index}].statement`),
-      values: validateValues(batchItem.values, `set[${index}].values`),
-    };
-  });
-}
-
-function errorCode(err: unknown, fallback: SqliteErrorCode): SqliteErrorCode {
-  if (err instanceof Error) {
-    const message = err.message.toLowerCase();
-    if (message.includes('transaction is already active')) return 'TRANSACTION_FAILED';
-    if (message.includes('cannot start a transaction within a transaction')) return 'TRANSACTION_FAILED';
-    if (message.includes('no transaction is active')) return 'TRANSACTION_FAILED';
-  }
-  return err instanceof SqliteRuntimeError ? err.code : fallback;
+interface PendingRequest {
+  method: WorkerMethod;
+  resolve: (result: AnySqliteResult) => void;
 }
 
 export class CapacitorSqlite implements CapacitorSqlitePlugin {
-  private databases = new Map<string, DatabaseEntry>();
-  // Coalesces concurrent open() calls for the same database.
-  private pendingOpens = new Map<string, Promise<SqliteResult>>();
-  private pendingOpenModes = new Map<string, boolean>();
-  private pendingOpenPaths = new Map<string, string>();
+  private nextRequestId = 1;
+  private worker: Worker | null = null;
+  private pending = new Map<number, PendingRequest>();
 
-  // MARK: - Unified response helpers
-
-  private ok<T extends Record<string, unknown>>(data: T): SqliteSuccess<T> {
-    return { success: true, data };
-  }
-
-  private okEmpty(): SqliteSuccess<Record<string, never>> {
-    return { success: true, data: {} as Record<string, never> };
-  }
-
-  private err(code: SqliteErrorCode, method: string, err: unknown): SqliteFailure {
-    const message = err instanceof Error ? err.message : String(err);
-    return { success: false, error: { code, message, platform: 'electron', method, details: {} } };
-  }
-
-  // MARK: - getPlatform
+  // MARK: - Plugin metadata
 
   async getPlatform(): Promise<SqliteResult<{ platform: SqlitePlatform }>> {
-    return this.ok({ platform: 'electron' });
+    return { success: true, data: { platform: 'electron' } };
   }
-
-  // MARK: - isAvailable
 
   async isAvailable(): Promise<SqliteResult<{ available: boolean }>> {
-    return this.ok({ available: isSqliteAvailable() });
+    return this.request('isAvailable', undefined) as Promise<SqliteResult<{ available: boolean }>>;
   }
 
-  // MARK: - open
+  // MARK: - Database lifecycle
 
   async open(options: OpenOptions): Promise<SqliteResult> {
-    let database: string;
-    let readonly: boolean;
-    let dbPath: string;
-    let migrations: Migration[];
-    try {
-      const opts = assertPlainObject(options, 'open');
-      database = validateName(opts.database);
-      readonly = opts.readonly === true;
-      const directory = validateDirectory(opts.directory);
-      dbPath = database === ':memory:' ? ':memory:' : this.databasePath(database, directory);
-      migrations = validateMigrations(opts.migrations);
-      if (readonly && migrations.length) {
-        throw new SqliteRuntimeError('MIGRATION_FAILED', 'migrations cannot run when readonly is true');
-      }
-    } catch (err) {
-      return this.err(errorCode(err, 'INVALID_NAME'), 'open', err);
-    }
-
-    const openModeError = this.openModeError(database, readonly, dbPath);
-    if (openModeError) return openModeError;
-    if (this.databases.has(database)) return this.okEmpty();
-
-    const pending = this.pendingOpens.get(database);
-    if (pending) {
-      const pendingReadonly = this.pendingOpenModes.get(database);
-      const pendingPath = this.pendingOpenPaths.get(database);
-      if (pendingReadonly !== readonly || pendingPath !== dbPath) {
-        return this.err(
-          'DB_ALREADY_OPEN',
-          'open',
-          new Error(
-            `open: database '${database}' is already opening as ${pendingReadonly ? 'readonly' : 'read/write'} at '${pendingPath}'`,
-          ),
-        );
-      }
-      return pending;
-    }
-
-    const openOp = this._doOpen(database, readonly, dbPath, migrations).finally(() => {
-      this.pendingOpens.delete(database);
-      this.pendingOpenModes.delete(database);
-      this.pendingOpenPaths.delete(database);
-    });
-    this.pendingOpens.set(database, openOp);
-    this.pendingOpenModes.set(database, readonly);
-    this.pendingOpenPaths.set(database, dbPath);
-    return openOp;
+    return this.request('open', options) as Promise<SqliteResult>;
   }
-
-  private async _doOpen(
-    database: string,
-    readonly: boolean,
-    dbPath: string,
-    migrations: Migration[],
-  ): Promise<SqliteResult> {
-    let db: DatabaseSync | null = null;
-    try {
-      const openModeError = this.openModeError(database, readonly, dbPath);
-      if (openModeError) return openModeError;
-      if (this.databases.has(database)) return this.okEmpty();
-
-      const sqlite = loadSqlite();
-      db = new sqlite.DatabaseSync(dbPath, {
-        readOnly: readonly,
-        enableForeignKeyConstraints: !readonly,
-      });
-
-      if (!readonly) {
-        // Skip WAL for in-memory databases.
-        if (dbPath !== ':memory:') {
-          db.exec('PRAGMA journal_mode = WAL');
-        }
-        if (migrations.length) {
-          this.runMigrations(db, migrations);
-        }
-      }
-
-      this.databases.set(database, { db, readonly, path: dbPath, inTransaction: false });
-      db = null;
-      return this.okEmpty();
-    } catch (err) {
-      if (db) {
-        try {
-          db.close();
-        } catch {
-          /* ignore cleanup error */
-        }
-      }
-      this.databases.delete(database);
-      const code = errorCode(
-        err,
-        err instanceof Error && err.message.includes('Migration') ? 'MIGRATION_FAILED' : 'OPEN_FAILED',
-      );
-      return this.err(code, 'open', err);
-    }
-  }
-
-  // MARK: - close
 
   async close(options: { database: string }): Promise<SqliteResult> {
-    try {
-      const opts = assertPlainObject(options, 'close');
-      const database = validateName(opts.database);
-      const entry = this.requireOpenEntry(database, 'close');
-      this.databases.delete(database);
-      if (entry.inTransaction) {
-        try {
-          entry.db.exec('ROLLBACK');
-        } catch {
-          /* ignore rollback error */
-        }
-      }
-      entry.db.close();
-      return this.okEmpty();
-    } catch (err) {
-      return this.err(errorCode(err, 'CLOSE_FAILED'), 'close', err);
-    }
+    return this.request('close', options) as Promise<SqliteResult>;
   }
-
-  // MARK: - isOpen
 
   async isOpen(options: { database: string }): Promise<SqliteResult<{ open: boolean }>> {
-    try {
-      const opts = assertPlainObject(options, 'isOpen');
-      const database = validateName(opts.database);
-      return this.ok({ open: this.databases.has(database) });
-    } catch (err) {
-      return this.err(errorCode(err, 'INVALID_NAME'), 'isOpen', err);
-    }
+    return this.request('isOpen', options) as Promise<SqliteResult<{ open: boolean }>>;
   }
 
-  // MARK: - getVersion
+  // MARK: - Metadata and maintenance
 
   async getVersion(options: { database: string }): Promise<SqliteResult<{ version: string }>> {
-    try {
-      const opts = assertPlainObject(options, 'getVersion');
-      const database = validateName(opts.database);
-      const db = this.requireOpen(database, 'getVersion');
-      const row = db.prepare('SELECT sqlite_version() AS version').get() as { version: string } | undefined;
-      return this.ok({ version: row?.version ?? '' });
-    } catch (err) {
-      return this.err(errorCode(err, 'VERSION_FAILED'), 'getVersion', err);
-    }
+    return this.request('getVersion', options) as Promise<SqliteResult<{ version: string }>>;
   }
-
-  // MARK: - getSchemaVersion
 
   async getSchemaVersion(options: { database: string }): Promise<SqliteResult<{ version: number }>> {
-    try {
-      const opts = assertPlainObject(options, 'getSchemaVersion');
-      const database = validateName(opts.database);
-      const db = this.requireOpen(database, 'getSchemaVersion');
-      const row = db.prepare('PRAGMA user_version').get() as { user_version: number } | undefined;
-      return this.ok({ version: row?.user_version ?? 0 });
-    } catch (err) {
-      return this.err(errorCode(err, 'SCHEMA_VERSION_FAILED'), 'getSchemaVersion', err);
-    }
+    return this.request('getSchemaVersion', options) as Promise<SqliteResult<{ version: number }>>;
   }
-
-  // MARK: - vacuum
 
   async vacuum(options: { database: string }): Promise<SqliteResult> {
-    try {
-      const opts = assertPlainObject(options, 'vacuum');
-      const database = validateName(opts.database);
-      const entry = this.requireOpenEntry(database, 'vacuum');
-      this.requireWritable(entry, database, 'vacuum', 'VACUUM_FAILED');
-      entry.db.exec('VACUUM');
-      return this.okEmpty();
-    } catch (err) {
-      return this.err(errorCode(err, 'VACUUM_FAILED'), 'vacuum', err);
-    }
+    return this.request('vacuum', options) as Promise<SqliteResult>;
   }
 
-  // MARK: - execute
+  // MARK: - SQL operations
 
   async execute(options: ExecuteOptions): Promise<SqliteResult<{ changes: number }>> {
-    try {
-      const opts = assertPlainObject(options, 'execute');
-      const database = validateName(opts.database);
-      const statements = validateStatements(opts.statements);
-      const transaction = opts.transaction !== false;
-      const entry = this.requireOpenEntry(database, 'execute');
-      this.requireWritable(entry, database, 'execute', 'EXECUTE_FAILED');
-      if (transaction && entry.inTransaction) {
-        throw new SqliteRuntimeError('TRANSACTION_FAILED', `execute: a transaction is already active on '${database}'`);
-      }
-      const db = entry.db;
-      if (transaction) db.exec('BEGIN');
-      try {
-        const before = totalChanges(db);
-        for (const sql of statements) {
-          db.prepare(sql.trim()).run();
-        }
-        const total = totalChanges(db) - before;
-        if (transaction) db.exec('COMMIT');
-        return this.ok({ changes: total });
-      } catch (innerErr) {
-        if (transaction) {
-          try {
-            db.exec('ROLLBACK');
-          } catch {
-            /* ignore rollback error */
-          }
-        }
-        throw innerErr;
-      }
-    } catch (err) {
-      return this.err(errorCode(err, 'EXECUTE_FAILED'), 'execute', err);
-    }
+    return this.request('execute', options) as Promise<SqliteResult<{ changes: number }>>;
   }
-
-  // MARK: - run
 
   async run(options: RunOptions): Promise<SqliteResult<{ changes: number; lastInsertId: number }>> {
-    try {
-      const opts = assertPlainObject(options, 'run');
-      const database = validateName(opts.database);
-      const statement = validateSql(opts.statement, 'statement');
-      const values = convertValues(validateValues(opts.values, 'values'));
-      const entry = this.requireOpenEntry(database, 'run');
-      this.requireWritable(entry, database, 'run', 'EXECUTE_FAILED');
-      const before = totalChanges(entry.db);
-      const result = entry.db.prepare(statement).run(...values);
-      const changes = totalChanges(entry.db) - before;
-      return this.ok({
-        changes,
-        lastInsertId: isInsertStatement(statement) && changes > 0 ? toNumber(result.lastInsertRowid) : 0,
-      });
-    } catch (err) {
-      return this.err(errorCode(err, 'EXECUTE_FAILED'), 'run', err);
-    }
+    return this.request('run', options) as Promise<SqliteResult<{ changes: number; lastInsertId: number }>>;
   }
-
-  // MARK: - runBatch
 
   async runBatch(options: RunBatchOptions): Promise<SqliteResult<{ changes: number; lastInsertId: number }>> {
-    try {
-      const opts = assertPlainObject(options, 'runBatch');
-      const database = validateName(opts.database);
-      const set = validateRunBatchSet(opts.set);
-      const transaction = opts.transaction !== false;
-      const entry = this.requireOpenEntry(database, 'runBatch');
-      this.requireWritable(entry, database, 'runBatch', 'EXECUTE_FAILED');
-      if (transaction && entry.inTransaction) {
-        throw new SqliteRuntimeError(
-          'TRANSACTION_FAILED',
-          `runBatch: a transaction is already active on '${database}'`,
-        );
-      }
-      const db = entry.db;
-
-      if (transaction) db.exec('BEGIN');
-      try {
-        const before = totalChanges(db);
-        for (const item of set) {
-          db.prepare(item.statement).run(...convertValues(item.values));
-        }
-        const changed = totalChanges(db) - before;
-        if (transaction) db.exec('COMMIT');
-        return this.ok({ changes: changed, lastInsertId: 0 });
-      } catch (innerErr) {
-        if (transaction) {
-          try {
-            db.exec('ROLLBACK');
-          } catch {
-            /* ignore rollback error */
-          }
-        }
-        throw innerErr;
-      }
-    } catch (err) {
-      return this.err(errorCode(err, 'EXECUTE_FAILED'), 'runBatch', err);
-    }
+    return this.request('runBatch', options) as Promise<SqliteResult<{ changes: number; lastInsertId: number }>>;
   }
-
-  // MARK: - query
 
   async query<T = Record<string, unknown>>(options: QueryOptions): Promise<SqliteResult<{ rows: T[] }>> {
-    try {
-      const opts = assertPlainObject(options, 'query');
-      const database = validateName(opts.database);
-      const statement = validateSql(opts.statement, 'statement');
-      const values = convertValues(validateValues(opts.values, 'values'));
-      const db = this.requireOpen(database, 'query');
-      const stmt = db.prepare(statement);
-      if (typeof stmt.setReadBigInts === 'function') {
-        stmt.setReadBigInts(true);
-      }
-      const rows = stmt.all(...values).map((row) => normalizeRow(row as Record<string, unknown>)) as T[];
-      return this.ok({ rows });
-    } catch (err) {
-      return this.err(errorCode(err, 'QUERY_FAILED'), 'query', err);
-    }
+    return this.request('query', options) as Promise<SqliteResult<{ rows: T[] }>>;
   }
 
-  // MARK: - transactions
+  // MARK: - Transactions
 
   async beginTransaction(options: { database: string }): Promise<SqliteResult> {
-    try {
-      const opts = assertPlainObject(options, 'beginTransaction');
-      const database = validateName(opts.database);
-      const entry = this.requireOpenEntry(database, 'beginTransaction');
-      this.requireWritable(entry, database, 'beginTransaction', 'TRANSACTION_FAILED');
-      if (entry.inTransaction) {
-        throw new SqliteRuntimeError(
-          'TRANSACTION_FAILED',
-          `beginTransaction: a transaction is already active on '${database}'`,
-        );
-      }
-      entry.db.exec('BEGIN');
-      entry.inTransaction = true;
-      return this.okEmpty();
-    } catch (err) {
-      return this.err(errorCode(err, 'TRANSACTION_FAILED'), 'beginTransaction', err);
-    }
+    return this.request('beginTransaction', options) as Promise<SqliteResult>;
   }
 
   async commitTransaction(options: { database: string }): Promise<SqliteResult> {
-    try {
-      const opts = assertPlainObject(options, 'commitTransaction');
-      const database = validateName(opts.database);
-      const entry = this.requireOpenEntry(database, 'commitTransaction');
-      if (!entry.inTransaction) {
-        throw new SqliteRuntimeError(
-          'TRANSACTION_FAILED',
-          `commitTransaction: no transaction is active on '${database}'`,
-        );
-      }
-      entry.db.exec('COMMIT');
-      entry.inTransaction = false;
-      return this.okEmpty();
-    } catch (err) {
-      return this.err(errorCode(err, 'TRANSACTION_FAILED'), 'commitTransaction', err);
-    }
+    return this.request('commitTransaction', options) as Promise<SqliteResult>;
   }
 
   async rollbackTransaction(options: { database: string }): Promise<SqliteResult> {
+    return this.request('rollbackTransaction', options) as Promise<SqliteResult>;
+  }
+
+  private request(method: WorkerMethod, options: unknown): Promise<AnySqliteResult> {
+    let worker: Worker;
     try {
-      const opts = assertPlainObject(options, 'rollbackTransaction');
-      const database = validateName(opts.database);
-      const entry = this.requireOpenEntry(database, 'rollbackTransaction');
-      if (!entry.inTransaction) {
-        throw new SqliteRuntimeError(
-          'TRANSACTION_FAILED',
-          `rollbackTransaction: no transaction is active on '${database}'`,
-        );
-      }
-      entry.db.exec('ROLLBACK');
-      entry.inTransaction = false;
-      return this.okEmpty();
+      worker = this.getWorker();
     } catch (err) {
-      return this.err(errorCode(err, 'TRANSACTION_FAILED'), 'rollbackTransaction', err);
+      return Promise.resolve(this.failure('NOT_AVAILABLE', method, err));
     }
-  }
 
-  // MARK: - Private helpers
-
-  private runMigrations(db: DatabaseSync, migrations: Migration[]): void {
-    const row = db.prepare('PRAGMA user_version').get() as { user_version: number } | undefined;
-    const current = row?.user_version ?? 0;
-
-    const pending = [...migrations].filter((m) => m.version > current).sort((a, b) => a.version - b.version);
-
-    for (const migration of pending) {
-      db.exec('BEGIN');
+    const id = this.nextRequestId++;
+    const message: WorkerRequest = { id, method, options };
+    return new Promise((resolve) => {
+      this.pending.set(id, { method, resolve });
       try {
-        for (const sql of migration.statements) {
-          db.exec(sql.trim());
-        }
-        db.exec(`PRAGMA user_version = ${migration.version | 0}`);
-        db.exec('COMMIT');
+        worker.postMessage(message);
       } catch (err) {
-        try {
-          db.exec('ROLLBACK');
-        } catch {
-          /* ignore rollback error */
-        }
-        throw new SqliteRuntimeError(
-          'MIGRATION_FAILED',
-          `Migration v${migration.version} failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
+        this.pending.delete(id);
+        resolve(this.failure('UNKNOWN', method, err));
       }
+    });
+  }
+
+  private getWorker(): Worker {
+    if (this.worker) return this.worker;
+
+    const worker = new Worker(nodePath.join(__dirname, 'worker.cjs.js'), {
+      workerData: {
+        paths: {
+          userData: app.getPath('userData'),
+          temp: app.getPath('temp'),
+        },
+      },
+    });
+    worker.on('message', (message: WorkerResponse) => {
+      const pending = this.pending.get(message.id);
+      if (!pending) return;
+      this.pending.delete(message.id);
+      pending.resolve(message.result);
+    });
+    worker.on('error', (err) => {
+      this.failPending('UNKNOWN', err);
+      this.worker = null;
+    });
+    worker.on('exit', (code) => {
+      if (code !== 0) {
+        this.failPending('UNKNOWN', new Error(`Electron SQLite worker exited with code ${code}`));
+      }
+      this.worker = null;
+    });
+    this.worker = worker;
+    return worker;
+  }
+
+  private failPending(code: SqliteErrorCode, err: unknown): void {
+    for (const [id, pending] of this.pending) {
+      this.pending.delete(id);
+      pending.resolve(this.failure(code, pending.method, err));
     }
   }
 
-  private databasePath(name: string, directory: SqliteDirectory): string {
-    const dir = this.directoryPath(directory);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    const resolved = nodePath.resolve(dir, `${name}.db`);
-    const allowedPrefix = nodePath.resolve(dir) + nodePath.sep;
-    if (!resolved.startsWith(allowedPrefix)) {
-      throw new SqliteRuntimeError('INVALID_NAME', `Invalid database path for '${name}'`);
-    }
-    return resolved;
+  private failure(code: SqliteErrorCode, method: string, err: unknown): SqliteFailure {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      success: false,
+      error: {
+        code,
+        message,
+        platform: 'electron',
+        method,
+        details: { nativeCode: code, nativeMessage: message, source: 'electron-worker-proxy' },
+      },
+    };
   }
-
-  private directoryPath(directory: SqliteDirectory): string {
-    if (directory === 'cache') {
-      return nodePath.join(app.getPath('temp') as string, 'capacitor-sqlite', 'CapacitorSQLite');
-    }
-    // `default`, `library`, and `documents` all use userData on Electron. The
-    // `documents` fallback keeps app databases out of the user's visible
-    // Documents folder while still accepting the shared directory enum.
-    return nodePath.join(app.getPath('userData') as string, 'CapacitorSQLite');
-  }
-
-  private requireOpen(name: string, context: string): DatabaseSync {
-    return this.requireOpenEntry(name, context).db;
-  }
-
-  private requireOpenEntry(name: string, context: string): DatabaseEntry {
-    const entry = this.databases.get(name);
-    if (!entry) throw new SqliteRuntimeError('DB_NOT_OPEN', `${context}: database '${name}' is not open`);
-    return entry;
-  }
-
-  private requireWritable(entry: DatabaseEntry, database: string, method: string, code: SqliteErrorCode): void {
-    if (entry.readonly) {
-      throw new SqliteRuntimeError(code, `${method}: database '${database}' is open in readonly mode`);
-    }
-  }
-
-  private openModeError(database: string, readonly: boolean, dbPath: string): SqliteFailure | null {
-    const existing = this.databases.get(database);
-    if (!existing || (existing.readonly === readonly && existing.path === dbPath)) return null;
-    return this.err(
-      'DB_ALREADY_OPEN',
-      'open',
-      new Error(
-        `open: database '${database}' is already open as ${existing.readonly ? 'readonly' : 'read/write'} at '${existing.path}'`,
-      ),
-    );
-  }
-}
-
-function convertValues(values: SQLiteValues): NodeSQLiteValue[] {
-  return values.map((v) => {
-    if (Array.isArray(v)) return new Uint8Array(v);
-    if (typeof v === 'boolean') return BigInt(v ? 1 : 0);
-    // node:sqlite binds all JS numbers as REAL (float64). Convert safe integers to
-    // BigInt so node:sqlite stores them as SQLite INTEGER, preserving typeof() semantics.
-    if (typeof v === 'number' && Number.isInteger(v)) return BigInt(v);
-    return v as NodeSQLiteValue;
-  });
-}
-
-function toNumber(v: number | bigint | undefined | null): number {
-  if (v === undefined || v === null) return 0;
-  return typeof v === 'bigint' ? Number(v) : v;
-}
-
-function totalChanges(db: DatabaseSync): number {
-  const row = db.prepare('SELECT total_changes() AS c').get() as { c: number | bigint } | undefined;
-  return toNumber(row?.c);
-}
-
-function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const key of Object.keys(row)) {
-    out[key] = normalizeValue(row[key]);
-  }
-  return out;
-}
-
-function normalizeValue(value: unknown): unknown {
-  if (typeof value !== 'bigint') return value;
-  const max = BigInt(Number.MAX_SAFE_INTEGER);
-  if (value > max || value < -max) return value.toString();
-  return Number(value);
-}
-
-function isInsertStatement(sql: string): boolean {
-  const stmtType = sql.trim().split(/\s+/, 1)[0]?.toUpperCase();
-  return stmtType === 'INSERT' || stmtType === 'REPLACE';
 }

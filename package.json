@@ -65,6 +65,8 @@
     "test:p0:ios": "xcodebuild test -quiet -scheme DevioartsCapacitorSqlite -destination 'platform=iOS Simulator,name=iPhone 17'",
     "test:p0:android": "cd android && ./gradlew test && cd ..",
     "test:p1": "npm run test:p0 && npm run verify:web && npm run verify:electron",
+    "test:p2": "npm run test:p1 && npm run test:p2:js",
+    "test:p2:js": "tsc --target es2017 --module commonjs --outDir build/test-p2 src/migrations.ts && node --test test/migration-validation.test.cjs",
     "lint": "npm run eslint && npm run prettier -- --check && npm run swiftlint -- lint Package.swift ios/Sources ios/Tests",
     "fmt": "npm run eslint -- --fix && npm run prettier -- --write && npm run swiftlint -- --fix --format Package.swift ios/Sources ios/Tests",
     "eslint": "eslint . --ext ts",

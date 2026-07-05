@@ -27,6 +27,10 @@ class CapacitorSqlitePlugin : Plugin() {
     }
 
     private fun failure(call: PluginCall, code: String, message: String, method: String) {
+        val details = JSObject()
+            .put("nativeCode", code)
+            .put("nativeMessage", message)
+            .put("source", "android-native")
         call.resolve(
             JSObject()
                 .put("success", false)
@@ -35,7 +39,7 @@ class CapacitorSqlitePlugin : Plugin() {
                     .put("message", message)
                     .put("platform", "android")
                     .put("method", method)
-                    .put("details", JSObject())
+                    .put("details", details)
                 )
         )
     }
@@ -120,7 +124,14 @@ class CapacitorSqlitePlugin : Plugin() {
     fun isOpen(call: PluginCall) {
         val database = call.getString("database")
             ?: return failure(call, "INVALID_PARAMS", "'database' is required", "isOpen")
-        success(call, JSObject().put("open", impl.isOpen(database)))
+
+        bridge.execute {
+            try {
+                success(call, JSObject().put("open", impl.isOpen(database)))
+            } catch (e: Exception) {
+                failure(call, errorCode(e, "UNKNOWN"), e.message ?: "isOpen failed", "isOpen")
+            }
+        }
     }
 
     // MARK: - getVersion

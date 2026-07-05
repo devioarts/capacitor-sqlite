@@ -82,11 +82,7 @@ enum SQLiteHelpers {
         }
 
         let changes = totalChanges(db: db) - before
-        let stmtType = sql.trimmingCharacters(in: .whitespacesAndNewlines)
-            .split(whereSeparator: { $0.isWhitespace })
-            .first?
-            .uppercased() ?? ""
-        let inserted = (stmtType == "INSERT" || stmtType == "REPLACE") && changes > 0
+        let inserted = SQLStatement.isInsertLike(sql) && changes > 0
         return (changes, inserted ? sqlite3_last_insert_rowid(db) : 0)
     }
 
