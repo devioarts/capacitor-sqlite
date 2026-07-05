@@ -48,6 +48,9 @@ enum SQLiteHelpers {
     // MARK: - DDL / no-result execution
 
     static func exec(db: OpaquePointer, sql: String) throws {
+        if hasMultipleStatements(sql) {
+            throw SQLiteError.execute("SQL string must contain exactly one statement")
+        }
         if sqlite3_exec(db, sql, nil, nil, nil) != SQLITE_OK {
             let msg = String(validatingUTF8: sqlite3_errmsg(db)) ?? "exec failed"
             throw SQLiteError.execute(msg)
@@ -57,6 +60,9 @@ enum SQLiteHelpers {
     // MARK: - Parameterized DML (single statement)
 
     static func run(db: OpaquePointer, sql: String, values: [Any]) throws -> (changes: Int, lastInsertId: Int64) {
+        if hasMultipleStatements(sql) {
+            throw SQLiteError.prepare("SQL string must contain exactly one statement")
+        }
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
             let msg = String(validatingUTF8: sqlite3_errmsg(db)) ?? "prepare failed"
@@ -84,6 +90,9 @@ enum SQLiteHelpers {
     // MARK: - SELECT
 
     static func query(db: OpaquePointer, sql: String, values: [Any]) throws -> [[String: Any]] {
+        if hasMultipleStatements(sql) {
+            throw SQLiteError.prepare("SQL string must contain exactly one statement")
+        }
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
             let msg = String(validatingUTF8: sqlite3_errmsg(db)) ?? "prepare failed"
@@ -138,6 +147,97 @@ enum SQLiteHelpers {
         try exec(db: db, sql: "VACUUM;")
     }
 
+    static func hasMultipleStatements(_ sql: String) -> Bool {
+        var idx = sql.startIndex
+        while idx < sql.endIndex {
+            let ch = sql[idx]
+            if ch == "'" || ch == "\"" || ch == "`" {
+                idx = skipQuoted(sql, from: idx, quote: ch)
+            } else if ch == "[" {
+                idx = skipBracketIdentifier(sql, from: idx)
+            } else if ch == "-", nextChar(sql, after: idx) == "-" {
+                idx = skipLineComment(sql, from: idx)
+            } else if ch == "/", nextChar(sql, after: idx) == "*" {
+                idx = skipBlockComment(sql, from: idx)
+            } else if ch == ";" {
+                return hasTailContent(sql, from: sql.index(after: idx))
+            }
+            idx = sql.index(after: idx)
+        }
+        return false
+    }
+
+    private static func hasTailContent(_ sql: String, from start: String.Index) -> Bool {
+        var idx = start
+        while idx < sql.endIndex {
+            let ch = sql[idx]
+            if ch == ";" || ch.unicodeScalars.allSatisfy({ CharacterSet.whitespacesAndNewlines.contains($0) }) {
+                idx = sql.index(after: idx)
+                continue
+            }
+            if ch == "-", nextChar(sql, after: idx) == "-" {
+                idx = sql.index(after: skipLineComment(sql, from: idx))
+                continue
+            }
+            if ch == "/", nextChar(sql, after: idx) == "*" {
+                idx = sql.index(after: skipBlockComment(sql, from: idx))
+                continue
+            }
+            return true
+        }
+        return false
+    }
+
+    private static func nextChar(_ sql: String, after idx: String.Index) -> Character? {
+        let next = sql.index(after: idx)
+        return next < sql.endIndex ? sql[next] : nil
+    }
+
+    private static func skipQuoted(_ sql: String, from start: String.Index, quote: Character) -> String.Index {
+        var idx = sql.index(after: start)
+        while idx < sql.endIndex {
+            if sql[idx] == quote {
+                let next = sql.index(after: idx)
+                if next < sql.endIndex && sql[next] == quote {
+                    idx = sql.index(after: next)
+                    continue
+                }
+                return idx
+            }
+            idx = sql.index(after: idx)
+        }
+        return sql.index(before: sql.endIndex)
+    }
+
+    private static func skipBracketIdentifier(_ sql: String, from start: String.Index) -> String.Index {
+        var idx = sql.index(after: start)
+        while idx < sql.endIndex {
+            if sql[idx] == "]" { return idx }
+            idx = sql.index(after: idx)
+        }
+        return sql.index(before: sql.endIndex)
+    }
+
+    private static func skipLineComment(_ sql: String, from start: String.Index) -> String.Index {
+        var idx = sql.index(start, offsetBy: 2, limitedBy: sql.endIndex) ?? sql.endIndex
+        while idx < sql.endIndex {
+            if sql[idx] == "\n" || sql[idx] == "\r" { return idx }
+            idx = sql.index(after: idx)
+        }
+        return sql.index(before: sql.endIndex)
+    }
+
+    private static func skipBlockComment(_ sql: String, from start: String.Index) -> String.Index {
+        var idx = sql.index(start, offsetBy: 2, limitedBy: sql.endIndex) ?? sql.endIndex
+        while idx < sql.endIndex {
+            if sql[idx] == "*", nextChar(sql, after: idx) == "/" {
+                return sql.index(after: idx)
+            }
+            idx = sql.index(after: idx)
+        }
+        return sql.index(before: sql.endIndex)
+    }
+
     // MARK: - Private: bind
 
     private static func bind(stmt: OpaquePointer?, values: [Any]) throws {
@@ -181,9 +281,9 @@ enum SQLiteHelpers {
                     // (objCType = "d"), losing integer type information. Restore it by treating
                     // whole-number doubles as INT64 — consistent with JS Number.isInteger()
                     // semantics and Android/Web/Electron behaviour.
-                    if !d.isNaN && !d.isInfinite && d == d.rounded(.towardZero)
-                        && d >= Double(Int64.min) && d <= Double(Int64.max) {
-                        sqlite3_bind_int64(stmt, idx, Int64(d))
+                    if !d.isNaN && !d.isInfinite,
+                       let i = Int64(exactly: d) {
+                        sqlite3_bind_int64(stmt, idx, i)
                     } else {
                         sqlite3_bind_double(stmt, idx, d)
                     }

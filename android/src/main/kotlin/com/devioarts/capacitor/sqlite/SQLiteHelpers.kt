@@ -21,6 +21,7 @@ internal object SQLiteHelpers {
     // MARK: - DDL / no-result execution
 
     fun exec(db: SQLiteDatabase, sql: String): Long {
+        requireSingleStatement(sql)
         val stmtType = statementType(sql)
         if (isInsertLike(stmtType) || isUpdateDelete(stmtType)) {
             return run(db, sql, emptyList()).changes
@@ -32,6 +33,7 @@ internal object SQLiteHelpers {
     // MARK: - Parameterized DML (single statement)
 
     fun run(db: SQLiteDatabase, sql: String, values: List<Any?>): RunResult {
+        requireSingleStatement(sql)
         val stmt = db.compileStatement(sql)
         try {
             bindValues(stmt, values)
@@ -59,6 +61,7 @@ internal object SQLiteHelpers {
     // literals before rawQuery is called. Only String and null values are passed as rawQuery args.
 
     fun query(db: SQLiteDatabase, sql: String, values: List<Any?>): List<Map<String, Any?>> {
+        requireSingleStatement(sql)
         val (finalSql, finalValues) = injectLiterals(sql, values)
         val strArgs: Array<String?>? = if (finalValues.isEmpty()) null
             else finalValues.map { v ->
@@ -257,7 +260,89 @@ internal object SQLiteHelpers {
         db.execSQL("VACUUM")
     }
 
+    fun requireSingleStatement(sql: String) {
+        require(!hasMultipleStatements(sql)) { "SQL string must contain exactly one statement" }
+    }
+
+    fun hasMultipleStatements(sql: String): Boolean {
+        var i = 0
+        while (i < sql.length) {
+            when (sql[i]) {
+                '\'', '"', '`' -> i = skipQuoted(sql, i, sql[i])
+                '[' -> i = skipBracketIdentifier(sql, i)
+                '-' -> if (i + 1 < sql.length && sql[i + 1] == '-') i = skipLineComment(sql, i)
+                '/' -> if (i + 1 < sql.length && sql[i + 1] == '*') i = skipBlockComment(sql, i)
+                ';' -> return hasTailContent(sql, i + 1)
+            }
+            i++
+        }
+        return false
+    }
+
     // MARK: - Private
+
+    private fun hasTailContent(sql: String, start: Int): Boolean {
+        var i = start
+        while (i < sql.length) {
+            val ch = sql[i]
+            if (ch.isWhitespace() || ch == ';') {
+                i++
+                continue
+            }
+            if (ch == '-' && i + 1 < sql.length && sql[i + 1] == '-') {
+                i = skipLineComment(sql, i) + 1
+                continue
+            }
+            if (ch == '/' && i + 1 < sql.length && sql[i + 1] == '*') {
+                i = skipBlockComment(sql, i) + 1
+                continue
+            }
+            return true
+        }
+        return false
+    }
+
+    private fun skipQuoted(sql: String, start: Int, quote: Char): Int {
+        var i = start + 1
+        while (i < sql.length) {
+            if (sql[i] == quote) {
+                if (i + 1 < sql.length && sql[i + 1] == quote) {
+                    i += 2
+                    continue
+                }
+                return i
+            }
+            i++
+        }
+        return sql.length - 1
+    }
+
+    private fun skipBracketIdentifier(sql: String, start: Int): Int {
+        var i = start + 1
+        while (i < sql.length) {
+            if (sql[i] == ']') return i
+            i++
+        }
+        return sql.length - 1
+    }
+
+    private fun skipLineComment(sql: String, start: Int): Int {
+        var i = start + 2
+        while (i < sql.length) {
+            if (sql[i] == '\n' || sql[i] == '\r') return i
+            i++
+        }
+        return sql.length - 1
+    }
+
+    private fun skipBlockComment(sql: String, start: Int): Int {
+        var i = start + 2
+        while (i < sql.length - 1) {
+            if (sql[i] == '*' && sql[i + 1] == '/') return i + 1
+            i++
+        }
+        return sql.length - 1
+    }
 
     private fun statementType(sql: String): String =
         sql.trimStart().split("\\s+".toRegex()).firstOrNull()?.uppercase() ?: ""

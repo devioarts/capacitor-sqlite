@@ -21,6 +21,7 @@ import type {
   SqliteResult,
   SqliteSuccess,
 } from '../../src/definitions';
+import { assertSingleSqlStatement } from '../../src/sql';
 
 type DatabaseSync = InstanceType<typeof SqliteType.DatabaseSync>;
 type SQLiteValue = string | number | boolean | null | Uint8Array | number[];
@@ -107,9 +108,14 @@ function validateDirectory(value: unknown): SqliteDirectory {
   throw new SqliteRuntimeError('INVALID_PARAMS', "'directory' must be one of: default, documents, library or cache");
 }
 
-function validateSql(value: unknown, label: string): string {
+function validateSql(value: unknown, label: string, code: SqliteErrorCode = 'INVALID_PARAMS'): string {
   if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new SqliteRuntimeError('INVALID_PARAMS', `'${label}' is required`);
+    throw new SqliteRuntimeError(code, `'${label}' is required`);
+  }
+  try {
+    assertSingleSqlStatement(value, `'${label}'`);
+  } catch (err) {
+    throw new SqliteRuntimeError(code, err instanceof Error ? err.message : String(err));
   }
   return value;
 }
@@ -168,7 +174,7 @@ function validateMigrations(value: unknown): Migration[] {
       );
     }
     const statements = migration.statements.map((sql, statementIndex) =>
-      validateSql(sql, `migrations[${index}].statements[${statementIndex}]`),
+      validateSql(sql, `migrations[${index}].statements[${statementIndex}]`, 'MIGRATION_FAILED'),
     );
     return { version: migration.version as number, statements };
   });

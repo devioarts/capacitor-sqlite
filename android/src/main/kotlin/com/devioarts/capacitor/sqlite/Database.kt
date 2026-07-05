@@ -189,6 +189,7 @@ internal class Database(
             try {
                 for (sql in migration.statements) {
                     val trimmed = sql.trim()
+                    SQLiteHelpers.requireSingleStatement(trimmed)
                     handle.execSQL(trimmed)
                 }
                 SQLiteHelpers.setUserVersion(handle, migration.version)
