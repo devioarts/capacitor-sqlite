@@ -207,13 +207,7 @@ internal class CapacitorSqlite(private val context: Context) {
     private fun parseMigrations(raw: List<Map<String, Any?>>): List<MigrationEntry> {
         val seenVersions = mutableSetOf<Int>()
         return raw.mapIndexed { index, item ->
-            val version = (item["version"] as? Number)?.toInt()
-            if (version == null || version <= 0) {
-                throw CapacitorSqliteException(
-                    "MIGRATION_FAILED",
-                    "Migration at index $index: 'version' must be a positive integer"
-                )
-            }
+            val version = parseMigrationVersion(item["version"], index)
             if (!seenVersions.add(version)) {
                 throw CapacitorSqliteException("MIGRATION_FAILED", "Migration at index $index: duplicate version $version")
             }
@@ -235,5 +229,27 @@ internal class CapacitorSqlite(private val context: Context) {
             }
             MigrationEntry(version, statements)
         }
+    }
+
+    // SQLite's `PRAGMA user_version` is stored in a 32-bit signed field in the database
+    // header, and Kotlin's Int is 32-bit too, so the Int.MAX_VALUE cap below is a real
+    // ceiling, not just a sanity check. Web/Electron (isValidMigrationVersion in
+    // migrations.ts) and iOS (maxMigrationVersion in CapacitorSqlite+Helpers.swift) enforce
+    // the same numeric limit for cross-platform consistency.
+    private fun parseMigrationVersion(value: Any?, index: Int): Int {
+        val number = value as? Number
+        val version = number?.toDouble()
+        if (version == null ||
+            !version.isFinite() ||
+            version % 1.0 != 0.0 ||
+            version <= 0.0 ||
+            version > Int.MAX_VALUE.toDouble()
+        ) {
+            throw CapacitorSqliteException(
+                "MIGRATION_FAILED",
+                "Migration at index $index: 'version' must be a positive integer"
+            )
+        }
+        return version.toInt()
     }
 }

@@ -25,6 +25,11 @@ enum SQLStatement {
         return false
     }
 
+    // `WITH cte1 AS (...), cte2 AS (...) <main statement>` — walks past each CTE
+    // definition (name, optional column list, `AS [[NOT] MATERIALIZED] (...)`) to find the
+    // keyword of the statement the CTEs actually feed (SELECT/INSERT/UPDATE/DELETE).
+    // Returns nil if the WITH clause doesn't parse as expected, in which case callers
+    // fall back to treating it as a plain 'WITH' statement type.
     private static func withMainStatementType(_ sql: String, from start: String.Index) -> String? {
         var idx = skipIgnorable(sql, from: start)
         if let recursive = readKeyword(sql, from: idx), recursive.keyword == "RECURSIVE" {

@@ -35,11 +35,17 @@ extension SQLiteHelpers {
     private static func bindArrayBlob(stmt: OpaquePointer?, value: NSArray, idx: Int32) throws {
         var bytes = [UInt8]()
         bytes.reserveCapacity(value.count)
-        for item in value {
+        for (offset, item) in value.enumerated() {
             guard let number = item as? NSNumber else {
-                throw SQLiteError.execute("BLOB value at index \(idx) contains a non-number")
+                throw SQLiteError.execute("BLOB value at index \(idx) contains a non-number at offset \(offset)")
             }
-            bytes.append(UInt8(clamping: number.intValue))
+            let intValue = number.intValue
+            // Reject out-of-range bytes instead of silently clamping them, matching Android
+            // (byteArrayFromList in SQLiteHelpers.kt) and Electron (isByteArray in backend.ts).
+            guard intValue >= 0, intValue <= 255 else {
+                throw SQLiteError.execute("BLOB value at index \(idx) contains an out-of-range byte at offset \(offset)")
+            }
+            bytes.append(UInt8(intValue))
         }
         bindBlob(stmt: stmt, data: Data(bytes), idx: idx)
     }

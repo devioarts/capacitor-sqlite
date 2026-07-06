@@ -1,6 +1,7 @@
 import XCTest
 @testable import CapacitorSqlitePlugin
 
+// swiftlint:disable:next type_body_length
 class CapacitorSqliteTests: XCTestCase {
 
     // swiftlint:disable:next implicitly_unwrapped_optional
@@ -282,6 +283,24 @@ class CapacitorSqliteTests: XCTestCase {
     func testMigrationMissingVersionThrows() {
         let migrations: [[String: Any]] = [
             ["statements": ["CREATE TABLE t (id INTEGER PRIMARY KEY)"]]
+        ]
+        XCTAssertThrowsError(try impl.open(database: ":memory:", readonly: false, migrations: migrations))
+    }
+
+    func testMigrationVersionAtMaxIsAccepted() throws {
+        let migrations: [[String: Any]] = [
+            ["version": 2_147_483_647, "statements": ["CREATE TABLE v1 (id INTEGER PRIMARY KEY)"]]
+        ]
+        try impl.open(database: ":memory:", readonly: false, migrations: migrations)
+        let version = try impl.getSchemaVersion(database: ":memory:")
+        XCTAssertEqual(version, 2_147_483_647)
+    }
+
+    func testMigrationVersionAboveMaxThrows() {
+        // One past the 32-bit signed ceiling shared by every backend (matches SQLite's own
+        // `user_version` field width) — must be rejected up front, not silently truncated.
+        let migrations: [[String: Any]] = [
+            ["version": 2_147_483_648, "statements": ["CREATE TABLE v1 (id INTEGER PRIMARY KEY)"]]
         ]
         XCTAssertThrowsError(try impl.open(database: ":memory:", readonly: false, migrations: migrations))
     }

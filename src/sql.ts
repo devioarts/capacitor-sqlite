@@ -80,6 +80,11 @@ function hasTailContent(sql: string, start: number): boolean {
   return false;
 }
 
+// `WITH cte1 AS (...), cte2 AS (...) <main statement>` — walks past each CTE
+// definition (name, optional column list, `AS [[NOT] MATERIALIZED] (...)`) to find the
+// keyword of the statement the CTEs actually feed (SELECT/INSERT/UPDATE/DELETE).
+// Returns '' if the WITH clause doesn't parse as expected, in which case callers fall
+// back to treating it as a plain 'WITH' statement type.
 function withMainStatementType(sql: string, start: number): string {
   let i = skipIgnorable(sql, start);
   const maybeRecursive = readKeyword(sql, i);

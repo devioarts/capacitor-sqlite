@@ -30,6 +30,10 @@ function encodeValue(v: unknown, label: string): unknown {
     return v;
   }
   if (v instanceof Uint8Array) return Array.from(v);
+  // A plain number[] of bytes is also accepted as a BLOB shorthand on iOS/Android/Electron
+  // (README "Value types"), so it's passed through unchanged here rather than rejected —
+  // reject it here so a malformed byte array fails fast in JS instead of relying on each
+  // native implementation to validate the same thing on its own.
   if (Array.isArray(v)) {
     const validBytes = v.every((item) => Number.isInteger(item) && item >= 0 && item <= 255);
     if (validBytes) return v;

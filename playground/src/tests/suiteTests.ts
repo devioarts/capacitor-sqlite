@@ -4510,6 +4510,25 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
       }
     },
   },
+  {
+    id: 'me-05', group: 'Migration Extras', name: 'Migration version above 2^31-1 → MIGRATION_FAILED',
+    fn: async () => {
+      const DB = 'suite_me05';
+      await silentClose(DB);
+      // 2147483647 (2^31-1) is the shared ceiling across all platforms — it matches
+      // SQLite's own 32-bit `user_version` field. One above that must be rejected
+      // up front rather than silently truncated when written back.
+      assertFail(
+        await CapacitorSqlite.open({
+          database: DB,
+          migrations: [{ version: 2147483648, statements: ['CREATE TABLE IF NOT EXISTS marker_me05 (v INTEGER)'] }],
+        }),
+        'open with out-of-range migration version',
+        'MIGRATION_FAILED',
+      );
+      await silentClose(DB);
+    },
+  },
 
   // ── Result Shape ──────────────────────────────────────────────────────────────
   {

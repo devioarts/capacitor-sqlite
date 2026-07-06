@@ -447,6 +447,11 @@ internal object SQLiteHelpers {
 
     private data class Keyword(val keyword: String, val end: Int)
 
+    // `WITH cte1 AS (...), cte2 AS (...) <main statement>` — walks past each CTE
+    // definition (name, optional column list, `AS [[NOT] MATERIALIZED] (...)`) to find the
+    // keyword of the statement the CTEs actually feed (SELECT/INSERT/UPDATE/DELETE).
+    // Returns null if the WITH clause doesn't parse as expected, in which case callers
+    // fall back to treating it as a plain 'WITH' statement type.
     private fun withMainStatementType(sql: String, start: Int): String? {
         var i = skipIgnorable(sql, start)
         val maybeRecursive = readKeyword(sql, i)

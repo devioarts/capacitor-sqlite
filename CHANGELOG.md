@@ -15,6 +15,7 @@ Changes since `0.0.2`.
 - Expanded `TESTING.md` release-test guidance.
 - Added cross-platform stress benchmark results for Electron, Web/OPFS, Android, and iOS.
 - Added GitHub Actions workflows for fast CI and a manually triggered release matrix with retained platform logs.
+- Added regression tests for the migration-version-bound and BLOB-clamping fixes below: `isValidMigrationVersion` boundary cases in `test/migration-validation.test.cjs` (shared by Web and Electron), new iOS XCTest cases, and `me-05` in the shared suite.
 
 ### Changed
 
@@ -36,6 +37,8 @@ Changes since `0.0.2`.
 - Fixed Android/iOS plugin teardown leaving open database handles until process cleanup.
 - Fixed SwiftLint maintenance warnings; lint now reports 0 violations.
 - Fixed Web runtime coverage gap by running the shared suite in a real browser against sqlite-wasm/OPFS.
+- Fixed migration `version` accepting values above the 32-bit `user_version` ceiling on Web, Electron, and iOS — Web/Electron silently truncated an out-of-range version via a `| 0` cast when writing `PRAGMA user_version`, which could make a migration re-apply on a later `open()` without any error being surfaced; iOS had no upper bound at all. All four platforms now reject `version > 2147483647` up front with `MIGRATION_FAILED`.
+- Fixed iOS BLOB bind values passed as a plain byte array (`number[]`) silently clamping an out-of-range byte instead of rejecting it, matching the existing Android and Electron behavior.
 
 ### Verified
 

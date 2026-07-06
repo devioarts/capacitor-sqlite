@@ -97,6 +97,28 @@ class CapacitorSqliteBindingTests: XCTestCase {
         XCTAssertEqual(rows[0]["v"] as? String, "blob64:" + data.base64EncodedString())
     }
 
+    func testBindArrayBlobAcceptsFullByteRange() throws {
+        try impl.open(database: ":memory:", readonly: false, migrations: [])
+        try impl.execute(database: ":memory:", statements: ["CREATE TABLE t (v BLOB)"])
+        let bytes: [Int] = [0, 128, 255]
+        _ = try impl.run(database: ":memory:", statement: "INSERT INTO t VALUES (?)", values: [bytes])
+        let rows = try impl.query(database: ":memory:", statement: "SELECT v FROM t", values: [])
+        XCTAssertEqual(rows[0]["v"] as? String, "blob64:" + Data([0, 128, 255]).base64EncodedString())
+    }
+
+    func testBindArrayBlobRejectsOutOfRangeByteInsteadOfClamping() throws {
+        try impl.open(database: ":memory:", readonly: false, migrations: [])
+        try impl.execute(database: ":memory:", statements: ["CREATE TABLE t (v BLOB)"])
+        // 256 and -1 previously clamped silently to 255 and 0; must now throw, matching
+        // Android's byteArrayFromList and Electron's isByteArray.
+        XCTAssertThrowsError(
+            try impl.run(database: ":memory:", statement: "INSERT INTO t VALUES (?)", values: [[256]])
+        )
+        XCTAssertThrowsError(
+            try impl.run(database: ":memory:", statement: "INSERT INTO t VALUES (?)", values: [[-1]])
+        )
+    }
+
     func testUnsafeIntegerResultReturnsString() throws {
         try impl.open(database: ":memory:", readonly: false, migrations: [])
         try impl.execute(database: ":memory:", statements: [

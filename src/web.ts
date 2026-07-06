@@ -16,7 +16,7 @@ import type {
   SqliteResult,
   SqliteSuccess,
 } from './definitions';
-import { findDuplicateMigrationVersion } from './migrations.js';
+import { findDuplicateMigrationVersion, isValidMigrationVersion, MAX_MIGRATION_VERSION } from './migrations.js';
 import { assertSingleSqlStatement, isInsertStatement, isQueryResultStatement } from './sql.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -117,10 +117,10 @@ function validateMigrations(value: unknown): Migration[] {
       throw new SqliteRuntimeError('MIGRATION_FAILED', `Migration at index ${index}: entry must be an object`);
     }
     const migration = item as Record<string, unknown>;
-    if (!Number.isInteger(migration.version) || (migration.version as number) < 1) {
+    if (!isValidMigrationVersion(migration.version)) {
       throw new SqliteRuntimeError(
         'MIGRATION_FAILED',
-        `Migration at index ${index}: 'version' must be a positive integer`,
+        `Migration at index ${index}: 'version' must be a positive integer between 1 and ${MAX_MIGRATION_VERSION}`,
       );
     }
     if (!Array.isArray(migration.statements) || migration.statements.length === 0) {
@@ -714,7 +714,9 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
           const trimmed = sql.trim();
           if (trimmed) await execSql(promiser, dbId, trimmed);
         }
-        // Integer-cast version to prevent injection from malformed objects.
+        // `| 0` forces a plain integer literal into the SQL string. Safe from truncation:
+        // validateMigrations() already rejects anything outside 1..MAX_MIGRATION_VERSION
+        // (Int32 range), which is the same range this bitwise op maps to.
         await execSql(promiser, dbId, `PRAGMA user_version = ${migration.version | 0}`);
         await execSql(promiser, dbId, 'COMMIT');
       } catch (err) {

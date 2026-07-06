@@ -42,7 +42,6 @@ Uses Node's built-in `node:sqlite` module from a dedicated worker thread so sync
 import { CapacitorSqlite } from '@devioarts/capacitor-sqlite/electron';
 import { pluginSettings } from '@devioarts/capacitor-sqlite/electron/settings';
 
-// pluginSettings has autoRegister: true for Capacitor Electron tooling.
 // For custom IPC, expose CapacitorSqlite from the main process after app.whenReady().
 ```
 
@@ -134,7 +133,7 @@ await CapacitorSqlite.open({
 
 ## Migrations
 
-`open()` reads `PRAGMA user_version`, then runs every migration whose `version` exceeds the stored value (ascending order). Each migration runs in its own transaction — if it fails the transaction is rolled back and `open()` returns a failure result. Migrations already applied on previous launches are skipped automatically. Versions must be unique within each `open()` call; duplicates return `MIGRATION_FAILED`.
+`open()` reads `PRAGMA user_version`, then runs every migration whose `version` exceeds the stored value (ascending order). Migration versions must be positive integers no greater than `2147483647` (2^31-1) on every platform — this matches the 32-bit field SQLite itself uses to store `user_version`. Each migration runs in its own transaction — if it fails the transaction is rolled back and `open()` returns a failure result. Migrations already applied on previous launches are skipped automatically. Versions must be unique within each `open()` call; duplicates return `MIGRATION_FAILED`.
 
 Calling `open()` again for an already-open database is idempotent only when the `readonly` mode and `directory` match the existing connection. Reopening the same database with a different `readonly` value or `directory` returns `DB_ALREADY_OPEN`.
 

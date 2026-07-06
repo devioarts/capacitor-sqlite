@@ -2,9 +2,9 @@
 
 ## Overview
 
-|               | Count                 | Status                                              |
-| ------------- | --------------------- | --------------------------------------------------- |
-| **Automated** | 365 tests · 72 groups | Verified 2026-07-06: iOS · Android · Web · Electron |
+|               | Count                 | Status                                                                          |
+| ------------- | --------------------- | -------------------------------------------------------------------------------- |
+| **Automated** | 366 tests · 72 groups | Verified 2026-07-06: iOS · Android · Web · Electron (365); `me-05` added 2026-07-07, verified on Electron |
 | **Manual**    | 11 scenarios          | 🔲 Require OS-level control or native tooling       |
 
 Tests are part of the example app (`playground/`).  
@@ -26,7 +26,7 @@ for each full platform run. A local verification may cover only a subset of the 
 
 ## Running from the command line
 
-The 365 suite tests and 11 stress benchmarks are defined once, in
+The 366 suite tests and 11 stress benchmarks are defined once, in
 `playground/src/tests/suiteTests.ts` and `playground/src/tests/stressBenchmarks.ts`, as functions
 that take a `CapacitorSqlitePlugin` implementation and return test/benchmark definitions. The
 playground UI (`PageSuite.tsx` / `PageStress.tsx`) calls these with the real `CapacitorSqlite`
@@ -167,7 +167,7 @@ Platform-specific quirks are documented in [Platform Notes](#platform-notes).
 | Transaction Atomicity | txn-01..05     | mixed-API rollback · in-txn visibility · cross-DB isolation                                                     |
 | Transaction State     | txstate-01..02 | nested begin fails · commit without begin fails                                                                 |
 | lastInsertId          | lid-01..05     | implicit rowid · explicit PK · UPDATE/DELETE return 0 · AUTOINCREMENT                                           |
-| Migration Extras      | me-01..04      | version 0 skip · exact tracking · partial re-apply · failure isolation                                          |
+| Migration Extras      | me-01..05      | version 0 skip · exact tracking · partial re-apply · failure isolation · version above 32-bit ceiling           |
 | Error Handling        | err-01..05     | missing table · syntax error · constraint violations                                                            |
 | Error Format          | ef-01..04      | `{ success, error: { code, message } }` shape · `SCREAMING_SNAKE_CASE` codes                                    |
 | Invalid Params        | ip-01..08      | empty SQL · unsupported types · `NaN`/`Infinity` → null · path traversal · long names                           |

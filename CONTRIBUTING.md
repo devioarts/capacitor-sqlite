@@ -42,7 +42,7 @@ Web/Electron builds, and migration validation tests.
 
 ### Full Suite
 
-The shared behavioral suite currently has 365 tests and 11 stress benchmarks. The same test
+The shared behavioral suite currently has 366 tests and 11 stress benchmarks. The same test
 definitions are used by the playground UI and the CLI runners.
 
 ```shell

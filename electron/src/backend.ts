@@ -17,7 +17,7 @@ import type {
   SqliteResult,
   SqliteSuccess,
 } from '../../src/definitions';
-import { findDuplicateMigrationVersion } from '../../src/migrations.js';
+import { findDuplicateMigrationVersion, isValidMigrationVersion, MAX_MIGRATION_VERSION } from '../../src/migrations.js';
 import { assertSingleSqlStatement, isInsertStatement, isQueryResultStatement } from '../../src/sql.js';
 
 export interface ElectronSqliteBackendPaths {
@@ -174,10 +174,10 @@ function validateMigrations(value: unknown): Migration[] {
       throw new SqliteRuntimeError('MIGRATION_FAILED', `Migration at index ${index}: entry must be an object`);
     }
     const migration = item as Record<string, unknown>;
-    if (!Number.isInteger(migration.version) || (migration.version as number) < 1) {
+    if (!isValidMigrationVersion(migration.version)) {
       throw new SqliteRuntimeError(
         'MIGRATION_FAILED',
-        `Migration at index ${index}: 'version' must be a positive integer`,
+        `Migration at index ${index}: 'version' must be a positive integer between 1 and ${MAX_MIGRATION_VERSION}`,
       );
     }
     if (!Array.isArray(migration.statements) || migration.statements.length === 0) {
@@ -659,6 +659,9 @@ export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
         for (const sql of migration.statements) {
           db.exec(sql.trim());
         }
+        // `| 0` forces a plain integer literal into the SQL string. Safe from truncation:
+        // validateMigrations() already rejects anything outside 1..MAX_MIGRATION_VERSION
+        // (Int32 range), which is the same range this bitwise op maps to.
         db.exec(`PRAGMA user_version = ${migration.version | 0}`);
         db.exec('COMMIT');
       } catch (err) {

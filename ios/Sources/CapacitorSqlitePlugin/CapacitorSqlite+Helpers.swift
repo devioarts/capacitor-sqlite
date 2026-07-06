@@ -98,15 +98,22 @@ extension CapacitorSqlite {
         return url
     }
 
+    // SQLite's `PRAGMA user_version` is stored in a 32-bit signed field in the database
+    // header, so this ceiling is shared by every backend (Android's Kotlin `Int` is
+    // 32-bit and enforces the same limit) — not an arbitrary choice. Swift's `Int` is
+    // 64-bit, so without this check a version above 2_147_483_647 would pass here and
+    // then get silently truncated by SQLite itself when `setUserVersion` writes it.
+    private static let maxMigrationVersion = 2_147_483_647
+
     private func parseMigration(
         _ item: [String: Any],
         index: Int,
         seenVersions: inout Set<Int>
     ) throws -> MigrationEntry {
-        guard let version = item["version"] as? Int, version > 0 else {
+        guard let version = item["version"] as? Int, version > 0, version <= Self.maxMigrationVersion else {
             throw CapacitorSqliteError.failed(
                 code: "MIGRATION_FAILED",
-                message: "Migration at index \(index): 'version' must be a positive integer"
+                message: "Migration at index \(index): 'version' must be a positive integer between 1 and \(Self.maxMigrationVersion)"
             )
         }
         guard seenVersions.insert(version).inserted else {
