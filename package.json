@@ -122,7 +122,8 @@
     "parserOptions": {
       "project": [
         "./tsconfig.eslint.json",
-        "./electron/tsconfig.json"
+        "./electron/tsconfig.json",
+        "./test/suite/tsconfig.json"
       ]
     }
   },

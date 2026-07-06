@@ -23,7 +23,7 @@ platform, or from the CLI runners described below.
 
 ## Running from the command line
 
-The 359 suite tests and 10 stress benchmarks are defined once, in
+The 363 suite tests and 11 stress benchmarks are defined once, in
 `playground/src/tests/suiteTests.ts` and `playground/src/tests/stressBenchmarks.ts`, as functions
 that take a `CapacitorSqlitePlugin` implementation and return test/benchmark definitions. The
 playground UI (`PageSuite.tsx` / `PageStress.tsx`) calls these with the real `CapacitorSqlite`
@@ -37,7 +37,7 @@ code running either way, not a copy.
 | `npm run test:suite:ios` | iOS (Swift/SQLite) | Builds, installs and launches the playground on the currently booted Simulator, then drives its WKWebView over the WebKit Remote Web Inspector protocol (via `appium-remote-debugger`, without a full Appium server) |
 
 Append `:stress` to any of the three (e.g. `npm run test:suite:android:stress`) to also run the
-10 stress benchmarks after the suite. Each command exits non-zero if any test failed, so they're
+11 stress benchmarks after the suite. Each command exits non-zero if any test failed, so they're
 usable as CI gates.
 
 Prerequisites:

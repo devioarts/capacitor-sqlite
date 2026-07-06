@@ -362,6 +362,26 @@ class CapacitorSqliteTests: XCTestCase {
         XCTAssertThrowsError(try impl.query(database: ":memory:", statement: "SELECT 1; SELECT 2", values: []))
     }
 
+    func testExecuteRejectsStatementAfterLeadingBeginTransaction() throws {
+        // A leading BEGIN is a transaction statement, not a trigger-body opener —
+        // "BEGIN; DROP TABLE t" must be rejected as two statements.
+        try impl.open(database: ":memory:", readonly: false, migrations: [])
+        try impl.execute(database: ":memory:", statements: ["CREATE TABLE t (v TEXT)"])
+        XCTAssertThrowsError(
+            try impl.execute(database: ":memory:", statements: ["BEGIN; DROP TABLE t"])
+        )
+        XCTAssertThrowsError(
+            try impl.execute(database: ":memory:", statements: ["BEGIN TRANSACTION; DROP TABLE t; COMMIT"])
+        )
+        // Table must still exist after the rejected batch.
+        let rows = try impl.query(
+            database: ":memory:",
+            statement: "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 't'",
+            values: []
+        )
+        XCTAssertEqual(rows[0]["n"] as? Int64, 1)
+    }
+
     func testBindText() throws {
         try impl.open(database: ":memory:", readonly: false, migrations: [])
         try impl.execute(database: ":memory:", statements: ["CREATE TABLE t (v TEXT)"])

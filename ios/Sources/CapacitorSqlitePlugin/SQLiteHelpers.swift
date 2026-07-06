@@ -152,6 +152,10 @@ enum SQLiteHelpers {
         // semicolon inside one of these blocks isn't mistaken for a statement
         // separator. Only a semicolon seen while this is back at 0 is a real split.
         var blockDepth = 0
+        // `BEGIN` as the very first token is a transaction statement (`BEGIN;`,
+        // `BEGIN TRANSACTION;`), not a trigger-body opener — it must not swallow
+        // the semicolon that follows it ("BEGIN; DROP TABLE t" is two statements).
+        let firstTokenStart = firstMeaningfulIndex(sql)
         while idx < sql.endIndex {
             let ch = sql[idx]
             if ch == "'" || ch == "\"" || ch == "`" {
@@ -165,7 +169,9 @@ enum SQLiteHelpers {
             } else if isIdentifierStart(ch), idx == sql.startIndex || !isIdentifierPart(sql[sql.index(before: idx)]) {
                 let keyword = readKeyword(sql, from: idx)
                 switch keyword.text {
-                case "BEGIN", "CASE":
+                case "BEGIN":
+                    if idx != firstTokenStart { blockDepth += 1 }
+                case "CASE":
                     blockDepth += 1
                 case "END":
                     if blockDepth > 0 { blockDepth -= 1 }
@@ -179,6 +185,27 @@ enum SQLiteHelpers {
             idx = sql.index(after: idx)
         }
         return false
+    }
+
+    private static func firstMeaningfulIndex(_ sql: String) -> String.Index {
+        var idx = sql.startIndex
+        while idx < sql.endIndex {
+            let ch = sql[idx]
+            if ch == ";" || ch.unicodeScalars.allSatisfy({ CharacterSet.whitespacesAndNewlines.contains($0) }) {
+                idx = sql.index(after: idx)
+                continue
+            }
+            if ch == "-", nextChar(sql, after: idx) == "-" {
+                idx = sql.index(after: skipLineComment(sql, from: idx))
+                continue
+            }
+            if ch == "/", nextChar(sql, after: idx) == "*" {
+                idx = sql.index(after: skipBlockComment(sql, from: idx))
+                continue
+            }
+            return idx
+        }
+        return idx
     }
 
     private static func hasTailContent(_ sql: String, from start: String.Index) -> Bool {

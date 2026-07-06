@@ -235,6 +235,9 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
   async isAvailable(): Promise<SqliteResult<{ available: boolean }>> {
     try {
       await this.getOrCreatePromiser();
+      if (typeof SharedArrayBuffer === 'undefined' || !globalThis.crossOriginIsolated) {
+        return this.ok({ available: false });
+      }
       // OPFS is required for persistent file-based databases on web
       await navigator.storage.getDirectory();
       return this.ok({ available: true });
@@ -845,10 +848,30 @@ async function selectRows<T = Record<string, unknown>>(
   // The worker1 message spec nests exec results under .result; guard both shapes.
   const rows = res?.result?.resultRows ?? res?.resultRows;
   if (!Array.isArray(rows)) return [];
-  return rows as T[];
+  return rows.map((row) => normalizeRow(row as Record<string, unknown>)) as T[];
 }
 
 async function getTotalChanges(promiser: Promiser, dbId: string): Promise<number> {
   const [row] = await selectRows<{ c: number }>(promiser, dbId, 'SELECT total_changes() AS c');
   return row?.c ?? 0;
+}
+
+function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(row)) {
+    out[key] = normalizeValue(row[key]);
+  }
+  return out;
+}
+
+function normalizeValue(value: unknown): unknown {
+  if (typeof value === 'bigint') {
+    const max = BigInt(Number.MAX_SAFE_INTEGER);
+    if (value > max || value < -max) return value.toString();
+    return Number(value);
+  }
+  if (typeof value === 'number' && Number.isInteger(value) && !Number.isSafeInteger(value)) {
+    return value.toString();
+  }
+  return value;
 }

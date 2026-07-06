@@ -34,6 +34,23 @@ class SqlStatementGuardTest {
     }
 
     @Test
+    fun leadingBeginTransactionDoesNotMaskFollowingStatement() {
+        // A leading BEGIN is a transaction statement, not a trigger-body opener.
+        assertTrue(SQLiteHelpers.hasMultipleStatements("BEGIN; DROP TABLE t"))
+        assertTrue(SQLiteHelpers.hasMultipleStatements("BEGIN TRANSACTION; DROP TABLE t; COMMIT"))
+        assertTrue(SQLiteHelpers.hasMultipleStatements("/* lead */ BEGIN; DROP TABLE t"))
+        // Standalone transaction statements stay single.
+        assertFalse(SQLiteHelpers.hasMultipleStatements("BEGIN"))
+        assertFalse(SQLiteHelpers.hasMultipleStatements("BEGIN TRANSACTION;"))
+        // Trigger bodies (BEGIN not at statement start) keep working.
+        assertFalse(
+            SQLiteHelpers.hasMultipleStatements(
+                "CREATE TRIGGER trg AFTER INSERT ON t BEGIN UPDATE a SET x = 1; UPDATE b SET y = 2; END"
+            )
+        )
+    }
+
+    @Test
     fun classifiesStatementsAfterLeadingCommentsAndCtes() {
         assertTrue(SQLiteHelpers.statementType("/* lead */ INSERT INTO t VALUES (1)") == "INSERT")
         assertTrue(SQLiteHelpers.statementType("-- lead\nREPLACE INTO t VALUES (1)") == "REPLACE")

@@ -81,7 +81,11 @@ export interface RunOptions {
   statement: string;
   /**
    * Positional values bound to anonymous `?` placeholders, in order.
-   * Integer `number` values must be within `Number.MAX_SAFE_INTEGER`.
+   * `number` values must be finite; integer `number` values must be within
+   * `Number.MAX_SAFE_INTEGER`.
+   *
+   * BLOB values should use `Uint8Array`. Keep BLOB bind values at or below
+   * about 1 MB per value when crossing the Capacitor native bridge.
    *
    * Numbered placeholders (`?1`) and named placeholders (`:name`, `@name`,
    * `$name`) are not part of the cross-platform API contract.
@@ -102,7 +106,11 @@ export interface QueryOptions {
   statement: string;
   /**
    * Positional values bound to anonymous `?` placeholders, in order.
-   * Integer `number` values must be within `Number.MAX_SAFE_INTEGER`.
+   * `number` values must be finite; integer `number` values must be within
+   * `Number.MAX_SAFE_INTEGER`.
+   *
+   * BLOB values should use `Uint8Array`. Keep BLOB bind values at or below
+   * about 1 MB per value when crossing the Capacitor native bridge.
    *
    * On Android, `query()` uses a small SQL scanner before calling
    * `rawQuery(String[])` so numeric, boolean, and BLOB values keep their SQLite

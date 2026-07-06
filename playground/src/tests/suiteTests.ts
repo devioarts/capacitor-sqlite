@@ -4030,46 +4030,40 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
     },
   },
   {
-    id: 'ip-04', group: 'Invalid Params', name: 'run() with object {} param — plugin must not crash',
+    id: 'ip-04', group: 'Invalid Params', name: 'run() with object {} param → INVALID_PARAMS',
     fn: async () => {
       const DB = 'suite_ip04';
       await silentClose(DB);
       assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
       await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (v)'] });
-      // Object as param — must not crash; may fail or bind as NULL/string
       const r = await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES (?)', values: [{} as unknown as null] });
-      assert(typeof r.success === 'boolean', 'result must have success field (no crash)');
+      assertFail(r, 'object bind value', 'INVALID_PARAMS');
       await silentClose(DB);
     },
   },
   {
-    id: 'ip-05', group: 'Invalid Params', name: 'run() with NaN param — JSON bridge converts to null (SQL NULL)',
+    id: 'ip-05', group: 'Invalid Params', name: 'run() with NaN param → INVALID_PARAMS',
     fn: async () => {
       const DB = 'suite_ip05';
       await silentClose(DB);
       assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
       await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (v)'] });
-      // NaN serializes as null in JSON → typically bound as SQL NULL
       const r = await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES (?)', values: [NaN as unknown as null] });
-      assert(typeof r.success === 'boolean', 'must not crash');
-      if (r.success) {
-        const q = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT TYPEOF(v) AS t FROM t' }), 'query');
-        const t = (q.rows[0] as { t: string }).t;
-        assert(['null', 'real', 'integer'].includes(t), `NaN stored as null/real/integer, got: ${t}`);
-      }
+      assertFail(r, 'NaN bind value', 'INVALID_PARAMS');
+      const q = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT COUNT(*) AS n FROM t' }), 'count');
+      assertEqual((q.rows[0] as { n: number }).n, 0, 'NaN bind did not insert a row');
       await silentClose(DB);
     },
   },
   {
-    id: 'ip-06', group: 'Invalid Params', name: 'run() with Infinity param — plugin must not crash',
+    id: 'ip-06', group: 'Invalid Params', name: 'run() with Infinity param → INVALID_PARAMS',
     fn: async () => {
       const DB = 'suite_ip06';
       await silentClose(DB);
       assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
       await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (v)'] });
       const r = await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES (?)', values: [Infinity as unknown as null] });
-      assert(typeof r.success === 'boolean', 'must not crash');
-      // Plugin still functional after edge-case
+      assertFail(r, 'Infinity bind value', 'INVALID_PARAMS');
       const q = await CapacitorSqlite.query({ database: DB, statement: 'SELECT 1 AS ok' });
       assert(q.success, 'DB still functional after Infinity param');
       await silentClose(DB);

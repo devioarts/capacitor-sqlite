@@ -25,6 +25,7 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
     ]
 
     private let impl = CapacitorSqlite()
+    private let workQueue = DispatchQueue(label: "com.devioarts.capacitor.sqlite.plugin", qos: .userInitiated)
 
     // MARK: - Unified response helpers
 
@@ -62,15 +63,8 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
-    private func errorCode(for message: String, fallback: String) -> String {
-        if message.contains("not open") { return "DB_NOT_OPEN" }
-        if message.contains("Invalid directory") { return "INVALID_PARAMS" }
-        if message.contains("Integer bind value") { return "INVALID_PARAMS" }
-        if message.contains("Invalid database name") { return "INVALID_NAME" }
-        if message.contains("already open") { return "DB_ALREADY_OPEN" }
-        if message.contains("transaction is already active") { return "TRANSACTION_FAILED" }
-        if message.contains("no transaction is active") { return "TRANSACTION_FAILED" }
-        return fallback
+    private func executeSqlite(_ block: @escaping () -> Void) {
+        workQueue.async(execute: block)
     }
 
     // MARK: - getPlatform
@@ -109,13 +103,12 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
             migrations = []
         }
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        executeSqlite { [weak self] in
             guard let self = self else { return }
             do {
                 try self.impl.open(database: database, readonly: readonly, directory: directory, migrations: migrations)
                 self.success(call)
-            } catch CapacitorSqliteError.failed(let msg) {
-                let code = self.errorCode(for: msg, fallback: msg.contains("Migration") ? "MIGRATION_FAILED" : "OPEN_FAILED")
+            } catch CapacitorSqliteError.failed(let code, let msg) {
                 self.failure(call, code: code, message: msg, method: "open")
             } catch {
                 self.failure(call, code: "OPEN_FAILED", message: "open: \(error.localizedDescription)", method: "open")
@@ -130,13 +123,13 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
             failure(call, code: "INVALID_PARAMS", message: "'database' is required", method: "close")
             return
         }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        executeSqlite { [weak self] in
             guard let self = self else { return }
             do {
                 try self.impl.close(database: database)
                 self.success(call)
-            } catch CapacitorSqliteError.failed(let msg) {
-                self.failure(call, code: self.errorCode(for: msg, fallback: "CLOSE_FAILED"), message: msg, method: "close")
+            } catch CapacitorSqliteError.failed(let code, let msg) {
+                self.failure(call, code: code, message: msg, method: "close")
             } catch {
                 self.failure(call, code: "CLOSE_FAILED", message: "close: \(error.localizedDescription)", method: "close")
             }
@@ -150,7 +143,7 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
             failure(call, code: "INVALID_PARAMS", message: "'database' is required", method: "isOpen")
             return
         }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        executeSqlite { [weak self] in
             guard let self = self else { return }
             self.success(call, data: ["open": self.impl.isOpen(database: database)])
         }
@@ -163,13 +156,13 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
             failure(call, code: "INVALID_PARAMS", message: "'database' is required", method: "getVersion")
             return
         }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        executeSqlite { [weak self] in
             guard let self = self else { return }
             do {
                 let version = try self.impl.getVersion(database: database)
                 self.success(call, data: ["version": version])
-            } catch CapacitorSqliteError.failed(let msg) {
-                self.failure(call, code: self.errorCode(for: msg, fallback: "VERSION_FAILED"), message: msg, method: "getVersion")
+            } catch CapacitorSqliteError.failed(let code, let msg) {
+                self.failure(call, code: code, message: msg, method: "getVersion")
             } catch {
                 self.failure(call, code: "VERSION_FAILED", message: "getVersion: \(error.localizedDescription)", method: "getVersion")
             }
@@ -183,15 +176,15 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
             failure(call, code: "INVALID_PARAMS", message: "'database' is required", method: "getSchemaVersion")
             return
         }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        executeSqlite { [weak self] in
             guard let self = self else { return }
             do {
                 let version = try self.impl.getSchemaVersion(database: database)
                 self.success(call, data: ["version": version])
-            } catch CapacitorSqliteError.failed(let msg) {
+            } catch CapacitorSqliteError.failed(let code, let msg) {
                 self.failure(
                     call,
-                    code: self.errorCode(for: msg, fallback: "SCHEMA_VERSION_FAILED"),
+                    code: code,
                     message: msg,
                     method: "getSchemaVersion"
                 )
@@ -213,13 +206,13 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
             failure(call, code: "INVALID_PARAMS", message: "'database' is required", method: "vacuum")
             return
         }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        executeSqlite { [weak self] in
             guard let self = self else { return }
             do {
                 try self.impl.vacuum(database: database)
                 self.success(call)
-            } catch CapacitorSqliteError.failed(let msg) {
-                self.failure(call, code: self.errorCode(for: msg, fallback: "VACUUM_FAILED"), message: msg, method: "vacuum")
+            } catch CapacitorSqliteError.failed(let code, let msg) {
+                self.failure(call, code: code, message: msg, method: "vacuum")
             } catch {
                 self.failure(call, code: "VACUUM_FAILED", message: "vacuum: \(error.localizedDescription)", method: "vacuum")
             }
@@ -242,13 +235,13 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         let transaction = call.getBool("transaction") ?? true
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        executeSqlite { [weak self] in
             guard let self = self else { return }
             do {
                 let changes = try self.impl.execute(database: database, statements: statements, transaction: transaction)
                 self.success(call, data: ["changes": changes])
-            } catch CapacitorSqliteError.failed(let msg) {
-                self.failure(call, code: self.errorCode(for: msg, fallback: "EXECUTE_FAILED"), message: msg, method: "execute")
+            } catch CapacitorSqliteError.failed(let code, let msg) {
+                self.failure(call, code: code, message: msg, method: "execute")
             } catch {
                 self.failure(call, code: "EXECUTE_FAILED", message: "execute: \(error.localizedDescription)", method: "execute")
             }
@@ -267,13 +260,13 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         let values = call.getArray("values") ?? []
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        executeSqlite { [weak self] in
             guard let self = self else { return }
             do {
                 let result = try self.impl.run(database: database, statement: statement, values: values)
                 self.success(call, data: ["changes": result.changes, "lastInsertId": result.lastInsertId])
-            } catch CapacitorSqliteError.failed(let msg) {
-                self.failure(call, code: self.errorCode(for: msg, fallback: "EXECUTE_FAILED"), message: msg, method: "run")
+            } catch CapacitorSqliteError.failed(let code, let msg) {
+                self.failure(call, code: code, message: msg, method: "run")
             } catch {
                 self.failure(call, code: "EXECUTE_FAILED", message: "run: \(error.localizedDescription)", method: "run")
             }
@@ -299,13 +292,13 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         let transaction = call.getBool("transaction") ?? true
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        executeSqlite { [weak self] in
             guard let self = self else { return }
             do {
                 let result = try self.impl.runBatch(database: database, set: set, transaction: transaction)
                 self.success(call, data: ["changes": result.changes, "lastInsertId": result.lastInsertId])
-            } catch CapacitorSqliteError.failed(let msg) {
-                self.failure(call, code: self.errorCode(for: msg, fallback: "EXECUTE_FAILED"), message: msg, method: "runBatch")
+            } catch CapacitorSqliteError.failed(let code, let msg) {
+                self.failure(call, code: code, message: msg, method: "runBatch")
             } catch {
                 self.failure(call, code: "EXECUTE_FAILED", message: "runBatch: \(error.localizedDescription)", method: "runBatch")
             }
@@ -324,13 +317,13 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         let values = call.getArray("values") ?? []
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        executeSqlite { [weak self] in
             guard let self = self else { return }
             do {
                 let rows = try self.impl.query(database: database, statement: statement, values: values)
                 self.success(call, data: ["rows": rows])
-            } catch CapacitorSqliteError.failed(let msg) {
-                self.failure(call, code: self.errorCode(for: msg, fallback: "QUERY_FAILED"), message: msg, method: "query")
+            } catch CapacitorSqliteError.failed(let code, let msg) {
+                self.failure(call, code: code, message: msg, method: "query")
             } catch {
                 self.failure(call, code: "QUERY_FAILED", message: "query: \(error.localizedDescription)", method: "query")
             }
@@ -344,13 +337,13 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
             failure(call, code: "INVALID_PARAMS", message: "'database' is required", method: "beginTransaction")
             return
         }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        executeSqlite { [weak self] in
             guard let self = self else { return }
             do {
                 try self.impl.beginTransaction(database: database)
                 self.success(call)
-            } catch CapacitorSqliteError.failed(let msg) {
-                self.failure(call, code: self.errorCode(for: msg, fallback: "TRANSACTION_FAILED"), message: msg, method: "beginTransaction")
+            } catch CapacitorSqliteError.failed(let code, let msg) {
+                self.failure(call, code: code, message: msg, method: "beginTransaction")
             } catch {
                 self.failure(call, code: "TRANSACTION_FAILED", message: "beginTransaction: \(error.localizedDescription)", method: "beginTransaction")
             }
@@ -364,13 +357,13 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
             failure(call, code: "INVALID_PARAMS", message: "'database' is required", method: "commitTransaction")
             return
         }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        executeSqlite { [weak self] in
             guard let self = self else { return }
             do {
                 try self.impl.commitTransaction(database: database)
                 self.success(call)
-            } catch CapacitorSqliteError.failed(let msg) {
-                self.failure(call, code: self.errorCode(for: msg, fallback: "TRANSACTION_FAILED"), message: msg, method: "commitTransaction")
+            } catch CapacitorSqliteError.failed(let code, let msg) {
+                self.failure(call, code: code, message: msg, method: "commitTransaction")
             } catch {
                 self.failure(call, code: "TRANSACTION_FAILED", message: "commitTransaction: \(error.localizedDescription)", method: "commitTransaction")
             }
@@ -384,13 +377,13 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
             failure(call, code: "INVALID_PARAMS", message: "'database' is required", method: "rollbackTransaction")
             return
         }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        executeSqlite { [weak self] in
             guard let self = self else { return }
             do {
                 try self.impl.rollbackTransaction(database: database)
                 self.success(call)
-            } catch CapacitorSqliteError.failed(let msg) {
-                self.failure(call, code: self.errorCode(for: msg, fallback: "TRANSACTION_FAILED"), message: msg, method: "rollbackTransaction")
+            } catch CapacitorSqliteError.failed(let code, let msg) {
+                self.failure(call, code: code, message: msg, method: "rollbackTransaction")
             } catch {
                 self.failure(call, code: "TRANSACTION_FAILED", message: "rollbackTransaction: \(error.localizedDescription)", method: "rollbackTransaction")
             }

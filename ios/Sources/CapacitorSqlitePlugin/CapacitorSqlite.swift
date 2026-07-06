@@ -1,7 +1,7 @@
 import Foundation
 
 enum CapacitorSqliteError: Error {
-    case failed(message: String)
+    case failed(code: String, message: String)
 }
 
 final class CapacitorSqlite {
@@ -17,14 +17,17 @@ final class CapacitorSqlite {
 
     func open(database: String, readonly: Bool, directory: String? = nil, migrations: [[String: Any]]) throws {
         guard database == ":memory:" || database.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil else {
-            throw CapacitorSqliteError.failed(message: "Invalid database name '\(database)'. Use only A–Z, a–z, 0–9, _ or -")
+            throw CapacitorSqliteError.failed(
+                code: "INVALID_NAME",
+                message: "Invalid database name '\(database)'. Use only A-Z, a-z, 0-9, _ or -"
+            )
         }
         let key = databaseKey(database)
         let path = database == ":memory:" ? ":memory:" : try databasePath(name: database, directory: directory)
         // Throws on malformed entries — no silent drops.
         let entries = try parseMigrations(migrations)
         if readonly && !entries.isEmpty {
-            throw CapacitorSqliteError.failed(message: "Migrations cannot run when readonly is true")
+            throw CapacitorSqliteError.failed(code: "MIGRATION_FAILED", message: "Migrations cannot run when readonly is true")
         }
 
         // Atomically get-or-create the Database instance under lock.
@@ -45,21 +48,16 @@ final class CapacitorSqlite {
         }()
         guard let instance else {
             throw CapacitorSqliteError.failed(
+                code: "DB_ALREADY_OPEN",
                 message: "open: '\(database)' is already open with a different readonly mode or directory"
             )
         }
 
         do {
             try instance.open(migrations: entries)
-        } catch DatabaseError.open(let msg) {
-            removeFailedOpen(key: key, instance: instance)
-            throw CapacitorSqliteError.failed(message: msg)
-        } catch DatabaseError.migration(let msg) {
-            removeFailedOpen(key: key, instance: instance)
-            throw CapacitorSqliteError.failed(message: msg)
         } catch {
             removeFailedOpen(key: key, instance: instance)
-            throw CapacitorSqliteError.failed(message: "open: \(error)")
+            throw mapError(error, fallback: "OPEN_FAILED")
         }
     }
 
@@ -72,12 +70,12 @@ final class CapacitorSqlite {
             return databases[databaseKey(database)]
         }()
         guard let instance else {
-            throw CapacitorSqliteError.failed(message: "close: '\(database)' is not open")
+            throw CapacitorSqliteError.failed(code: "DB_NOT_OPEN", message: "close: '\(database)' is not open")
         }
         do {
             try instance.close()
-        } catch DatabaseError.close(let msg) {
-            throw CapacitorSqliteError.failed(message: msg)
+        } catch {
+            throw mapError(error, fallback: "CLOSE_FAILED")
         }
         lock.lock(); databases.removeValue(forKey: databaseKey(database)); lock.unlock()
     }
@@ -96,8 +94,8 @@ final class CapacitorSqlite {
         let inst = try requireOpen(database, context: "getVersion")
         do {
             return try inst.getVersion()
-        } catch DatabaseError.query(let msg) {
-            throw CapacitorSqliteError.failed(message: "getVersion: \(msg)")
+        } catch {
+            throw mapError(error, fallback: "VERSION_FAILED")
         }
     }
 
@@ -107,8 +105,8 @@ final class CapacitorSqlite {
         let inst = try requireOpen(database, context: "getSchemaVersion")
         do {
             return try inst.getSchemaVersion()
-        } catch DatabaseError.query(let msg) {
-            throw CapacitorSqliteError.failed(message: "getSchemaVersion: \(msg)")
+        } catch {
+            throw mapError(error, fallback: "SCHEMA_VERSION_FAILED")
         }
     }
 
@@ -118,8 +116,8 @@ final class CapacitorSqlite {
         let inst = try requireOpen(database, context: "vacuum")
         do {
             try inst.vacuum()
-        } catch DatabaseError.execute(let msg) {
-            throw CapacitorSqliteError.failed(message: "vacuum: \(msg)")
+        } catch {
+            throw mapError(error, fallback: "VACUUM_FAILED")
         }
     }
 
@@ -129,10 +127,8 @@ final class CapacitorSqlite {
         let inst = try requireOpen(database, context: "execute")
         do {
             return try inst.execute(statements: statements, transaction: transaction)
-        } catch DatabaseError.execute(let msg) {
-            throw CapacitorSqliteError.failed(message: "execute: \(msg)")
-        } catch DatabaseError.transaction(let msg) {
-            throw CapacitorSqliteError.failed(message: "execute: \(msg)")
+        } catch {
+            throw mapError(error, fallback: "EXECUTE_FAILED")
         }
     }
 
@@ -142,8 +138,8 @@ final class CapacitorSqlite {
         let inst = try requireOpen(database, context: "run")
         do {
             return try inst.run(statement: statement, values: values)
-        } catch DatabaseError.run(let msg) {
-            throw CapacitorSqliteError.failed(message: "run: \(msg)")
+        } catch {
+            throw mapError(error, fallback: "EXECUTE_FAILED")
         }
     }
 
@@ -153,8 +149,8 @@ final class CapacitorSqlite {
         let inst = try requireOpen(database, context: "runBatch")
         do {
             return try inst.runBatch(set: set, transaction: transaction)
-        } catch DatabaseError.run(let msg) {
-            throw CapacitorSqliteError.failed(message: "runBatch: \(msg)")
+        } catch {
+            throw mapError(error, fallback: "EXECUTE_FAILED")
         }
     }
 
@@ -164,8 +160,8 @@ final class CapacitorSqlite {
         let inst = try requireOpen(database, context: "query")
         do {
             return try inst.query(statement: statement, values: values)
-        } catch DatabaseError.query(let msg) {
-            throw CapacitorSqliteError.failed(message: "query: \(msg)")
+        } catch {
+            throw mapError(error, fallback: "QUERY_FAILED")
         }
     }
 
@@ -175,8 +171,8 @@ final class CapacitorSqlite {
         let inst = try requireOpen(database, context: "beginTransaction")
         do {
             try inst.beginTransaction()
-        } catch DatabaseError.transaction(let msg) {
-            throw CapacitorSqliteError.failed(message: "beginTransaction: \(msg)")
+        } catch {
+            throw mapError(error, fallback: "TRANSACTION_FAILED")
         }
     }
 
@@ -184,8 +180,8 @@ final class CapacitorSqlite {
         let inst = try requireOpen(database, context: "commitTransaction")
         do {
             try inst.commitTransaction()
-        } catch DatabaseError.transaction(let msg) {
-            throw CapacitorSqliteError.failed(message: "commitTransaction: \(msg)")
+        } catch {
+            throw mapError(error, fallback: "TRANSACTION_FAILED")
         }
     }
 
@@ -193,8 +189,8 @@ final class CapacitorSqlite {
         let inst = try requireOpen(database, context: "rollbackTransaction")
         do {
             try inst.rollbackTransaction()
-        } catch DatabaseError.transaction(let msg) {
-            throw CapacitorSqliteError.failed(message: "rollbackTransaction: \(msg)")
+        } catch {
+            throw mapError(error, fallback: "TRANSACTION_FAILED")
         }
     }
 
@@ -209,7 +205,7 @@ final class CapacitorSqlite {
         inst = databases[databaseKey(name)]
         lock.unlock()
         guard let inst, inst.isOpen else {
-            throw CapacitorSqliteError.failed(message: "\(context): '\(name)' is not open")
+            throw CapacitorSqliteError.failed(code: "DB_NOT_OPEN", message: "\(context): '\(name)' is not open")
         }
         return inst
     }
@@ -247,16 +243,17 @@ final class CapacitorSqlite {
             )
         case "documents":
             guard let docs = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
-                throw CapacitorSqliteError.failed(message: "Cannot resolve Documents directory")
+                throw CapacitorSqliteError.failed(code: "OPEN_FAILED", message: "Cannot resolve Documents directory")
             }
             base = docs
         case "cache":
             guard let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first else {
-                throw CapacitorSqliteError.failed(message: "Cannot resolve Caches directory")
+                throw CapacitorSqliteError.failed(code: "OPEN_FAILED", message: "Cannot resolve Caches directory")
             }
             base = caches
         default:
             throw CapacitorSqliteError.failed(
+                code: "INVALID_PARAMS",
                 message: "Invalid directory '\(directory ?? "")'. Use default, documents, library or cache"
             )
         }
@@ -272,18 +269,51 @@ final class CapacitorSqlite {
         var seenVersions = Set<Int>()
         return try raw.enumerated().map { (idx, item) in
             guard let version = item["version"] as? Int, version > 0 else {
-                throw CapacitorSqliteError.failed(message: "Migration at index \(idx): 'version' must be a positive integer")
+                throw CapacitorSqliteError.failed(
+                    code: "MIGRATION_FAILED",
+                    message: "Migration at index \(idx): 'version' must be a positive integer"
+                )
             }
             guard seenVersions.insert(version).inserted else {
-                throw CapacitorSqliteError.failed(message: "Migration at index \(idx): duplicate version \(version)")
+                throw CapacitorSqliteError.failed(
+                    code: "MIGRATION_FAILED",
+                    message: "Migration at index \(idx): duplicate version \(version)"
+                )
             }
             guard let statements = item["statements"] as? [String], !statements.isEmpty else {
-                throw CapacitorSqliteError.failed(message: "Migration at index \(idx): 'statements' must be a non-empty [String]")
+                throw CapacitorSqliteError.failed(
+                    code: "MIGRATION_FAILED",
+                    message: "Migration at index \(idx): 'statements' must be a non-empty [String]"
+                )
             }
             guard statements.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
-                throw CapacitorSqliteError.failed(message: "Migration at index \(idx): 'statements' entries must be non-empty strings")
+                throw CapacitorSqliteError.failed(
+                    code: "MIGRATION_FAILED",
+                    message: "Migration at index \(idx): 'statements' entries must be non-empty strings"
+                )
             }
             return MigrationEntry(version: version, statements: statements)
+        }
+    }
+
+    private func mapError(_ error: Error, fallback: String) -> CapacitorSqliteError {
+        switch error {
+        case let err as CapacitorSqliteError:
+            return err
+        case DatabaseError.notOpen(let message):
+            return .failed(code: "DB_NOT_OPEN", message: message)
+        case DatabaseError.transaction(let message):
+            return .failed(code: "TRANSACTION_FAILED", message: message)
+        case DatabaseError.migration(let message):
+            return .failed(code: "MIGRATION_FAILED", message: message)
+        case DatabaseError.open(let message),
+             DatabaseError.close(let message),
+             DatabaseError.execute(let message),
+             DatabaseError.run(let message),
+             DatabaseError.query(let message):
+            return .failed(code: fallback, message: message)
+        default:
+            return .failed(code: fallback, message: "\(error)")
         }
     }
 }

@@ -81,7 +81,10 @@ internal object SQLiteHelpers {
                 when (v) {
                     null     -> null
                     is String -> v
-                    else     -> throw IllegalArgumentException("Unsupported query value type: ${v?.javaClass?.name}")
+                    else     -> throw CapacitorSqliteException(
+                        "INVALID_PARAMS",
+                        "Unsupported query value type: ${v?.javaClass?.name}"
+                    )
                 }
             }.toTypedArray()
         return db.rawQuery(finalSql, strArgs).use { extractRows(it) }
@@ -119,12 +122,16 @@ internal object SQLiteHelpers {
                 }
                 '?' -> {
                     if (i + 1 < sql.length && sql[i + 1].isDigit()) {
-                        throw IllegalArgumentException(
+                        throw CapacitorSqliteException(
+                            "INVALID_PARAMS",
                             "Only anonymous '?' placeholders are supported; numbered placeholders like '?1' are not supported"
                         )
                     }
-                    require(paramIdx < values.size) {
-                        "Not enough bind values: SQL has more '?' placeholders than values"
+                    if (paramIdx >= values.size) {
+                        throw CapacitorSqliteException(
+                            "INVALID_PARAMS",
+                            "Not enough bind values: SQL has more '?' placeholders than values"
+                        )
                     }
                     appendValue(out, remaining, values[paramIdx], paramIdx + 1)
                     paramIdx++
@@ -132,7 +139,8 @@ internal object SQLiteHelpers {
                 }
                 ':', '@', '$' -> {
                     if (i + 1 < sql.length && isIdentifierStart(sql[i + 1])) {
-                        throw IllegalArgumentException(
+                        throw CapacitorSqliteException(
+                            "INVALID_PARAMS",
                             "Only anonymous '?' placeholders are supported; named placeholders are not supported"
                         )
                     }
@@ -142,8 +150,11 @@ internal object SQLiteHelpers {
                 else -> { out.append(ch); i++ }
             }
         }
-        require(paramIdx == values.size) {
-            "Too many bind values: SQL has $paramIdx anonymous '?' placeholders but ${values.size} values were provided"
+        if (paramIdx != values.size) {
+            throw CapacitorSqliteException(
+                "INVALID_PARAMS",
+                "Too many bind values: SQL has $paramIdx anonymous '?' placeholders but ${values.size} values were provided"
+            )
         }
         return out.toString() to remaining
     }
@@ -154,24 +165,18 @@ internal object SQLiteHelpers {
             is ByteArray -> appendBlobLiteral(out, value)
             is Boolean -> out.append(if (value) "1" else "0")
             is Long -> {
-                require(!isUnsafeInteger(value)) {
-                    "Integer bind value at index $idx must be within Number.MAX_SAFE_INTEGER"
-                }
+                requireSafeInteger(!isUnsafeInteger(value), idx)
                 out.append(value.toString())
             }
             is Int, is Short, is Byte -> out.append(value.toString())
             is Double -> {
-                require(value.isFinite()) { "Numeric bind value at index $idx must be finite" }
-                require(!isUnsafeInteger(value)) {
-                    "Integer bind value at index $idx must be within Number.MAX_SAFE_INTEGER"
-                }
+                requireFinite(value.isFinite(), idx)
+                requireSafeInteger(!isUnsafeInteger(value), idx)
                 out.append(value.toString())
             }
             is Float -> {
-                require(value.isFinite()) { "Numeric bind value at index $idx must be finite" }
-                require(!isUnsafeInteger(value.toDouble())) {
-                    "Integer bind value at index $idx must be within Number.MAX_SAFE_INTEGER"
-                }
+                requireFinite(value.isFinite(), idx)
+                requireSafeInteger(!isUnsafeInteger(value.toDouble()), idx)
                 out.append(value.toString())
             }
             null -> out.append("NULL")
@@ -179,7 +184,25 @@ internal object SQLiteHelpers {
                 out.append('?')
                 remaining.add(value)
             }
-            else -> throw IllegalArgumentException("Unsupported query value type at index $idx: ${value::class.java.name}")
+            else -> throw CapacitorSqliteException(
+                "INVALID_PARAMS",
+                "Unsupported query value type at index $idx: ${value::class.java.name}"
+            )
+        }
+    }
+
+    private fun requireSafeInteger(condition: Boolean, idx: Int) {
+        if (!condition) {
+            throw CapacitorSqliteException(
+                "INVALID_PARAMS",
+                "Integer bind value at index $idx must be within Number.MAX_SAFE_INTEGER"
+            )
+        }
+    }
+
+    private fun requireFinite(condition: Boolean, idx: Int) {
+        if (!condition) {
+            throw CapacitorSqliteException("INVALID_PARAMS", "Numeric bind value at index $idx must be finite")
         }
     }
 
@@ -298,6 +321,10 @@ internal object SQLiteHelpers {
         // semicolon inside one of these blocks isn't mistaken for a statement
         // separator. Only a semicolon seen while this is back at 0 is a real split.
         var blockDepth = 0
+        // `BEGIN` as the very first token is a transaction statement (`BEGIN;`,
+        // `BEGIN TRANSACTION;`), not a trigger-body opener — it must not swallow
+        // the semicolon that follows it ("BEGIN; DROP TABLE t" is two statements).
+        val firstTokenStart = skipIgnorable(sql, 0)
         while (i < sql.length) {
             val ch = sql[i]
             when {
@@ -309,7 +336,8 @@ internal object SQLiteHelpers {
                     val keyword = readKeyword(sql, i)
                     if (keyword != null) {
                         when (keyword.keyword) {
-                            "BEGIN", "CASE" -> blockDepth++
+                            "BEGIN" -> if (i != firstTokenStart) blockDepth++
+                            "CASE" -> blockDepth++
                             "END" -> if (blockDepth > 0) blockDepth--
                         }
                         i = keyword.end - 1
@@ -510,30 +538,27 @@ internal object SQLiteHelpers {
             when (v) {
                 null            -> stmt.bindNull(idx)
                 is Long         -> {
-                    require(!isUnsafeInteger(v)) {
-                        "Integer bind value at index $idx must be within Number.MAX_SAFE_INTEGER"
-                    }
+                    requireSafeInteger(!isUnsafeInteger(v), idx)
                     stmt.bindLong(idx, v)
                 }
                 is Int          -> stmt.bindLong(idx, v.toLong())
                 is Double       -> {
-                    require(!isUnsafeInteger(v)) {
-                        "Integer bind value at index $idx must be within Number.MAX_SAFE_INTEGER"
-                    }
+                    requireSafeInteger(!isUnsafeInteger(v), idx)
                     stmt.bindDouble(idx, v)
                 }
                 is Float        -> {
                     val d = v.toDouble()
-                    require(!isUnsafeInteger(d)) {
-                        "Integer bind value at index $idx must be within Number.MAX_SAFE_INTEGER"
-                    }
+                    requireSafeInteger(!isUnsafeInteger(d), idx)
                     stmt.bindDouble(idx, d)
                 }
                 is Boolean      -> stmt.bindLong(idx, if (v) 1L else 0L)
                 is String       -> stmt.bindString(idx, v)
                 is ByteArray    -> stmt.bindBlob(idx, v)
                 is List<*>      -> stmt.bindBlob(idx, byteArrayFromList(v, idx))
-                else            -> throw IllegalArgumentException("Unsupported bind value type at index $idx: ${v::class.java.name}")
+                else            -> throw CapacitorSqliteException(
+                    "INVALID_PARAMS",
+                    "Unsupported bind value type at index $idx: ${v::class.java.name}"
+                )
             }
         }
     }
@@ -541,10 +566,16 @@ internal object SQLiteHelpers {
     private fun byteArrayFromList(value: List<*>, idx: Int): ByteArray {
         return value.mapIndexed { itemIndex, item ->
             val number = item as? Number
-                ?: throw IllegalArgumentException("BLOB value at index $idx contains a non-number at offset $itemIndex")
+                ?: throw CapacitorSqliteException(
+                    "INVALID_PARAMS",
+                    "BLOB value at index $idx contains a non-number at offset $itemIndex"
+                )
             val intValue = number.toInt()
-            require(intValue in 0..255) {
-                "BLOB value at index $idx contains an out-of-range byte at offset $itemIndex"
+            if (intValue !in 0..255) {
+                throw CapacitorSqliteException(
+                    "INVALID_PARAMS",
+                    "BLOB value at index $idx contains an out-of-range byte at offset $itemIndex"
+                )
             }
             intValue.toByte()
         }.toByteArray()

@@ -89,6 +89,21 @@ test('does not mistake identifiers containing BEGIN/END/CASE as keywords', () =>
   );
 });
 
+test('a leading BEGIN (transaction) does not mask a following statement', () => {
+  // A leading BEGIN is a transaction statement, not a trigger-body opener.
+  assert.equal(hasMultipleSqlStatements('BEGIN; DROP TABLE t'), true);
+  assert.equal(hasMultipleSqlStatements('BEGIN TRANSACTION; DROP TABLE t; COMMIT'), true);
+  assert.equal(hasMultipleSqlStatements('/* lead */ BEGIN; DROP TABLE t'), true);
+  // Standalone transaction statements stay single.
+  assert.equal(hasMultipleSqlStatements('BEGIN'), false);
+  assert.equal(hasMultipleSqlStatements('BEGIN TRANSACTION;'), false);
+  // Trigger bodies (BEGIN not at statement start) keep working.
+  assert.equal(
+    hasMultipleSqlStatements('CREATE TRIGGER trg AFTER INSERT ON t BEGIN UPDATE a SET x = 1; UPDATE b SET y = 2; END'),
+    false,
+  );
+});
+
 test('handles a trigger with a WHEN clause and nested CASE expressions', () => {
   assert.equal(
     hasMultipleSqlStatements(

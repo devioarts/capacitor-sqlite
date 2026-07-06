@@ -30,6 +30,9 @@ internal class Database(
             val handle = SQLiteHelpers.open(path, readonly)
             db = handle
             try {
+                // PRAGMA busy_timeout returns the new value as a result row;
+                // Android's execSQL() rejects row-returning statements.
+                handle.rawQuery("PRAGMA busy_timeout = 5000", null).use { it.moveToFirst() }
                 if (!readonly) {
                     // WAL requires a real file; in-memory databases skip it.
                     if (path != ":memory:") handle.enableWriteAheadLogging()
@@ -67,7 +70,7 @@ internal class Database(
         val handle = requireOpen("execute")
         requireWritable("execute")
         if (transaction && handle.inTransaction()) {
-            throw IllegalStateException("execute: a transaction is already active on '$name'")
+            throw CapacitorSqliteException("TRANSACTION_FAILED", "execute: a transaction is already active on '$name'")
         }
         if (transaction) SQLiteHelpers.beginTransaction(handle)
         var totalChanges = 0L
@@ -100,7 +103,7 @@ internal class Database(
         requireWritable("runBatch")
 
         if (transaction && handle.inTransaction()) {
-            throw IllegalStateException("runBatch: a transaction is already active on '$name'")
+            throw CapacitorSqliteException("TRANSACTION_FAILED", "runBatch: a transaction is already active on '$name'")
         }
         if (transaction) SQLiteHelpers.beginTransaction(handle)
         var totalChanges = 0L
@@ -155,7 +158,10 @@ internal class Database(
         val handle = requireOpen("beginTransaction")
         requireWritable("beginTransaction")
         if (handle.inTransaction()) {
-            throw IllegalStateException("beginTransaction: a transaction is already active on '$name'")
+            throw CapacitorSqliteException(
+                "TRANSACTION_FAILED",
+                "beginTransaction: a transaction is already active on '$name'"
+            )
         }
         handle.beginTransactionNonExclusive()
     }
@@ -163,14 +169,24 @@ internal class Database(
     @Throws(Exception::class)
     fun commitTransaction(): Unit = lock.withLock {
         val handle = requireOpen("commitTransaction")
-        check(handle.inTransaction()) { "commitTransaction: no transaction is active on '$name'" }
+        if (!handle.inTransaction()) {
+            throw CapacitorSqliteException(
+                "TRANSACTION_FAILED",
+                "commitTransaction: no transaction is active on '$name'"
+            )
+        }
         SQLiteHelpers.commitTransaction(handle)
     }
 
     @Throws(Exception::class)
     fun rollbackTransaction(): Unit = lock.withLock {
         val handle = requireOpen("rollbackTransaction")
-        check(handle.inTransaction()) { "rollbackTransaction: no transaction is active on '$name'" }
+        if (!handle.inTransaction()) {
+            throw CapacitorSqliteException(
+                "TRANSACTION_FAILED",
+                "rollbackTransaction: no transaction is active on '$name'"
+            )
+        }
         SQLiteHelpers.rollbackTransaction(handle)
     }
 
@@ -196,7 +212,11 @@ internal class Database(
                 handle.setTransactionSuccessful()
             } catch (e: Exception) {
                 handle.endTransaction()
-                throw Exception("Migration v${migration.version} failed: ${e.message}")
+                throw CapacitorSqliteException(
+                    "MIGRATION_FAILED",
+                    "Migration v${migration.version} failed: ${e.message}",
+                    e
+                )
             }
             handle.endTransaction()
         }
@@ -207,7 +227,9 @@ internal class Database(
     @Throws(IllegalStateException::class)
     private fun requireOpen(context: String): SQLiteDatabase {
         val handle = db
-        check(handle != null && handle.isOpen) { "$context: '$name' is not open" }
+        if (handle == null || !handle.isOpen) {
+            throw CapacitorSqliteException("DB_NOT_OPEN", "$context: '$name' is not open")
+        }
         return handle
     }
 

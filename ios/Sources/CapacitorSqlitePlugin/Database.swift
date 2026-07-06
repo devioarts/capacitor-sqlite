@@ -138,6 +138,7 @@ final class Database {
         }
         do {
             openState = true
+            try pragma("PRAGMA busy_timeout = 5000;")
 
             guard !readonly else { return }
 
