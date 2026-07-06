@@ -18,9 +18,11 @@ export const pluginSettings = {
     'rollbackTransaction',
   ] as const,
   pluginEvents: [] as const,
-  autoRegister: true,
-  imports: ["import { CapacitorSqlite } from '@devioarts/capacitor-sqlite/electron'"] as const,
-  beforeRegister: ['await app.whenReady()'] as const,
+  // optional, default is true
+  // autoRegister: true,
+
+  // add only if the plugin reads plugins.TCPClient from capacitor.config
+  // configSections: ['TCPClient'],
 } as const;
 
 export type PluginSettings = typeof pluginSettings;

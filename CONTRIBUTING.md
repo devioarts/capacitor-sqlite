@@ -39,6 +39,13 @@ Build and validate the web and native projects.
 
 This is useful to run in CI to verify that the plugin builds for all platforms.
 
+#### `npm run test:suite:electron` / `test:suite:android` / `test:suite:ios`
+
+Run the full 359-test playground suite (and, with a `:stress` suffix, the 10 stress benchmarks)
+from the command line instead of clicking through the playground UI — same test definitions
+(`playground/src/tests/`), driven directly against each platform's backend. See
+[TESTING.md](TESTING.md#running-from-the-command-line) for prerequisites and how each one connects.
+
 #### `npm run lint` / `npm run fmt`
 
 Check formatting and code quality, autoformat/autofix if possible.

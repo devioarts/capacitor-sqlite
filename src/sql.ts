@@ -1,4 +1,8 @@
 export function hasMultipleSqlStatements(sql: string): boolean {
+  // Tracks BEGIN/CASE ... END nesting (trigger bodies, CASE expressions) so a
+  // semicolon inside one of these blocks isn't mistaken for a statement
+  // separator. Only a semicolon seen while this is back at 0 is a real split.
+  let blockDepth = 0;
   for (let i = 0; i < sql.length; i++) {
     const ch = sql[i];
     if (ch === "'" || ch === '"' || ch === '`') {
@@ -9,7 +13,17 @@ export function hasMultipleSqlStatements(sql: string): boolean {
       i = skipLineComment(sql, i);
     } else if (ch === '/' && sql[i + 1] === '*') {
       i = skipBlockComment(sql, i);
-    } else if (ch === ';') {
+    } else if (/[A-Za-z_]/.test(ch) && (i === 0 || !/[A-Za-z0-9_]/.test(sql[i - 1]))) {
+      const keyword = readKeyword(sql, i);
+      if (keyword) {
+        if (keyword.keyword === 'BEGIN' || keyword.keyword === 'CASE') {
+          blockDepth++;
+        } else if (keyword.keyword === 'END' && blockDepth > 0) {
+          blockDepth--;
+        }
+        i = keyword.end - 1;
+      }
+    } else if (ch === ';' && blockDepth === 0) {
       return hasTailContent(sql, i + 1);
     }
   }

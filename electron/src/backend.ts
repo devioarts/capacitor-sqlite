@@ -17,8 +17,8 @@ import type {
   SqliteResult,
   SqliteSuccess,
 } from '../../src/definitions';
-import { findDuplicateMigrationVersion } from '../../src/migrations';
-import { assertSingleSqlStatement, isInsertStatement } from '../../src/sql';
+import { findDuplicateMigrationVersion } from '../../src/migrations.js';
+import { assertSingleSqlStatement, isInsertStatement } from '../../src/sql.js';
 
 export interface ElectronSqliteBackendPaths {
   userData: string;

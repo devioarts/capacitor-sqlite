@@ -294,13 +294,28 @@ internal object SQLiteHelpers {
 
     fun hasMultipleStatements(sql: String): Boolean {
         var i = 0
+        // Tracks BEGIN/CASE ... END nesting (trigger bodies, CASE expressions) so a
+        // semicolon inside one of these blocks isn't mistaken for a statement
+        // separator. Only a semicolon seen while this is back at 0 is a real split.
+        var blockDepth = 0
         while (i < sql.length) {
-            when (sql[i]) {
-                '\'', '"', '`' -> i = skipQuoted(sql, i, sql[i])
-                '[' -> i = skipBracketIdentifier(sql, i)
-                '-' -> if (i + 1 < sql.length && sql[i + 1] == '-') i = skipLineComment(sql, i)
-                '/' -> if (i + 1 < sql.length && sql[i + 1] == '*') i = skipBlockComment(sql, i)
-                ';' -> return hasTailContent(sql, i + 1)
+            val ch = sql[i]
+            when {
+                ch == '\'' || ch == '"' || ch == '`' -> i = skipQuoted(sql, i, ch)
+                ch == '[' -> i = skipBracketIdentifier(sql, i)
+                ch == '-' && i + 1 < sql.length && sql[i + 1] == '-' -> i = skipLineComment(sql, i)
+                ch == '/' && i + 1 < sql.length && sql[i + 1] == '*' -> i = skipBlockComment(sql, i)
+                isIdentifierStart(ch) && (i == 0 || !isIdentifierPart(sql[i - 1])) -> {
+                    val keyword = readKeyword(sql, i)
+                    if (keyword != null) {
+                        when (keyword.keyword) {
+                            "BEGIN", "CASE" -> blockDepth++
+                            "END" -> if (blockDepth > 0) blockDepth--
+                        }
+                        i = keyword.end - 1
+                    }
+                }
+                ch == ';' && blockDepth == 0 -> return hasTailContent(sql, i + 1)
             }
             i++
         }

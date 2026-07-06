@@ -4,16 +4,51 @@
 
 |  | Count | Status |
 |--|-------|--------|
-| **Automated** | 359 tests · 72 groups | ✅ All passing on iOS · Android · Web · Electron |
+| **Automated** | 363 tests · 72 groups | ✅ All passing on iOS · Android · Web · Electron |
 | **Manual** | 11 scenarios | 🔲 Require OS-level control or native tooling |
 
 Tests are part of the example app (`playground/`).  
 Build and launch it on a target platform, open the **Test Suite** tab, and press **Run All**.  
-Throughput and latency benchmarks run separately from the **Load Tests** tab (10 scenarios).
+Throughput and latency benchmarks run separately from the **Load Tests** tab (11 scenarios).
+
+The same test definitions (`playground/src/tests/suiteTests.ts` and `stressBenchmarks.ts`) are
+shared with a set of CLI runners — see [Running from the command line](#running-from-the-command-line)
+— so the full suite can also be run outside the playground UI, without clicking through the app.
 
 `npm run verify` checks that the plugin builds for the supported targets. The full
 cross-platform behavioral suite above is run from the playground app on each target
-platform.
+platform, or from the CLI runners described below.
+
+---
+
+## Running from the command line
+
+The 359 suite tests and 10 stress benchmarks are defined once, in
+`playground/src/tests/suiteTests.ts` and `playground/src/tests/stressBenchmarks.ts`, as functions
+that take a `CapacitorSqlitePlugin` implementation and return test/benchmark definitions. The
+playground UI (`PageSuite.tsx` / `PageStress.tsx`) calls these with the real `CapacitorSqlite`
+import; the CLI runners below call them with a platform backend directly, so it's the same test
+code running either way, not a copy.
+
+| Command | Platform | How it connects |
+|---------|----------|------------------|
+| `npm run test:suite:electron` | Electron (node:sqlite) | Runs `ElectronSqliteBackend` in plain Node — no Electron process needed |
+| `npm run test:suite:android` | Android (Kotlin/SQLite) | Builds, installs and launches the playground on the currently running emulator/device, then drives its WebView over Chrome DevTools Protocol via `adb forward` |
+| `npm run test:suite:ios` | iOS (Swift/SQLite) | Builds, installs and launches the playground on the currently booted Simulator, then drives its WKWebView over the WebKit Remote Web Inspector protocol (via `appium-remote-debugger`, without a full Appium server) |
+
+Append `:stress` to any of the three (e.g. `npm run test:suite:android:stress`) to also run the
+10 stress benchmarks after the suite. Each command exits non-zero if any test failed, so they're
+usable as CI gates.
+
+Prerequisites:
+- **Electron**: none beyond Node 24+ (uses `node:sqlite`).
+- **Android**: an emulator or device already running and visible to `adb` (`$ANDROID_HOME/platform-tools/adb devices`).
+- **iOS**: a Simulator already booted (`xcrun simctl boot "iPhone 17 Pro"`), matching the
+  destination name used in the `test:suite:ios:build` script.
+
+There's no CLI runner for the Web (WASM) backend: `@sqlite.org/sqlite-wasm`'s Node build doesn't
+expose the Worker1 API the web plugin uses, and OPFS (the persistent storage it targets) only
+exists in a browser. Use the playground's Web build for that platform.
 
 ---
 
@@ -71,7 +106,7 @@ Platform-specific quirks are documented in [Platform Notes](#platform-notes).
 | SQL Functions | fn-01..14 | COALESCE · NULLIF · IFNULL · CASE · string functions · LIKE/GLOB |
 | Set Operations | set-01..04 | UNION · UNION ALL · INTERSECT · EXCEPT |
 | EXISTS | exists-01..02 | `EXISTS` / `NOT EXISTS` subqueries |
-| Triggers | trg-01..05 | AFTER INSERT · BEFORE DELETE · AFTER UPDATE · DROP TRIGGER · INSTEAD OF |
+| Triggers | trg-01..09 | AFTER INSERT · BEFORE DELETE · AFTER UPDATE · DROP TRIGGER · INSTEAD OF · `CASE` body · `WHEN` clause · cascading triggers · begin/end/case-like identifiers |
 | Trigger Rollback | trrb-01..02 | BEFORE INSERT raises → no row · AFTER INSERT raises → rollback |
 | Conflict Policies | conf-01..05 | OR IGNORE · OR REPLACE · OR ABORT · OR ROLLBACK · OR FAIL |
 | Savepoints | svp-01..02 | `SAVEPOINT` + `RELEASE` · `ROLLBACK TO` partial rollback |
@@ -135,6 +170,29 @@ Platform-specific quirks are documented in [Platform Notes](#platform-notes).
 | Soak Tests | soak-01..03 | 50 open/insert/query/close cycles · 30 failing queries (stability) · 20× 50 KB BLOB insert/delete |
 
 ---
+
+## Fixed Issues
+
+**Triggers with a multi-statement `BEGIN ... END` body (8 tests, all platforms) — fixed.**
+The single-statement guard used by `execute()` (`hasMultipleSqlStatements` — `src/sql.ts` for
+Web/Electron, `SQLiteHelpers.kt` for Android, `SQLiteHelpers.swift` for iOS: three independent
+ports of the same character-scanning algorithm) didn't track `BEGIN ... END` nesting, so a
+semicolon inside a trigger body (or a `CASE ... END` expression) was mistaken for a statement
+separator. This either rejected the `CREATE TRIGGER` outright
+(`'statements[n]' must contain exactly one SQL statement`) or — since `execute()` validates every
+statement in a batch before running any of them — silently aborted the whole batch, so earlier
+`CREATE TABLE` statements in the same call never ran either (`no such table: <side-effect table>`
+later, when the test queried it). Fixed by tracking `BEGIN`/`CASE` → `END` nesting depth (matched
+on keyword boundaries) in all three implementations; a semicolon only ends a statement at depth 0.
+
+Regression coverage added alongside the fix:
+- `test/sql-guard.test.cjs` — trigger bodies with multiple statements and nested `CASE`, a `WHEN`
+  clause, and identifiers that contain `begin`/`end`/`case` as substrings (e.g. `end_date`,
+  `usecase`) without being mistaken for the keywords.
+- `trg-06..09` in the shared suite — the same scenarios exercised end-to-end against all four
+  real backends (Kotlin, Swift, WASM, node:sqlite), not just the JS-side guard.
+- `s-11` in the Load Tests tab — trigger-firing overhead under load (500 inserts through an
+  `AFTER INSERT` trigger with a `CASE` body), comparable against `s-01`'s no-trigger baseline.
 
 ## Manual Testing
 

@@ -148,6 +148,10 @@ enum SQLiteHelpers {
 
     static func hasMultipleStatements(_ sql: String) -> Bool {
         var idx = sql.startIndex
+        // Tracks BEGIN/CASE ... END nesting (trigger bodies, CASE expressions) so a
+        // semicolon inside one of these blocks isn't mistaken for a statement
+        // separator. Only a semicolon seen while this is back at 0 is a real split.
+        var blockDepth = 0
         while idx < sql.endIndex {
             let ch = sql[idx]
             if ch == "'" || ch == "\"" || ch == "`" {
@@ -158,7 +162,18 @@ enum SQLiteHelpers {
                 idx = skipLineComment(sql, from: idx)
             } else if ch == "/", nextChar(sql, after: idx) == "*" {
                 idx = skipBlockComment(sql, from: idx)
-            } else if ch == ";" {
+            } else if isIdentifierStart(ch), idx == sql.startIndex || !isIdentifierPart(sql[sql.index(before: idx)]) {
+                let keyword = readKeyword(sql, from: idx)
+                switch keyword.text {
+                case "BEGIN", "CASE":
+                    blockDepth += 1
+                case "END":
+                    if blockDepth > 0 { blockDepth -= 1 }
+                default:
+                    break
+                }
+                idx = sql.index(before: keyword.end)
+            } else if ch == ";", blockDepth == 0 {
                 return hasTailContent(sql, from: sql.index(after: idx))
             }
             idx = sql.index(after: idx)
@@ -235,6 +250,22 @@ enum SQLiteHelpers {
             idx = sql.index(after: idx)
         }
         return sql.index(before: sql.endIndex)
+    }
+
+    private static func isIdentifierStart(_ ch: Character) -> Bool {
+        return ch == "_" || ch.isLetter
+    }
+
+    private static func isIdentifierPart(_ ch: Character) -> Bool {
+        return isIdentifierStart(ch) || ch.isNumber
+    }
+
+    private static func readKeyword(_ sql: String, from start: String.Index) -> (text: String, end: String.Index) {
+        var idx = sql.index(after: start)
+        while idx < sql.endIndex && isIdentifierPart(sql[idx]) {
+            idx = sql.index(after: idx)
+        }
+        return (String(sql[start..<idx]).uppercased(), idx)
     }
 
     // MARK: - Private: bind
