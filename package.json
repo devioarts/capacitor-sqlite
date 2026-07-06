@@ -25,6 +25,10 @@
       "require": "./electron/dist/plugin-settings.js",
       "default": "./electron/dist/plugin-settings.js"
     },
+    "./electron/worker": {
+      "require": "./electron/dist/worker.cjs.js",
+      "default": "./electron/dist/worker.cjs.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

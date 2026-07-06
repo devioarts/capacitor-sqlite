@@ -3,6 +3,7 @@
 // tooling, or register this class manually in your app's main-process IPC layer.
 
 import { app } from 'electron';
+import * as fs from 'fs';
 import * as nodePath from 'path';
 import { Worker } from 'worker_threads';
 
@@ -134,10 +135,38 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
     });
   }
 
+  private resolveWorkerFile(): string {
+    // Plugin loaded from node_modules: worker.cjs.js sits next to plugin.cjs.js.
+    const candidates: string[] = [];
+    if (typeof __dirname === 'string') {
+      candidates.push(nodePath.join(__dirname, 'worker.cjs.js'));
+    }
+    // App builds that bundle the main process (esbuild/rollup/webpack) inline
+    // this module, relocating __dirname into the app's own dist folder. Resolve
+    // the installed package at runtime instead. The specifier is concatenated
+    // so bundlers keep this as a runtime require.resolve call.
+    try {
+      const pkg = '@devioarts/capacitor-sqlite';
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      candidates.push(require.resolve(pkg + '/electron/worker'));
+    } catch {
+      /* package not resolvable at runtime — fall through to the error below */
+    }
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate)) return candidate;
+    }
+    throw new Error(
+      `capacitor-sqlite: Electron worker file not found (looked for: ${candidates.join(', ')}). ` +
+        'If your build bundles the Electron main process, ship the plugin as a runtime dependency ' +
+        "so require.resolve('@devioarts/capacitor-sqlite/electron/worker') works, or copy " +
+        'node_modules/@devioarts/capacitor-sqlite/electron/dist/worker.cjs.js next to your main bundle.',
+    );
+  }
+
   private getWorker(): Worker {
     if (this.worker) return this.worker;
 
-    const worker = new Worker(nodePath.join(__dirname, 'worker.cjs.js'), {
+    const worker = new Worker(this.resolveWorkerFile(), {
       workerData: {
         paths: {
           userData: app.getPath('userData'),
