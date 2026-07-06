@@ -3,6 +3,14 @@ export function hasMultipleSqlStatements(sql: string): boolean {
   // semicolon inside one of these blocks isn't mistaken for a statement
   // separator. Only a semicolon seen while this is back at 0 is a real split.
   let blockDepth = 0;
+  // Tracks '(' / ')' nesting. SQLite does not reserve BEGIN as a keyword, so
+  // `CREATE TABLE t(begin TEXT)` is valid SQL — without this, the bare `begin`
+  // column name below would be misread as a trigger-body opener and swallow the
+  // semicolon after it. A genuine trigger BEGIN always appears outside any
+  // parentheses (after `ON ...`/`WHEN ...`/`FOR EACH ROW`), so gating on
+  // `parenDepth === 0` filters out identifier occurrences without affecting
+  // real trigger bodies.
+  let parenDepth = 0;
   // `BEGIN` as the very first token is a transaction statement (`BEGIN;`,
   // `BEGIN TRANSACTION;`), not a trigger-body opener — it must not swallow the
   // semicolon that follows it ("BEGIN; DROP TABLE t" is two statements).
@@ -17,10 +25,25 @@ export function hasMultipleSqlStatements(sql: string): boolean {
       i = skipLineComment(sql, i);
     } else if (ch === '/' && sql[i + 1] === '*') {
       i = skipBlockComment(sql, i);
+    } else if (ch === '(') {
+      parenDepth++;
+    } else if (ch === ')') {
+      if (parenDepth > 0) parenDepth--;
     } else if (/[A-Za-z_]/.test(ch) && (i === 0 || !/[A-Za-z0-9_]/.test(sql[i - 1]))) {
       const keyword = readKeyword(sql, i);
       if (keyword) {
-        if ((keyword.keyword === 'BEGIN' && i !== firstTokenStart) || keyword.keyword === 'CASE') {
+        // A '.' immediately before rules out a qualified reference like `NEW.begin`
+        // (used in a trigger's WHEN clause, for example) — real BEGIN/CASE keywords
+        // are never preceded by a dot.
+        const isQualifiedRef = i > 0 && sql[i - 1] === '.';
+        if (
+          !isQualifiedRef &&
+          ((keyword.keyword === 'BEGIN' && i !== firstTokenStart && parenDepth === 0) ||
+            // CASE only nests inside an already-open trigger BEGIN block — a bare
+            // `case` identifier at the top level (SQLite rejects it as unquoted, but
+            // the guard should not depend on that) is otherwise inert.
+            (keyword.keyword === 'CASE' && blockDepth > 0))
+        ) {
           blockDepth++;
         } else if (keyword.keyword === 'END' && blockDepth > 0) {
           blockDepth--;

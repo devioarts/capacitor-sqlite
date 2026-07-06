@@ -4,7 +4,7 @@
 
 |               | Count                 | Status                                                                          |
 | ------------- | --------------------- | -------------------------------------------------------------------------------- |
-| **Automated** | 366 tests · 72 groups | Verified 2026-07-06: iOS · Android · Web · Electron (365); `me-05` added 2026-07-07, verified on Electron |
+| **Automated** | 367 tests · 72 groups | Verified 2026-07-06: iOS · Android · Web · Electron (365); `me-05` and `mstmt-06` added 2026-07-07, verified on Electron (both) and iOS/Android (`mstmt-06`'s underlying scanner fix, via platform unit tests) |
 | **Manual**    | 11 scenarios          | 🔲 Require OS-level control or native tooling       |
 
 Tests are part of the example app (`playground/`).  
@@ -26,7 +26,7 @@ for each full platform run. A local verification may cover only a subset of the 
 
 ## Running from the command line
 
-The 366 suite tests and 11 stress benchmarks are defined once, in
+The 367 suite tests and 11 stress benchmarks are defined once, in
 `playground/src/tests/suiteTests.ts` and `playground/src/tests/stressBenchmarks.ts`, as functions
 that take a `CapacitorSqlitePlugin` implementation and return test/benchmark definitions. The
 playground UI (`PageSuite.tsx` / `PageStress.tsx`) calls these with the real `CapacitorSqlite`
@@ -137,7 +137,7 @@ Platform-specific quirks are documented in [Platform Notes](#platform-notes).
 | Identifier Quoting    | iq-01..04      | reserved-word table/column names · spaces · Unicode — double-quoted                                                                                          |
 | Quote Semantics       | quote-01..02   | single-quote = string · double-quote = identifier · backtick extension                                                                                       |
 | Column Names          | colname-01..03 | space in name · reserved keyword · Unicode characters                                                                                                        |
-| Semicolons & Comments | mstmt-01..05   | trailing `;` · `--` inline · `/* */` block · multiple statements                                                                                             |
+| Semicolons & Comments | mstmt-01..06   | trailing `;` · `--` inline · `/* */` block · multiple statements · bare `begin` column doesn't mask a second statement                                       |
 | Query Placeholders    | qph-01..13     | anonymous `?` typing · comments · quoted identifiers · escaped strings · BLOBs · expressions · Android unsupported forms                                     |
 
 ### PRAGMA & Configuration
@@ -213,6 +213,28 @@ Regression coverage added alongside the fix:
   real backends (Kotlin, Swift, WASM, node:sqlite), not just the JS-side guard.
 - `s-11` in the Load Tests tab — trigger-firing overhead under load (10,000 inserts through an
   `AFTER INSERT` trigger with a `CASE` body), comparable against `s-01`'s no-trigger baseline.
+
+**Bare `begin`/`case` identifiers mistaken for trigger-body keywords (2026-07-07) — fixed.**
+A follow-up to the fix above, found via automated code review. SQLite does not reserve `BEGIN`
+or `CASE`, so `CREATE TABLE t(begin TEXT)` is valid SQL, but the guard's
+`i !== firstTokenStart` / unconditional-`CASE` heuristic couldn't tell a bare `begin`/`case`
+identifier from the real trigger-body keyword — it opened a block for either, which swallowed
+the following semicolon. `CREATE TABLE t(begin TEXT); DROP TABLE users` was misread as a single
+statement, so `execute()`'s per-statement guard let both run instead of rejecting the string.
+Fixed by adding two more signals in all three ports: a `BEGIN` only opens a block outside any
+parentheses (`parenDepth === 0` — a real trigger `BEGIN` never appears inside a column-definition
+list), and `CASE` only nests inside an already-open `BEGIN` block (a bare top-level `case` is now
+inert); a `.` immediately before either keyword (`NEW.begin`) also rules it out as a qualified
+column reference. Quoting (`"begin"`) already worked and is unaffected.
+
+Regression coverage added alongside the fix:
+
+- `test/sql-guard.test.cjs`, `SqlStatementGuardTest.kt`, and the new `SQLStatementGuardTests.swift`
+  (iOS previously had no direct unit test for this scanner, only indirect coverage through
+  plugin-level tests) — bare `begin`/`case` column names, a qualified `NEW.begin` reference in a
+  trigger `WHEN` clause, and confirmation that quoting and real trigger bodies still work.
+- `mstmt-06` in the shared suite — `execute()` rejects the two-statement `begin`-as-column string
+  end-to-end, and a legitimate single-statement use of a `begin` column still works.
 
 ## Manual Testing
 

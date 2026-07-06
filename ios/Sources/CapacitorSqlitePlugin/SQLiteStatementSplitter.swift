@@ -5,15 +5,37 @@ extension SQLiteHelpers {
     static func hasMultipleStatements(_ sql: String) -> Bool {
         var idx = sql.startIndex
         var blockDepth = 0
+        // Tracks '(' / ')' nesting. SQLite does not reserve BEGIN as a keyword, so
+        // `CREATE TABLE t(begin TEXT)` is valid SQL — without this, the bare `begin`
+        // column name below would be misread as a trigger-body opener and swallow the
+        // semicolon after it. A genuine trigger BEGIN always appears outside any
+        // parentheses (after `ON ...`/`WHEN ...`/`FOR EACH ROW`), so gating on
+        // `parenDepth == 0` filters out identifier occurrences without affecting real
+        // trigger bodies.
+        var parenDepth = 0
         let firstTokenStart = firstMeaningfulIndex(sql)
 
         while idx < sql.endIndex {
             let ch = sql[idx]
             if let skipped = skippedLiteralOrComment(sql, from: idx, character: ch) {
                 idx = skipped
+            } else if ch == "(" {
+                parenDepth += 1
+            } else if ch == ")" {
+                parenDepth = max(0, parenDepth - 1)
             } else if isIdentifierStart(ch), idx == sql.startIndex || !isIdentifierPart(sql[sql.index(before: idx)]) {
                 let keyword = readKeyword(sql, from: idx)
-                blockDepth = updatedBlockDepth(blockDepth, keyword: keyword.text, at: idx, firstTokenStart: firstTokenStart)
+                // A '.' immediately before rules out a qualified reference like `NEW.begin`
+                // (used in a trigger's WHEN clause, for example) — real BEGIN/CASE keywords
+                // are never preceded by a dot.
+                let isQualifiedRef = idx > sql.startIndex && sql[sql.index(before: idx)] == "."
+                blockDepth = updatedBlockDepth(
+                    blockDepth,
+                    keyword: keyword.text,
+                    isFirstToken: idx == firstTokenStart,
+                    parenDepth: parenDepth,
+                    isQualifiedRef: isQualifiedRef
+                )
                 idx = sql.index(before: keyword.end)
             } else if ch == ";", blockDepth == 0 {
                 return hasTailContent(sql, from: sql.index(after: idx))
@@ -26,13 +48,19 @@ extension SQLiteHelpers {
     private static func updatedBlockDepth(
         _ depth: Int,
         keyword: String,
-        at idx: String.Index,
-        firstTokenStart: String.Index
+        isFirstToken: Bool,
+        parenDepth: Int,
+        isQualifiedRef: Bool
     ) -> Int {
         switch keyword {
         case "BEGIN":
-            return idx == firstTokenStart ? depth : depth + 1
+            guard !isQualifiedRef, !isFirstToken, parenDepth == 0 else { return depth }
+            return depth + 1
         case "CASE":
+            // CASE only nests inside an already-open trigger BEGIN block — a bare `case`
+            // identifier at the top level (SQLite rejects it as unquoted, but the guard
+            // should not depend on that) is otherwise inert.
+            guard !isQualifiedRef, depth > 0 else { return depth }
             return depth + 1
         case "END":
             return max(0, depth - 1)

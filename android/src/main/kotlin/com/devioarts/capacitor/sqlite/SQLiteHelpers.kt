@@ -322,6 +322,14 @@ internal object SQLiteHelpers {
         // semicolon inside one of these blocks isn't mistaken for a statement
         // separator. Only a semicolon seen while this is back at 0 is a real split.
         var blockDepth = 0
+        // Tracks '(' / ')' nesting. SQLite does not reserve BEGIN as a keyword, so
+        // `CREATE TABLE t(begin TEXT)` is valid SQL — without this, the bare `begin`
+        // column name below would be misread as a trigger-body opener and swallow the
+        // semicolon after it. A genuine trigger BEGIN always appears outside any
+        // parentheses (after `ON ...`/`WHEN ...`/`FOR EACH ROW`), so gating on
+        // `parenDepth == 0` filters out identifier occurrences without affecting real
+        // trigger bodies.
+        var parenDepth = 0
         // `BEGIN` as the very first token is a transaction statement (`BEGIN;`,
         // `BEGIN TRANSACTION;`), not a trigger-body opener — it must not swallow
         // the semicolon that follows it ("BEGIN; DROP TABLE t" is two statements).
@@ -333,13 +341,23 @@ internal object SQLiteHelpers {
                 ch == '[' -> i = skipBracketIdentifier(sql, i)
                 ch == '-' && i + 1 < sql.length && sql[i + 1] == '-' -> i = skipLineComment(sql, i)
                 ch == '/' && i + 1 < sql.length && sql[i + 1] == '*' -> i = skipBlockComment(sql, i)
+                ch == '(' -> parenDepth++
+                ch == ')' -> if (parenDepth > 0) parenDepth--
                 isIdentifierStart(ch) && (i == 0 || !isIdentifierPart(sql[i - 1])) -> {
                     val keyword = readKeyword(sql, i)
                     if (keyword != null) {
-                        when (keyword.keyword) {
-                            "BEGIN" -> if (i != firstTokenStart) blockDepth++
-                            "CASE" -> blockDepth++
-                            "END" -> if (blockDepth > 0) blockDepth--
+                        // A '.' immediately before rules out a qualified reference like
+                        // `NEW.begin` (used in a trigger's WHEN clause, for example) — real
+                        // BEGIN/CASE keywords are never preceded by a dot.
+                        val isQualifiedRef = i > 0 && sql[i - 1] == '.'
+                        when {
+                            !isQualifiedRef && keyword.keyword == "BEGIN" && i != firstTokenStart && parenDepth == 0 ->
+                                blockDepth++
+                            // CASE only nests inside an already-open trigger BEGIN block — a
+                            // bare `case` identifier at the top level (SQLite rejects it as
+                            // unquoted, but the guard should not depend on that) is otherwise inert.
+                            !isQualifiedRef && keyword.keyword == "CASE" && blockDepth > 0 -> blockDepth++
+                            keyword.keyword == "END" && blockDepth > 0 -> blockDepth--
                         }
                         i = keyword.end - 1
                     }

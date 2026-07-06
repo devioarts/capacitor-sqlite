@@ -16,6 +16,7 @@ Changes since `0.0.2`.
 - Added cross-platform stress benchmark results for Electron, Web/OPFS, Android, and iOS.
 - Added GitHub Actions workflows for fast CI and a manually triggered release matrix with retained platform logs.
 - Added regression tests for the migration-version-bound and BLOB-clamping fixes below: `isValidMigrationVersion` boundary cases in `test/migration-validation.test.cjs` (shared by Web and Electron), new iOS XCTest cases, and `me-05` in the shared suite.
+- Added regression tests for the bare-identifier statement-splitting fix below: new cases in `test/sql-guard.test.cjs` and `SqlStatementGuardTest.kt`, a new `SQLStatementGuardTests.swift` (iOS previously had no direct unit test for this scanner), and `mstmt-06` in the shared suite.
 
 ### Changed
 
@@ -39,6 +40,7 @@ Changes since `0.0.2`.
 - Fixed Web runtime coverage gap by running the shared suite in a real browser against sqlite-wasm/OPFS.
 - Fixed migration `version` accepting values above the 32-bit `user_version` ceiling on Web, Electron, and iOS — Web/Electron silently truncated an out-of-range version via a `| 0` cast when writing `PRAGMA user_version`, which could make a migration re-apply on a later `open()` without any error being surfaced; iOS had no upper bound at all. All four platforms now reject `version > 2147483647` up front with `MIGRATION_FAILED`.
 - Fixed iOS BLOB bind values passed as a plain byte array (`number[]`) silently clamping an out-of-range byte instead of rejecting it, matching the existing Android and Electron behavior.
+- Fixed the single-statement guard (`hasMultipleSqlStatements`/`hasMultipleStatements`, all three ports) misreading a bare `begin` or `case` identifier (e.g. a column named `begin` — SQLite does not reserve either word) as a trigger-body keyword, which swallowed the following semicolon and let `execute()` silently run a second statement it should have rejected. Found via automated code review.
 
 ### Verified
 

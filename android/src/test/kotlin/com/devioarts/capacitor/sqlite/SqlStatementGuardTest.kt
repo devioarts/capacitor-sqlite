@@ -51,6 +51,42 @@ class SqlStatementGuardTest {
     }
 
     @Test
+    fun doesNotMistakeBareBeginCaseIdentifierForTriggerBodyOpener() {
+        // SQLite does not reserve BEGIN or CASE, so both are valid unquoted column/table
+        // names. A naive "BEGIN/CASE anywhere but the first token opens a block" heuristic
+        // would swallow the semicolon after these and hide the second statement.
+        assertTrue(SQLiteHelpers.hasMultipleStatements("CREATE TABLE t(begin TEXT); DROP TABLE users"))
+        assertTrue(
+            SQLiteHelpers.hasMultipleStatements("CREATE TABLE t(begin TEXT, end TEXT); DROP TABLE users")
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            SQLiteHelpers.requireSingleStatement("CREATE TABLE t(begin TEXT); DROP TABLE users")
+        }
+        // Quoting still works as an explicit escape hatch.
+        assertTrue(SQLiteHelpers.hasMultipleStatements("CREATE TABLE t(\"begin\" TEXT); DROP TABLE users"))
+        // A qualified reference (NEW.begin in a trigger's WHEN clause) must not be mistaken
+        // for the block-opening BEGIN either — the guard must still recognize the real one.
+        assertFalse(
+            SQLiteHelpers.hasMultipleStatements(
+                "CREATE TRIGGER trg AFTER UPDATE ON t WHEN NEW.begin IS NOT NULL " +
+                    "BEGIN INSERT INTO log VALUES (1); END"
+            )
+        )
+        // Real trigger bodies and nested CASE expressions inside them keep working.
+        assertFalse(
+            SQLiteHelpers.hasMultipleStatements(
+                "CREATE TRIGGER trg_count AFTER INSERT ON items BEGIN UPDATE item_count SET n = n + 1; END"
+            )
+        )
+        assertFalse(
+            SQLiteHelpers.hasMultipleStatements(
+                "CREATE TRIGGER trg_nested AFTER INSERT ON t BEGIN INSERT INTO log VALUES " +
+                    "(CASE WHEN NEW.a THEN (CASE WHEN NEW.b THEN 1 ELSE 2 END) ELSE 3 END); END"
+            )
+        )
+    }
+
+    @Test
     fun classifiesStatementsAfterLeadingCommentsAndCtes() {
         assertTrue(SQLiteHelpers.statementType("/* lead */ INSERT INTO t VALUES (1)") == "INSERT")
         assertTrue(SQLiteHelpers.statementType("-- lead\nREPLACE INTO t VALUES (1)") == "REPLACE")

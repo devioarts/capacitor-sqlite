@@ -105,6 +105,41 @@ test('a leading BEGIN (transaction) does not mask a following statement', () => 
   );
 });
 
+test('does not mistake a bare begin/case identifier for a trigger-body opener', () => {
+  // SQLite does not reserve BEGIN or CASE, so both are valid unquoted column/table names.
+  // A naive "BEGIN/CASE anywhere but the first token opens a block" heuristic would
+  // swallow the semicolon after these and hide the second statement.
+  assert.equal(hasMultipleSqlStatements('CREATE TABLE t(begin TEXT); DROP TABLE users'), true);
+  assert.equal(hasMultipleSqlStatements('CREATE TABLE t(begin TEXT, end TEXT); DROP TABLE users'), true);
+  assert.throws(
+    () => assertSingleSqlStatement('CREATE TABLE t(begin TEXT); DROP TABLE users', 'statement'),
+    /exactly one SQL statement/,
+  );
+  // Quoting still works as an explicit escape hatch.
+  assert.equal(hasMultipleSqlStatements('CREATE TABLE t("begin" TEXT); DROP TABLE users'), true);
+  // A qualified reference (`NEW.begin` in a trigger's WHEN clause) must not be mistaken
+  // for the block-opening BEGIN either — the guard must still recognize the real one.
+  assert.equal(
+    hasMultipleSqlStatements(
+      'CREATE TRIGGER trg AFTER UPDATE ON t WHEN NEW.begin IS NOT NULL BEGIN INSERT INTO log VALUES (1); END',
+    ),
+    false,
+  );
+  // Real trigger bodies and nested CASE expressions inside them keep working.
+  assert.equal(
+    hasMultipleSqlStatements(
+      'CREATE TRIGGER trg_count AFTER INSERT ON items BEGIN UPDATE item_count SET n = n + 1; END',
+    ),
+    false,
+  );
+  assert.equal(
+    hasMultipleSqlStatements(
+      "CREATE TRIGGER trg_nested AFTER INSERT ON t BEGIN INSERT INTO log VALUES (CASE WHEN NEW.a THEN (CASE WHEN NEW.b THEN 1 ELSE 2 END) ELSE 3 END); END",
+    ),
+    false,
+  );
+});
+
 test('handles a trigger with a WHEN clause and nested CASE expressions', () => {
   assert.equal(
     hasMultipleSqlStatements(

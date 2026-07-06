@@ -5325,6 +5325,35 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
       await silentClose(DB);
     },
   },
+  {
+    id: 'mstmt-06', group: 'Semicolons & Comments', name: 'A column literally named "begin" does not mask a second statement',
+    fn: async () => {
+      const DB = 'suite_mstmt06';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      // SQLite does not reserve BEGIN/CASE, so both are valid unquoted column names.
+      // A two-statement string using one of them as a column name must still be
+      // rejected as multiple statements — not silently run as if it were one.
+      assertFail(
+        await CapacitorSqlite.execute({
+          database: DB,
+          statements: ['CREATE TABLE t(begin TEXT); DROP TABLE t'],
+        }),
+        'execute with begin-as-column two-statement string',
+        'INVALID_PARAMS',
+      );
+      // A column literally named "begin" in a single, well-formed statement still works.
+      assertOk(
+        await CapacitorSqlite.execute({ database: DB, statements: ['CREATE TABLE t2(begin TEXT)'] }),
+        'create table with begin column',
+      );
+      assertOk(
+        await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t2 (begin) VALUES (?)', values: ['x'] }),
+        'insert into begin column',
+      );
+      await silentClose(DB);
+    },
+  },
 
   // ── Identifier Quoting ────────────────────────────────────────────────────
   {
