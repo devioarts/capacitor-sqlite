@@ -82,6 +82,19 @@ internal class CapacitorSqlite(private val context: Context) {
         }
     }
 
+    fun closeAll() {
+        val openDatabases = synchronized(this) {
+            databases.values.toList().also { databases.clear() }
+        }
+        for (db in openDatabases) {
+            try {
+                db.close()
+            } catch (_: Exception) {
+                // Best-effort lifecycle cleanup; explicit close(database) reports errors.
+            }
+        }
+    }
+
     // MARK: - isOpen
 
     fun isOpen(database: String): Boolean =

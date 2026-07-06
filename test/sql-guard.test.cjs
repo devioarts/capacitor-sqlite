@@ -5,6 +5,7 @@ const {
   assertSingleSqlStatement,
   hasMultipleSqlStatements,
   isInsertStatement,
+  isQueryResultStatement,
   sqlStatementType,
 } = require('../build/test-p0/sql.js');
 
@@ -139,4 +140,17 @@ test('detects insert-like statements after comments and CTEs', () => {
   assert.equal(isInsertStatement('/* lead */ INSERT INTO t VALUES (1)'), true);
   assert.equal(isInsertStatement('WITH cte AS (SELECT 1) INSERT INTO t SELECT * FROM cte'), true);
   assert.equal(isInsertStatement('WITH cte AS (SELECT 1) SELECT * FROM cte'), false);
+});
+
+test('classifies statements that are valid for query()', () => {
+  assert.equal(isQueryResultStatement('SELECT 1'), true);
+  assert.equal(isQueryResultStatement('WITH cte AS (SELECT 1) SELECT * FROM cte'), true);
+  assert.equal(isQueryResultStatement('PRAGMA table_info(t)'), true);
+  assert.equal(isQueryResultStatement('EXPLAIN QUERY PLAN SELECT * FROM t'), true);
+  assert.equal(isQueryResultStatement('INSERT INTO t VALUES (1) RETURNING rowid'), true);
+  assert.equal(isQueryResultStatement('UPDATE t SET v = 1 RETURNING v'), true);
+  assert.equal(isQueryResultStatement('DELETE FROM t RETURNING rowid'), true);
+  assert.equal(isQueryResultStatement('INSERT INTO t VALUES (1)'), false);
+  assert.equal(isQueryResultStatement('UPDATE t SET v = 1'), false);
+  assert.equal(isQueryResultStatement("INSERT INTO t VALUES ('RETURNING')"), false);
 });

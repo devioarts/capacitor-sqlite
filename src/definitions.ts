@@ -102,7 +102,7 @@ export interface RunBatchOptions {
 
 export interface QueryOptions {
   database: string;
-  /** `SELECT` statement using anonymous `?` placeholders for bound values. */
+  /** Result-producing statement using anonymous `?` placeholders for bound values. */
   statement: string;
   /**
    * Positional values bound to anonymous `?` placeholders, in order.
@@ -229,7 +229,10 @@ export interface CapacitorSqlitePlugin {
   runBatch(options: RunBatchOptions): Promise<SqliteResult<{ changes: number; lastInsertId: number }>>;
 
   /**
-   * Execute a `SELECT` statement and return rows as plain objects.
+   * Execute a result-producing statement and return rows as plain objects.
+   * Supported forms are `SELECT`, `PRAGMA`, `EXPLAIN`, and
+   * `INSERT`/`UPDATE`/`DELETE`/`REPLACE ... RETURNING`.
+   * DML without `RETURNING` returns `INVALID_PARAMS`; use `run()` instead.
    * Use anonymous `?` placeholders with `values: [...]` for parameters.
    * Numbered and named placeholders are not guaranteed across platforms.
    * INTEGER result values outside JavaScript's safe integer range are returned

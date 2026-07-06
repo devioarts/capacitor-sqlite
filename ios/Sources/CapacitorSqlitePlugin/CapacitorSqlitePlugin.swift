@@ -24,47 +24,11 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "rollbackTransaction", returnType: CAPPluginReturnPromise)
     ]
 
-    private let impl = CapacitorSqlite()
-    private let workQueue = DispatchQueue(label: "com.devioarts.capacitor.sqlite.plugin", qos: .userInitiated)
+    let impl = CapacitorSqlite()
+    let workQueue = DispatchQueue(label: "com.devioarts.capacitor.sqlite.plugin", qos: .userInitiated)
 
-    // MARK: - Unified response helpers
-
-    private func success(_ call: CAPPluginCall, data: [String: Any] = [:]) {
-        resolve(call, payload: ["success": true, "data": data])
-    }
-
-    private func failure(_ call: CAPPluginCall, code: String, message: String, method: String) {
-        let details: [String: Any] = [
-            "nativeCode": code,
-            "nativeMessage": message,
-            "source": "ios-native"
-        ]
-        resolve(call, payload: [
-            "success": false,
-            "error": [
-                "code": code,
-                "message": message,
-                "platform": "ios",
-                "method": method,
-                "details": details
-            ] as [String: Any]
-        ])
-    }
-
-    private func resolve(_ call: CAPPluginCall, payload: [String: Any]) {
-        // Capacitor's public docs/source do not guarantee that CAPPluginCall.resolve()
-        // is thread-safe, so keep bridge resolution on the main queue.
-        if Thread.isMainThread {
-            call.resolve(payload)
-        } else {
-            DispatchQueue.main.async {
-                call.resolve(payload)
-            }
-        }
-    }
-
-    private func executeSqlite(_ block: @escaping () -> Void) {
-        workQueue.async(execute: block)
+    deinit {
+        impl.closeAll()
     }
 
     // MARK: - getPlatform
@@ -106,7 +70,7 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
         executeSqlite { [weak self] in
             guard let self = self else { return }
             do {
-                try self.impl.open(database: database, readonly: readonly, directory: directory, migrations: migrations)
+                try self.impl.open(database: database, readonly: readonly, migrations: migrations, directory: directory)
                 self.success(call)
             } catch CapacitorSqliteError.failed(let code, let msg) {
                 self.failure(call, code: code, message: msg, method: "open")
@@ -314,6 +278,15 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
         }
         guard let statement = call.getString("statement"), !statement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             failure(call, code: "INVALID_PARAMS", message: "'statement' is required", method: "query")
+            return
+        }
+        guard SQLStatement.isQueryResultStatement(statement) else {
+            failure(
+                call,
+                code: "INVALID_PARAMS",
+                message: "'statement' must be a SELECT, PRAGMA, EXPLAIN, or DML statement with RETURNING",
+                method: "query"
+            )
             return
         }
         let values = call.getArray("values") ?? []

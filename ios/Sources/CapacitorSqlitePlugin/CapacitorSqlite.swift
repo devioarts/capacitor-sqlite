@@ -5,9 +5,9 @@ enum CapacitorSqliteError: Error {
 }
 
 final class CapacitorSqlite {
-    private var databases: [String: Database] = [:]
+    var databases: [String: Database] = [:]
     // Serializes dictionary mutations; Database.open/close use their own internal queue.
-    private let lock = NSLock()
+    let lock = NSLock()
 
     // MARK: - isAvailable
 
@@ -15,7 +15,7 @@ final class CapacitorSqlite {
 
     // MARK: - open
 
-    func open(database: String, readonly: Bool, directory: String? = nil, migrations: [[String: Any]]) throws {
+    func open(database: String, readonly: Bool, migrations: [[String: Any]], directory: String? = nil) throws {
         guard database == ":memory:" || database.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil else {
             throw CapacitorSqliteError.failed(
                 code: "INVALID_NAME",
@@ -80,6 +80,19 @@ final class CapacitorSqlite {
         lock.lock(); databases.removeValue(forKey: databaseKey(database)); lock.unlock()
     }
 
+    func closeAll() {
+        let instances: [Database] = {
+            lock.lock()
+            defer { lock.unlock() }
+            let values = Array(databases.values)
+            databases.removeAll()
+            return values
+        }()
+        for instance in instances {
+            try? instance.close()
+        }
+    }
+
     // MARK: - isOpen
 
     func isOpen(database: String) -> Bool {
@@ -123,6 +136,7 @@ final class CapacitorSqlite {
 
     // MARK: - execute
 
+    @discardableResult
     func execute(database: String, statements: [String], transaction: Bool = true) throws -> Int {
         let inst = try requireOpen(database, context: "execute")
         do {
@@ -194,126 +208,4 @@ final class CapacitorSqlite {
         }
     }
 
-    // MARK: - Private helpers
-
-    private func requireOpen(_ name: String, context: String) throws -> Database {
-        // Read the Database instance under lock (dictionary access only).
-        // isOpen calls queue.sync internally — do NOT hold lock during that call,
-        // or a busy queue on DB-A would hold the global lock and starve DB-B.
-        let inst: Database?
-        lock.lock()
-        inst = databases[databaseKey(name)]
-        lock.unlock()
-        guard let inst, inst.isOpen else {
-            throw CapacitorSqliteError.failed(code: "DB_NOT_OPEN", message: "\(context): '\(name)' is not open")
-        }
-        return inst
-    }
-
-    private func removeFailedOpen(key: String, instance: Database) {
-        lock.lock()
-        defer { lock.unlock() }
-        // Only remove the instance that failed. A concurrent retry may already
-        // have replaced the map entry after the failed open released its queue.
-        if databases[key] === instance && !instance.isOpen {
-            databases.removeValue(forKey: key)
-        }
-    }
-
-    private func databaseKey(_ name: String) -> String {
-        name == ":memory:" ? name : name.lowercased()
-    }
-
-    private func sameDatabasePath(_ lhs: String, _ rhs: String) -> Bool {
-        lhs == rhs || lhs.lowercased() == rhs.lowercased()
-    }
-
-    private func databasePath(name: String, directory: String? = nil) throws -> String {
-        let fileManager = FileManager.default
-        let base: URL
-        // Keep this mapping aligned with OpenOptions.directory documentation.
-        // Raw paths are intentionally not accepted across the bridge.
-        switch directory ?? "default" {
-        case "default", "library":
-            base = try fileManager.url(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask,
-                appropriateFor: nil,
-                create: true
-            )
-        case "documents":
-            guard let docs = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
-                throw CapacitorSqliteError.failed(code: "OPEN_FAILED", message: "Cannot resolve Documents directory")
-            }
-            base = docs
-        case "cache":
-            guard let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first else {
-                throw CapacitorSqliteError.failed(code: "OPEN_FAILED", message: "Cannot resolve Caches directory")
-            }
-            base = caches
-        default:
-            throw CapacitorSqliteError.failed(
-                code: "INVALID_PARAMS",
-                message: "Invalid directory '\(directory ?? "")'. Use default, documents, library or cache"
-            )
-        }
-        let dir = base.appendingPathComponent("CapacitorSQLite", isDirectory: true)
-        if !fileManager.fileExists(atPath: dir.path) {
-            try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
-        }
-        return dir.appendingPathComponent("\(name).db").path
-    }
-
-    /// Parses migration definitions; throws on any malformed entry instead of silently dropping it.
-    private func parseMigrations(_ raw: [[String: Any]]) throws -> [MigrationEntry] {
-        var seenVersions = Set<Int>()
-        return try raw.enumerated().map { (idx, item) in
-            guard let version = item["version"] as? Int, version > 0 else {
-                throw CapacitorSqliteError.failed(
-                    code: "MIGRATION_FAILED",
-                    message: "Migration at index \(idx): 'version' must be a positive integer"
-                )
-            }
-            guard seenVersions.insert(version).inserted else {
-                throw CapacitorSqliteError.failed(
-                    code: "MIGRATION_FAILED",
-                    message: "Migration at index \(idx): duplicate version \(version)"
-                )
-            }
-            guard let statements = item["statements"] as? [String], !statements.isEmpty else {
-                throw CapacitorSqliteError.failed(
-                    code: "MIGRATION_FAILED",
-                    message: "Migration at index \(idx): 'statements' must be a non-empty [String]"
-                )
-            }
-            guard statements.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
-                throw CapacitorSqliteError.failed(
-                    code: "MIGRATION_FAILED",
-                    message: "Migration at index \(idx): 'statements' entries must be non-empty strings"
-                )
-            }
-            return MigrationEntry(version: version, statements: statements)
-        }
-    }
-
-    private func mapError(_ error: Error, fallback: String) -> CapacitorSqliteError {
-        switch error {
-        case let err as CapacitorSqliteError:
-            return err
-        case DatabaseError.notOpen(let message):
-            return .failed(code: "DB_NOT_OPEN", message: message)
-        case DatabaseError.transaction(let message):
-            return .failed(code: "TRANSACTION_FAILED", message: message)
-        case DatabaseError.migration(let message):
-            return .failed(code: "MIGRATION_FAILED", message: message)
-        case DatabaseError.open(let message),
-             DatabaseError.close(let message),
-             DatabaseError.execute(let message),
-             DatabaseError.run(let message),
-             DatabaseError.query(let message):
-            return .failed(code: fallback, message: message)
-        default:
-            return .failed(code: fallback, message: "\(error)")
-        }
-    }
 }

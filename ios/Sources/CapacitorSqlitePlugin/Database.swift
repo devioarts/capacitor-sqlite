@@ -78,6 +78,7 @@ final class Database {
 
     // MARK: - Execute (DDL / no-result DML, no params)
 
+    @discardableResult
     func execute(statements: [String], transaction: Bool = true) throws -> Int {
         try queue.sync { try executeUnsafe(statements: statements, transaction: transaction) }
     }

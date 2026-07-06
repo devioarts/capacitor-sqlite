@@ -52,6 +52,15 @@ export function isInsertStatement(sql: string): boolean {
   return type === 'INSERT' || type === 'REPLACE';
 }
 
+export function isQueryResultStatement(sql: string): boolean {
+  const type = sqlStatementType(sql);
+  if (type === 'SELECT' || type === 'PRAGMA' || type === 'EXPLAIN') return true;
+  if (type === 'INSERT' || type === 'UPDATE' || type === 'DELETE' || type === 'REPLACE') {
+    return hasKeyword(sql, 'RETURNING');
+  }
+  return false;
+}
+
 function hasTailContent(sql: string, start: number): boolean {
   for (let i = start; i < sql.length; i++) {
     const ch = sql[i];
@@ -141,6 +150,26 @@ function readKeyword(sql: string, start: number): { keyword: string; end: number
   let end = start + 1;
   while (end < sql.length && /[A-Za-z0-9_]/.test(sql[end])) end++;
   return { keyword: sql.slice(start, end).toUpperCase(), end };
+}
+
+function hasKeyword(sql: string, target: string): boolean {
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      i = skipQuoted(sql, i, ch);
+    } else if (ch === '[') {
+      i = skipBracketIdentifier(sql, i);
+    } else if (ch === '-' && sql[i + 1] === '-') {
+      i = skipLineComment(sql, i);
+    } else if (ch === '/' && sql[i + 1] === '*') {
+      i = skipBlockComment(sql, i);
+    } else if (/[A-Za-z_]/.test(ch) && (i === 0 || !/[A-Za-z0-9_]/.test(sql[i - 1]))) {
+      const keyword = readKeyword(sql, i);
+      if (keyword?.keyword === target) return true;
+      if (keyword) i = keyword.end - 1;
+    }
+  }
+  return false;
 }
 
 function skipIdentifier(sql: string, start: number): number {

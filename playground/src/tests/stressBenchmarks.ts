@@ -5,6 +5,7 @@ import type { CapacitorSqlitePlugin } from '../../../src/definitions.js';
 function ms(start: number) { return Date.now() - start; }
 
 function rateLabel(count: number, durationMs: number) {
+  if (durationMs <= 0) return 'too fast to measure';
   const perSec = Math.round((count / durationMs) * 1000);
   return `${perSec.toLocaleString()} ops/s`;
 }
@@ -23,6 +24,13 @@ function randomBlob(bytes: number): Uint8Array {
 }
 
 const DB_STRESS = 'stress_main';
+const WRITE_ROWS = 10_000;
+const CONCURRENT_WRITES = 10_000;
+const MIXED_OPS_PER_SIDE = 5_000;
+const SCAN_ROWS = 100_000;
+const LARGE_VALUE_KB = 1_024;
+const MULTI_DB_ROWS_EACH = 10_000;
+const TRIGGER_ROWS = 10_000;
 
 // ── benchmark definitions ─────────────────────────────────────────────────────
 
@@ -215,14 +223,12 @@ export function buildStressBenchmarks(CapacitorSqlite: CapacitorSqlitePlugin): B
     await CapacitorSqlite.open({ database: DB_B });
     await CapacitorSqlite.execute({ database: DB_A, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (id INTEGER)'] });
     await CapacitorSqlite.execute({ database: DB_B, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (id INTEGER)'] });
+    const setA = Array.from({ length: rowsEach }, (_, i) => ({ statement: 'INSERT INTO t VALUES (?)', values: [i] }));
+    const setB = Array.from({ length: rowsEach }, (_, i) => ({ statement: 'INSERT INTO t VALUES (?)', values: [i] }));
     const start = Date.now();
     await Promise.all([
-      ...Array.from({ length: rowsEach }, (_, i) =>
-        CapacitorSqlite.run({ database: DB_A, statement: 'INSERT INTO t VALUES (?)', values: [i] })
-      ),
-      ...Array.from({ length: rowsEach }, (_, i) =>
-        CapacitorSqlite.run({ database: DB_B, statement: 'INSERT INTO t VALUES (?)', values: [i] })
-      ),
+      CapacitorSqlite.runBatch({ database: DB_A, set: setA }),
+      CapacitorSqlite.runBatch({ database: DB_B, set: setB }),
     ]);
     const d = ms(start);
     const qa = await CapacitorSqlite.query({ database: DB_A, statement: 'SELECT COUNT(*) AS n FROM t' });
@@ -258,69 +264,69 @@ export function buildStressBenchmarks(CapacitorSqlite: CapacitorSqlitePlugin): B
   return [
     {
       id: 's-01',
-      name: 'Sequential run() — 500 rows',
-      description: 'Inserts 500 rows one at a time via run(). Measures raw serial throughput.',
-      run: () => benchSequentialRun(500),
+      name: 'Sequential run() — 10 000 rows',
+      description: 'Inserts 10 000 rows one at a time via run(). Measures bridge-heavy serial throughput.',
+      run: () => benchSequentialRun(WRITE_ROWS),
     },
     {
       id: 's-02',
-      name: 'runBatch() — 500 rows',
-      description: 'Inserts 500 rows in a single runBatch() call. Shows batch overhead vs serial.',
-      run: () => benchRunBatch(500),
+      name: 'runBatch() — 10 000 rows',
+      description: 'Inserts 10 000 rows in a single runBatch() call. Shows batch overhead vs serial.',
+      run: () => benchRunBatch(WRITE_ROWS),
     },
     {
       id: 's-03',
-      name: 'Manual transaction — 500 rows',
-      description: 'Inserts 500 rows inside beginTransaction()/commitTransaction(). Fastest write pattern.',
-      run: () => benchManualTransaction(500),
+      name: 'Manual transaction — 10 000 rows',
+      description: 'Inserts 10 000 rows inside beginTransaction()/commitTransaction(). Fastest run() write pattern.',
+      run: () => benchManualTransaction(WRITE_ROWS),
     },
     {
       id: 's-04',
-      name: 'Concurrent writes — 50 ops',
-      description: 'Fires 50 INSERT calls simultaneously via Promise.all. Exercises the native queue.',
-      run: () => benchConcurrentWrites(50),
+      name: 'Concurrent writes — 10 000 ops',
+      description: 'Fires 10 000 INSERT calls simultaneously via Promise.all. Exercises queueing under bridge pressure.',
+      run: () => benchConcurrentWrites(CONCURRENT_WRITES),
     },
     {
       id: 's-05',
-      name: 'Mixed concurrent read+write — 50+50',
-      description: 'Fires 50 INSERTs and 50 SELECT COUNT(*) simultaneously. Tests read/write concurrency.',
-      run: () => benchMixedConcurrent(50),
+      name: 'Mixed concurrent read+write — 5 000+5 000',
+      description: 'Fires 5 000 INSERTs and 5 000 SELECT COUNT(*) simultaneously. Tests read/write concurrency.',
+      run: () => benchMixedConcurrent(MIXED_OPS_PER_SIDE),
     },
     {
       id: 's-06',
-      name: 'Large table scan — 5 000 rows',
-      description: 'Inserts 5 000 rows then SELECT * — measures read throughput for large result sets.',
-      run: () => benchLargeTableScan(5000),
+      name: 'Large table scan — 100 000 rows',
+      description: 'Inserts 100 000 rows then SELECT * — measures read throughput for large result sets.',
+      run: () => benchLargeTableScan(SCAN_ROWS),
     },
     {
       id: 's-07',
-      name: 'Filtered query — 5 000 rows, WHERE+ORDER BY+LIMIT',
-      description: 'Full-scan filter + sort + limit on 5 000 rows. Measures query planner overhead.',
-      run: () => benchFilteredQuery(5000),
+      name: 'Filtered query — 100 000 rows, WHERE+ORDER BY+LIMIT',
+      description: 'Full-scan filter + sort + limit on 100 000 rows. Measures query planner overhead.',
+      run: () => benchFilteredQuery(SCAN_ROWS),
     },
     {
       id: 's-08',
-      name: 'Large text — 50 KB write+read',
-      description: 'Inserts and reads back a 50 KB TEXT value. Shows serialization overhead.',
-      run: () => benchLargeText(50),
+      name: 'Large text — 1 MB write+read',
+      description: 'Inserts and reads back a 1 MB TEXT value. Shows serialization overhead.',
+      run: () => benchLargeText(LARGE_VALUE_KB),
     },
     {
       id: 's-09',
-      name: 'Large BLOB — 50 KB Uint8Array write+read',
-      description: 'Inserts and reads back a 50 KB Uint8Array. Tests base64 encode/decode overhead.',
-      run: () => benchLargeBlob(50),
+      name: 'Large BLOB — 1 MB Uint8Array write+read',
+      description: 'Inserts and reads back a 1 MB Uint8Array. Tests binary bridge overhead.',
+      run: () => benchLargeBlob(LARGE_VALUE_KB),
     },
     {
       id: 's-10',
-      name: 'Multi-DB concurrent — 2 DBs × 100 rows',
-      description: 'Simultaneously inserts 100 rows into each of 2 open databases. Tests multi-DB isolation under load.',
-      run: () => benchMultiDbConcurrent(100),
+      name: 'Multi-DB concurrent — 2 DBs × 10 000 rows',
+      description: 'Simultaneously runBatch() inserts 10 000 rows into each of 2 open databases. Tests multi-DB isolation under load.',
+      run: () => benchMultiDbConcurrent(MULTI_DB_ROWS_EACH),
     },
     {
       id: 's-11',
-      name: 'Trigger overhead — 500 rows through AFTER INSERT trigger',
-      description: 'Inserts 500 rows into a table with an AFTER INSERT trigger (CASE expression body) firing on each insert. Compare against s-01 to see trigger overhead.',
-      run: () => benchTriggerOverhead(500),
+      name: 'Trigger overhead — 10 000 rows through AFTER INSERT trigger',
+      description: 'Inserts 10 000 rows into a table with an AFTER INSERT trigger (CASE expression body) firing on each insert. Compare against s-01 to see trigger overhead.',
+      run: () => benchTriggerOverhead(TRIGGER_ROWS),
     },
   ];
 }

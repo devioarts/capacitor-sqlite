@@ -17,7 +17,7 @@ import type {
   SqliteSuccess,
 } from './definitions';
 import { findDuplicateMigrationVersion } from './migrations.js';
-import { assertSingleSqlStatement, isInsertStatement } from './sql.js';
+import { assertSingleSqlStatement, isInsertStatement, isQueryResultStatement } from './sql.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Promiser = (type: string, args?: any) => Promise<any>;
@@ -596,6 +596,12 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
       const opts = assertPlainObject(options, 'query');
       database = validateName(opts.database);
       statement = validateSql(opts.statement, 'statement');
+      if (!isQueryResultStatement(statement)) {
+        throw new SqliteRuntimeError(
+          'INVALID_PARAMS',
+          "'statement' must be a SELECT, PRAGMA, EXPLAIN, or DML statement with RETURNING",
+        );
+      }
       values = validateValues(opts.values, 'values');
     } catch (err) {
       return this.err(errorCode(err, 'INVALID_PARAMS'), 'query', err);

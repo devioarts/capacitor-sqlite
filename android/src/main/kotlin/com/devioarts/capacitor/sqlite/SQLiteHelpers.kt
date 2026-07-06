@@ -75,6 +75,7 @@ internal object SQLiteHelpers {
 
     fun query(db: SQLiteDatabase, sql: String, values: List<Any?>): List<Map<String, Any?>> {
         requireSingleStatement(sql)
+        requireQueryResultStatement(sql)
         val (finalSql, finalValues) = injectLiterals(sql, values)
         val strArgs: Array<String?>? = if (finalValues.isEmpty()) null
             else finalValues.map { v ->
@@ -421,6 +422,23 @@ internal object SQLiteHelpers {
         return withMainStatementType(sql, first.end) ?: first.keyword
     }
 
+    fun isQueryResultStatement(sql: String): Boolean {
+        return when (statementType(sql)) {
+            "SELECT", "PRAGMA", "EXPLAIN" -> true
+            "INSERT", "UPDATE", "DELETE", "REPLACE" -> hasKeyword(sql, "RETURNING")
+            else -> false
+        }
+    }
+
+    fun requireQueryResultStatement(sql: String) {
+        if (!isQueryResultStatement(sql)) {
+            throw CapacitorSqliteException(
+                "INVALID_PARAMS",
+                "'statement' must be a SELECT, PRAGMA, EXPLAIN, or DML statement with RETURNING"
+            )
+        }
+    }
+
     private fun isInsertLike(stmtType: String): Boolean =
         stmtType == "INSERT" || stmtType == "REPLACE"
 
@@ -498,6 +516,26 @@ internal object SQLiteHelpers {
         var end = start + 1
         while (end < sql.length && isIdentifierPart(sql[end])) end++
         return Keyword(sql.substring(start, end).uppercase(), end)
+    }
+
+    private fun hasKeyword(sql: String, target: String): Boolean {
+        var i = 0
+        while (i < sql.length) {
+            val ch = sql[i]
+            when {
+                ch == '\'' || ch == '"' || ch == '`' -> i = skipQuoted(sql, i, ch)
+                ch == '[' -> i = skipBracketIdentifier(sql, i)
+                ch == '-' && i + 1 < sql.length && sql[i + 1] == '-' -> i = skipLineComment(sql, i)
+                ch == '/' && i + 1 < sql.length && sql[i + 1] == '*' -> i = skipBlockComment(sql, i)
+                isIdentifierStart(ch) && (i == 0 || !isIdentifierPart(sql[i - 1])) -> {
+                    val keyword = readKeyword(sql, i)
+                    if (keyword?.keyword == target) return true
+                    if (keyword != null) i = keyword.end - 1
+                }
+            }
+            i++
+        }
+        return false
     }
 
     private fun skipIdentifier(sql: String, start: Int): Int {

@@ -559,6 +559,26 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
     },
   },
   {
+    id: 'q-17', group: 'Query', name: 'query() rejects DML without RETURNING and does not mutate',
+    fn: async () => {
+      const DB = 'suite_q17';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      await CapacitorSqlite.execute({
+        database: DB,
+        statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (v TEXT)'],
+      });
+      assertFail(
+        await CapacitorSqlite.query({ database: DB, statement: "INSERT INTO t VALUES ('bad')" }),
+        'query insert without returning',
+        'INVALID_PARAMS',
+      );
+      const q = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT COUNT(*) AS n FROM t' }), 'count');
+      assertEqual((q.rows[0] as { n: number }).n, 0, 'INSERT via query() did not mutate');
+      await silentClose(DB);
+    },
+  },
+  {
     id: 'q-05', group: 'Query', name: 'multi-column types: INTEGER, REAL, TEXT, NULL round-trip',
     fn: async () => {
       const DB = 'suite_q05';

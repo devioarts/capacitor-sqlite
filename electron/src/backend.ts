@@ -18,7 +18,7 @@ import type {
   SqliteSuccess,
 } from '../../src/definitions';
 import { findDuplicateMigrationVersion } from '../../src/migrations.js';
-import { assertSingleSqlStatement, isInsertStatement } from '../../src/sql.js';
+import { assertSingleSqlStatement, isInsertStatement, isQueryResultStatement } from '../../src/sql.js';
 
 export interface ElectronSqliteBackendPaths {
   userData: string;
@@ -566,6 +566,12 @@ export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
       const opts = assertPlainObject(options, 'query');
       const database = validateName(opts.database);
       const statement = validateSql(opts.statement, 'statement');
+      if (!isQueryResultStatement(statement)) {
+        throw new SqliteRuntimeError(
+          'INVALID_PARAMS',
+          "'statement' must be a SELECT, PRAGMA, EXPLAIN, or DML statement with RETURNING",
+        );
+      }
       const values = convertValues(validateValues(opts.values, 'values'));
       const db = this.requireOpen(database, 'query');
       const stmt = db.prepare(statement);

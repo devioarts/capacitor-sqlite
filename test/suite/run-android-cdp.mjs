@@ -7,7 +7,7 @@
 // debug APK (with the CLI hook from src/cliHook.ts) is installed and launched.
 // See package.json's "test:suite:android" script, which does all of this.
 //
-// Usage: node test/suite/run-android-cdp.mjs [--stress] [--timeout-ms=180000]
+// Usage: node test/suite/run-android-cdp.mjs [--stress] [--timeout-ms=900000]
 
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -16,8 +16,11 @@ import * as path from 'node:path';
 
 const APP_ID = 'com.devioarts.capacitor.sqlite';
 const FORWARD_PORT = 9333;
-const TIMEOUT_MS = Number(process.argv.find((a) => a.startsWith('--timeout-ms='))?.split('=')[1] ?? 180_000);
+const PER_CALL_TIMEOUT_MS = 15_000;
+const POLL_INTERVAL_MS = 1_500;
 const runStress = process.argv.includes('--stress');
+const DEFAULT_TIMEOUT_MS = runStress ? 900_000 : 300_000;
+const TIMEOUT_MS = Number(process.argv.find((a) => a.startsWith('--timeout-ms='))?.split('=')[1] ?? DEFAULT_TIMEOUT_MS);
 
 function findAdb() {
   const candidates = [
@@ -68,19 +71,19 @@ async function fetchPages(port) {
   return res.json();
 }
 
-function evaluate(wsUrl, expression) {
+function evaluate(wsUrl, expression, { timeoutMs = PER_CALL_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
     const timer = setTimeout(() => {
       ws.close();
-      reject(new Error(`CDP evaluate timed out after ${TIMEOUT_MS}ms`));
-    }, TIMEOUT_MS);
+      reject(new Error(`CDP evaluate timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
     ws.addEventListener('open', () => {
       ws.send(
         JSON.stringify({
           id: 1,
           method: 'Runtime.evaluate',
-          params: { expression, awaitPromise: true, returnByValue: true, timeout: TIMEOUT_MS },
+          params: { expression, awaitPromise: true, returnByValue: true, timeout: timeoutMs },
         }),
       );
     });
@@ -100,6 +103,36 @@ function evaluate(wsUrl, expression) {
       reject(err);
     });
   });
+}
+
+async function runAsync(wsUrl, expression, resultVar) {
+  const errorVar = `${resultVar}Error`;
+  await evaluate(
+    wsUrl,
+    `
+      window.${resultVar} = null;
+      window.${errorVar} = null;
+      Promise.resolve(${expression})
+        .then((r) => { window.${resultVar} = JSON.stringify(r); })
+        .catch((err) => {
+          window.${errorVar} = String(err && (err.stack || err.message) || err);
+        });
+      'started';
+    `,
+  );
+
+  const deadline = Date.now() + TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const state = await evaluate(
+      wsUrl,
+      `JSON.stringify({ result: window.${resultVar}, error: window.${errorVar} })`,
+    );
+    const parsed = JSON.parse(state);
+    if (parsed.error) throw new Error(parsed.error);
+    if (parsed.result !== null) return JSON.parse(parsed.result);
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  }
+  throw new Error(`Timed out waiting for ${resultVar} after ${TIMEOUT_MS}ms`);
 }
 
 async function main() {
@@ -128,7 +161,7 @@ async function main() {
   }
 
   console.log('Running suite tests against the real Android (Kotlin/SQLite) backend...\n');
-  const report = await evaluate(page.webSocketDebuggerUrl, 'window.__capSuite.runAll()');
+  const report = await runAsync(page.webSocketDebuggerUrl, 'window.__capSuite.runAll()', '__capSuiteReport');
   for (const f of report.failures) {
     console.log(`✗ [${f.group}] ${f.name} — ${f.message}`);
   }
@@ -136,7 +169,7 @@ async function main() {
 
   if (runStress) {
     console.log('\nRunning stress benchmarks...\n');
-    const results = await evaluate(page.webSocketDebuggerUrl, 'window.__capSuite.runStress()');
+    const results = await runAsync(page.webSocketDebuggerUrl, 'window.__capSuite.runStress()', '__capSuiteStress');
     for (const r of results) {
       const parts = [`${r.durationMs}ms`];
       if (r.throughput) parts.push(r.throughput);

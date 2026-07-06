@@ -9,6 +9,7 @@ import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.CapacitorPlugin
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -16,7 +17,9 @@ import org.json.JSONObject
 class CapacitorSqlitePlugin : Plugin() {
 
     private lateinit var impl: CapacitorSqlite
-    private val sqliteExecutor = Executors.newCachedThreadPool()
+    private val sqliteExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "capacitor-sqlite")
+    }
 
     override fun load() {
         impl = CapacitorSqlite(context)
@@ -24,6 +27,10 @@ class CapacitorSqlitePlugin : Plugin() {
 
     override fun handleOnDestroy() {
         sqliteExecutor.shutdownNow()
+        sqliteExecutor.awaitTermination(2, TimeUnit.SECONDS)
+        if (::impl.isInitialized) {
+            impl.closeAll()
+        }
     }
 
     // MARK: - Unified response helpers

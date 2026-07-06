@@ -14,6 +14,17 @@ enum SQLStatement {
         return stmtType == "INSERT" || stmtType == "REPLACE"
     }
 
+    static func isQueryResultStatement(_ sql: String) -> Bool {
+        let stmtType = type(sql)
+        if stmtType == "SELECT" || stmtType == "PRAGMA" || stmtType == "EXPLAIN" {
+            return true
+        }
+        if stmtType == "INSERT" || stmtType == "UPDATE" || stmtType == "DELETE" || stmtType == "REPLACE" {
+            return hasKeyword(sql, target: "RETURNING")
+        }
+        return false
+    }
+
     private static func withMainStatementType(_ sql: String, from start: String.Index) -> String? {
         var idx = skipIgnorable(sql, from: start)
         if let recursive = readKeyword(sql, from: idx), recursive.keyword == "RECURSIVE" {
@@ -84,6 +95,30 @@ enum SQLStatement {
             end = sql.index(after: end)
         }
         return (String(sql[start..<end]).uppercased(), end)
+    }
+
+    private static func hasKeyword(_ sql: String, target: String) -> Bool {
+        var idx = sql.startIndex
+        while idx < sql.endIndex {
+            let character = sql[idx]
+            if character == "'" || character == "\"" || character == "`" {
+                idx = skipQuoted(sql, from: idx, quote: character)
+            } else if character == "[" {
+                idx = skipBracketIdentifier(sql, from: idx)
+            } else if character == "-", nextChar(sql, after: idx) == "-" {
+                idx = skipLineComment(sql, from: idx)
+            } else if character == "/", nextChar(sql, after: idx) == "*" {
+                idx = skipBlockComment(sql, from: idx)
+            } else if isIdentifierStart(character),
+                      idx == sql.startIndex || !isIdentifierPart(sql[sql.index(before: idx)]) {
+                if let keyword = readKeyword(sql, from: idx) {
+                    if keyword.keyword == target { return true }
+                    idx = sql.index(before: keyword.end)
+                }
+            }
+            idx = sql.index(after: idx)
+        }
+        return false
     }
 
     private static func skipIdentifier(_ sql: String, from start: String.Index) -> String.Index {

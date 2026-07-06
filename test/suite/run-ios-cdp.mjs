@@ -14,7 +14,7 @@
 // connection, while short-lived connect → evaluate → disconnect round trips
 // have been reliable in testing.
 //
-// Usage: node test/suite/run-ios-cdp.mjs [--stress] [--timeout-ms=180000]
+// Usage: node test/suite/run-ios-cdp.mjs [--stress] [--timeout-ms=900000]
 
 import { execFileSync } from 'node:child_process';
 
@@ -24,10 +24,11 @@ const { logger: appiumSupportLogger } = await import('@appium/support');
 appiumSupportLogger.log.level = 'warn';
 
 const BUNDLE_ID = 'com.devioarts.example.sqlite';
-const TIMEOUT_MS = Number(process.argv.find((a) => a.startsWith('--timeout-ms='))?.split('=')[1] ?? 180_000);
 const PER_CALL_TIMEOUT_MS = 15_000;
 const POLL_INTERVAL_MS = 1_500;
 const runStress = process.argv.includes('--stress');
+const DEFAULT_TIMEOUT_MS = runStress ? 900_000 : 180_000;
+const TIMEOUT_MS = Number(process.argv.find((a) => a.startsWith('--timeout-ms='))?.split('=')[1] ?? DEFAULT_TIMEOUT_MS);
 
 function sh(cmd, args) {
   return execFileSync(cmd, args, { encoding: 'utf8' });
