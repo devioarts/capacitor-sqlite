@@ -1,6 +1,12 @@
 # node files
 dist
 node_modules
+coverage
+artifacts
+*.tgz
+.env
+.env.*
+!.env.example
 
 # iOS files
 Pods

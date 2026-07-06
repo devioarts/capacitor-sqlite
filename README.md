@@ -1,7 +1,5 @@
 # @devioarts/capacitor-sqlite
 
-> **Early release** — This plugin is new and has not been battle-tested in production. Please evaluate it thoroughly before shipping. Bug reports, edge-case findings, and general feedback are very welcome — open an issue or reach out directly.
-
 SQLite plugin for Capacitor — iOS, Android, Web (OPFS), and Electron.
 
 - Schema migrations via `PRAGMA user_version` — each version runs in its own transaction
@@ -313,23 +311,23 @@ launch it on each target platform, then run the **Test Suite** tab.
 
 <docgen-index>
 
-* [`getPlatform()`](#getplatform)
-* [`isAvailable()`](#isavailable)
-* [`open(...)`](#open)
-* [`close(...)`](#close)
-* [`isOpen(...)`](#isopen)
-* [`getVersion(...)`](#getversion)
-* [`getSchemaVersion(...)`](#getschemaversion)
-* [`vacuum(...)`](#vacuum)
-* [`execute(...)`](#execute)
-* [`run(...)`](#run)
-* [`runBatch(...)`](#runbatch)
-* [`query(...)`](#query)
-* [`beginTransaction(...)`](#begintransaction)
-* [`commitTransaction(...)`](#committransaction)
-* [`rollbackTransaction(...)`](#rollbacktransaction)
-* [Interfaces](#interfaces)
-* [Type Aliases](#type-aliases)
+- [`getPlatform()`](#getplatform)
+- [`isAvailable()`](#isavailable)
+- [`open(...)`](#open)
+- [`close(...)`](#close)
+- [`isOpen(...)`](#isopen)
+- [`getVersion(...)`](#getversion)
+- [`getSchemaVersion(...)`](#getschemaversion)
+- [`vacuum(...)`](#vacuum)
+- [`execute(...)`](#execute)
+- [`run(...)`](#run)
+- [`runBatch(...)`](#runbatch)
+- [`query(...)`](#query)
+- [`beginTransaction(...)`](#begintransaction)
+- [`commitTransaction(...)`](#committransaction)
+- [`rollbackTransaction(...)`](#rollbacktransaction)
+- [Interfaces](#interfaces)
+- [Type Aliases](#type-aliases)
 
 </docgen-index>
 
@@ -346,8 +344,7 @@ Returns the platform identifier of the implementation answering calls.
 
 **Returns:** <code>Promise&lt;<a href="#sqliteresult">SqliteResult</a>&lt;{ platform: <a href="#sqliteplatform">SqlitePlatform</a>; }&gt;&gt;</code>
 
---------------------
-
+---
 
 ### isAvailable()
 
@@ -359,8 +356,7 @@ Returns `true` if SQLite is available on the current platform.
 
 **Returns:** <code>Promise&lt;<a href="#sqliteresult">SqliteResult</a>&lt;{ available: boolean; }&gt;&gt;</code>
 
---------------------
-
+---
 
 ### open(...)
 
@@ -379,8 +375,7 @@ is malformed, versions are duplicated, or a migration statement fails.
 
 **Returns:** <code>Promise&lt;<a href="#sqliteresult">SqliteResult</a>&lt;<a href="#record">Record</a>&lt;string, never&gt;&gt;&gt;</code>
 
---------------------
-
+---
 
 ### close(...)
 
@@ -394,8 +389,7 @@ close(options: { database: string; }) => Promise<SqliteResult>
 
 **Returns:** <code>Promise&lt;<a href="#sqliteresult">SqliteResult</a>&lt;<a href="#record">Record</a>&lt;string, never&gt;&gt;&gt;</code>
 
---------------------
-
+---
 
 ### isOpen(...)
 
@@ -409,8 +403,7 @@ isOpen(options: { database: string; }) => Promise<SqliteResult<{ open: boolean; 
 
 **Returns:** <code>Promise&lt;<a href="#sqliteresult">SqliteResult</a>&lt;{ open: boolean; }&gt;&gt;</code>
 
---------------------
-
+---
 
 ### getVersion(...)
 
@@ -426,8 +419,7 @@ Returns the SQLite engine version for the opened database connection.
 
 **Returns:** <code>Promise&lt;<a href="#sqliteresult">SqliteResult</a>&lt;{ version: string; }&gt;&gt;</code>
 
---------------------
-
+---
 
 ### getSchemaVersion(...)
 
@@ -443,8 +435,7 @@ Returns the current SQLite `PRAGMA user_version` for the opened database.
 
 **Returns:** <code>Promise&lt;<a href="#sqliteresult">SqliteResult</a>&lt;{ version: number; }&gt;&gt;</code>
 
---------------------
-
+---
 
 ### vacuum(...)
 
@@ -460,8 +451,7 @@ Runs SQLite `VACUUM` for the opened database.
 
 **Returns:** <code>Promise&lt;<a href="#sqliteresult">SqliteResult</a>&lt;<a href="#record">Record</a>&lt;string, never&gt;&gt;&gt;</code>
 
---------------------
-
+---
 
 ### execute(...)
 
@@ -485,8 +475,7 @@ nested transactions return TRANSACTION_FAILED.
 
 **Returns:** <code>Promise&lt;<a href="#sqliteresult">SqliteResult</a>&lt;{ changes: number; }&gt;&gt;</code>
 
---------------------
-
+---
 
 ### run(...)
 
@@ -507,8 +496,7 @@ Leading SQL comments and common `WITH ... INSERT` CTE forms are detected as inse
 
 **Returns:** <code>Promise&lt;<a href="#sqliteresult">SqliteResult</a>&lt;{ changes: number; lastInsertId: number; }&gt;&gt;</code>
 
---------------------
-
+---
 
 ### runBatch(...)
 
@@ -527,8 +515,7 @@ nested transactions return TRANSACTION_FAILED.
 
 **Returns:** <code>Promise&lt;<a href="#sqliteresult">SqliteResult</a>&lt;{ changes: number; lastInsertId: number; }&gt;&gt;</code>
 
---------------------
-
+---
 
 ### query(...)
 
@@ -552,8 +539,7 @@ Column names become object keys. Results are in `data.rows`.
 
 **Returns:** <code>Promise&lt;<a href="#sqliteresult">SqliteResult</a>&lt;{ rows: T[]; }&gt;&gt;</code>
 
---------------------
-
+---
 
 ### beginTransaction(...)
 
@@ -569,8 +555,7 @@ Start a transaction. Returns TRANSACTION_FAILED if one is already active.
 
 **Returns:** <code>Promise&lt;<a href="#sqliteresult">SqliteResult</a>&lt;<a href="#record">Record</a>&lt;string, never&gt;&gt;&gt;</code>
 
---------------------
-
+---
 
 ### commitTransaction(...)
 
@@ -584,8 +569,7 @@ commitTransaction(options: { database: string; }) => Promise<SqliteResult>
 
 **Returns:** <code>Promise&lt;<a href="#sqliteresult">SqliteResult</a>&lt;<a href="#record">Record</a>&lt;string, never&gt;&gt;&gt;</code>
 
---------------------
-
+---
 
 ### rollbackTransaction(...)
 
@@ -599,11 +583,9 @@ rollbackTransaction(options: { database: string; }) => Promise<SqliteResult>
 
 **Returns:** <code>Promise&lt;<a href="#sqliteresult">SqliteResult</a>&lt;<a href="#record">Record</a>&lt;string, never&gt;&gt;&gt;</code>
 
---------------------
-
+---
 
 ### Interfaces
-
 
 #### SqliteSuccess
 
@@ -612,14 +594,12 @@ rollbackTransaction(options: { database: string; }) => Promise<SqliteResult>
 | **`success`** | <code>true</code> |
 | **`data`**    | <code>T</code>    |
 
-
 #### SqliteFailure
 
 | Prop          | Type                                                |
 | ------------- | --------------------------------------------------- |
 | **`success`** | <code>false</code>                                  |
 | **`error`**   | <code><a href="#sqliteerror">SqliteError</a></code> |
-
 
 #### SqliteError
 
@@ -631,7 +611,6 @@ rollbackTransaction(options: { database: string; }) => Promise<SqliteResult>
 | **`method`**   | <code>string</code>                                              |                                                                                                                                                                                   |
 | **`details`**  | <code><a href="#record">Record</a>&lt;string, unknown&gt;</code> | Platform diagnostic metadata. All implementations include `nativeCode`, `nativeMessage`, and `source`; callers should treat additional keys as platform-specific debugging hints. |
 
-
 #### OpenOptions
 
 | Prop             | Type                                                        | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -641,14 +620,12 @@ rollbackTransaction(options: { database: string; }) => Promise<SqliteResult>
 | **`directory`**  | <code><a href="#sqlitedirectory">SqliteDirectory</a></code> | Logical storage location for the database file. Raw filesystem paths are not accepted. - `default` / omitted: recommended persistent app storage - iOS: `Library/Application Support/CapacitorSQLite/` - Android: `&lt;filesDir&gt;/CapacitorSQLite/` - Electron: `app.getPath('userData')/CapacitorSQLite/` - Web: OPFS (`file:&lt;name&gt;.db?vfs=opfs`) - `documents`: user-document location where appropriate - iOS: `Documents/CapacitorSQLite/` - Android: app-specific external Documents if available, otherwise `&lt;filesDir&gt;/Documents/CapacitorSQLite/` - Electron: falls back to `userData` to avoid placing app databases in the user's Documents folder - Web: OPFS fallback - `library`: persistent app support data - iOS: `Library/Application Support/CapacitorSQLite/` - Android: `&lt;filesDir&gt;/CapacitorSQLite/` - Electron: `userData/CapacitorSQLite/` - Web: OPFS fallback - `cache`: rebuildable data only; the OS may delete it - iOS: `Library/Caches/CapacitorSQLite/` - Android: `&lt;cacheDir&gt;/CapacitorSQLite/` - Electron: `temp/capacitor-sqlite/CapacitorSQLite/` - Web: OPFS fallback `:memory:` databases ignore this option. |
 | **`migrations`** | <code>Migration[]</code>                                    | When provided the plugin reads `PRAGMA user_version`, then runs every migration whose `version` is greater than the stored value, in order. After all migrations complete it writes the highest version back. Returns MIGRATION_FAILED if any entry is malformed, versions are duplicated, or a statement fails.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
-
 #### Migration
 
 | Prop             | Type                  | Description                                                                                             |
 | ---------------- | --------------------- | ------------------------------------------------------------------------------------------------------- |
 | **`version`**    | <code>number</code>   | Target schema version. Must be unique within an `open()` call. Migrations run in ascending order.       |
 | **`statements`** | <code>string[]</code> | SQL statements executed when upgrading to this version. Each string must contain exactly one statement. |
-
 
 #### ExecuteOptions
 
@@ -658,7 +635,6 @@ rollbackTransaction(options: { database: string; }) => Promise<SqliteResult>
 | **`statements`**  | <code>string[]</code> | One or more SQL statements (DDL or DML). No parameter binding. Must be a non-empty array — empty array returns INVALID_PARAMS. |
 | **`transaction`** | <code>boolean</code>  | Wrap all statements in a single transaction. Default: `true`.                                                                  |
 
-
 #### RunOptions
 
 | Prop            | Type                                                  | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
@@ -666,7 +642,6 @@ rollbackTransaction(options: { database: string; }) => Promise<SqliteResult>
 | **`database`**  | <code>string</code>                                   |                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | **`statement`** | <code>string</code>                                   | Single parameterized SQL statement.                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | **`values`**    | <code><a href="#sqlitevalues">SQLiteValues</a></code> | Positional values bound to anonymous `?` placeholders, in order. `number` values must be finite; integer `number` values must be within `Number.MAX_SAFE_INTEGER`. BLOB values should use <a href="#uint8array">`Uint8Array`</a>. Keep BLOB bind values at or below about 1 MB per value when crossing the Capacitor native bridge. Numbered placeholders (`?1`) and named placeholders (`:name`, `@name`, `$name`) are not part of the cross-platform API contract. |
-
 
 #### Uint8Array
 
@@ -710,13 +685,11 @@ requested number of bytes could not be allocated an exception is raised.
 | **toString**       | () =&gt; string                                                                                                                                                                | Returns a string representation of an array.                                                                                                                                                                                                |
 | **valueOf**        | () =&gt; <a href="#uint8array">Uint8Array</a>                                                                                                                                  | Returns the primitive value of the specified object.                                                                                                                                                                                        |
 
-
 #### ArrayLike
 
 | Prop         | Type                |
 | ------------ | ------------------- |
 | **`length`** | <code>number</code> |
-
 
 #### ArrayBufferTypes
 
@@ -725,7 +698,6 @@ Allowed <a href="#arraybuffer">ArrayBuffer</a> types for the buffer of an ArrayB
 | Prop              | Type                                                |
 | ----------------- | --------------------------------------------------- |
 | **`ArrayBuffer`** | <code><a href="#arraybuffer">ArrayBuffer</a></code> |
-
 
 #### ArrayBuffer
 
@@ -742,7 +714,6 @@ buffer as needed.
 | --------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
 | **slice** | (begin: number, end?: number \| undefined) =&gt; <a href="#arraybuffer">ArrayBuffer</a> | Returns a section of an <a href="#arraybuffer">ArrayBuffer</a>. |
 
-
 #### RunBatchOptions
 
 | Prop              | Type                                                                                     | Description                                                   |
@@ -750,7 +721,6 @@ buffer as needed.
 | **`database`**    | <code>string</code>                                                                      |                                                               |
 | **`set`**         | <code>{ statement: string; values?: <a href="#sqlitevalues">SQLiteValues</a>; }[]</code> |                                                               |
 | **`transaction`** | <code>boolean</code>                                                                     | Wrap all statements in a single transaction. Default: `true`. |
-
 
 #### QueryOptions
 
@@ -760,48 +730,49 @@ buffer as needed.
 | **`statement`** | <code>string</code>                                   | Result-producing statement using anonymous `?` placeholders for bound values.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | **`values`**    | <code><a href="#sqlitevalues">SQLiteValues</a></code> | Positional values bound to anonymous `?` placeholders, in order. `number` values must be finite; integer `number` values must be within `Number.MAX_SAFE_INTEGER`. BLOB values should use <a href="#uint8array">`Uint8Array`</a>. Keep BLOB bind values at or below about 1 MB per value when crossing the Capacitor native bridge. On Android, `query()` uses a small SQL scanner before calling `rawQuery(String[])` so numeric, boolean, and BLOB values keep their SQLite types. The scanner ignores `?` inside strings, quoted identifiers, and SQL comments, and rejects unsupported numbered/named placeholder forms. |
 
-
 ### Type Aliases
-
 
 #### SqliteResult
 
 Every plugin method resolves to this type — never rejects.
 
-<code><a href="#sqlitesuccess">SqliteSuccess</a>&lt;T&gt; | <a href="#sqlitefailure">SqliteFailure</a></code>
-
+<code>
+  <a href="#sqlitesuccess">SqliteSuccess</a>&lt;T&gt; | <a href="#sqlitefailure">SqliteFailure</a>
+</code>
 
 #### SqliteErrorCode
 
-<code>'INVALID_PARAMS' | 'INVALID_NAME' | 'DB_NOT_OPEN' | 'DB_ALREADY_OPEN' | 'OPEN_FAILED' | 'CLOSE_FAILED' | 'EXECUTE_FAILED' | 'QUERY_FAILED' | 'VACUUM_FAILED' | 'VERSION_FAILED' | 'SCHEMA_VERSION_FAILED' | 'TRANSACTION_FAILED' | 'MIGRATION_FAILED' | 'NOT_AVAILABLE' | 'UNKNOWN'</code>
-
+<code>
+  'INVALID_PARAMS' | 'INVALID_NAME' | 'DB_NOT_OPEN' | 'DB_ALREADY_OPEN' | 'OPEN_FAILED' | 'CLOSE_FAILED' |
+  'EXECUTE_FAILED' | 'QUERY_FAILED' | 'VACUUM_FAILED' | 'VERSION_FAILED' | 'SCHEMA_VERSION_FAILED' |
+  'TRANSACTION_FAILED' | 'MIGRATION_FAILED' | 'NOT_AVAILABLE' | 'UNKNOWN'
+</code>
 
 #### SqlitePlatform
 
 <code>'ios' | 'android' | 'web' | 'electron'</code>
 
-
 #### Record
 
 Construct a type with a set of properties K of type T
 
-<code>{ [P in K]: T; }</code>
-
+<code>{
+ [P in K]: T;
+ }</code>
 
 #### SqliteDirectory
 
 <code>'default' | 'documents' | 'library' | 'cache'</code>
 
-
 #### SQLiteValues
 
 <code>SQLiteValue[]</code>
 
-
 #### SQLiteValue
 
-<code>string | number | boolean | null | <a href="#uint8array">Uint8Array</a></code>
-
+<code>
+  string | number | boolean | null | <a href="#uint8array">Uint8Array</a>
+</code>
 
 #### ArrayBufferLike
 

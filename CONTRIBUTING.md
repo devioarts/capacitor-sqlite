@@ -1,67 +1,96 @@
 # Contributing
 
-This guide provides instructions for contributing to this Capacitor SQLite plugin.
+Thanks for helping improve `@devioarts/capacitor-sqlite`.
 
-## Developing
+This plugin targets four backends: iOS, Android, Web/OPFS, and Electron. Please keep changes
+small, cross-platform where possible, and covered by the shared playground suite when behavior
+changes.
 
-### Local Setup
+## Local Setup
 
 1. Fork and clone the repo.
-1. Install the dependencies.
+1. Install root dependencies.
 
    ```shell
-   npm install
+   npm ci
    ```
 
-1. Install SwiftLint if you're on macOS.
+1. Install playground dependencies if you will run Web, Android, or iOS suite tests.
 
    ```shell
-   brew install swiftlint
+   npm ci --prefix playground
    ```
 
-### Scripts
+1. On macOS, make sure Xcode command line tools and Swift tooling are available. Android work
+   requires a working Android SDK and an emulator/device visible to `adb`.
 
-#### `npm run build`
+## Common Commands
 
-Build the plugin web assets and generate plugin API documentation using [`@capacitor/docgen`](https://github.com/ionic-team/capacitor-docgen).
+### `npm run build`
 
-It will compile the TypeScript code from `src/` into ESM JavaScript in `dist/esm/`. These files are used in apps with bundlers when your plugin is imported.
+Builds the plugin, regenerates API docs with `@capacitor/docgen`, compiles TypeScript, bundles
+the Web plugin, and builds the Electron entry points.
 
-Then, Rollup will bundle the code into a single file at `dist/plugin.js`. This file is used in apps without bundlers by including it as a script in `index.html`.
+### `npm run lint`
 
-#### `npm run test:p2`
+Runs ESLint, Prettier, and SwiftLint. SwiftLint should report 0 violations before review.
 
-Runs the current automated regression gate: SQL guard tests, iOS XCTest, Android unit tests, Web/Electron builds, and migration validation tests. Use this before launching the playground manually.
+### `npm run test:p2`
 
-#### `npm run verify`
+Runs the lightweight regression gate: JS SQL guard tests, iOS XCTest, Android unit tests,
+Web/Electron builds, and migration validation tests.
 
-Build and validate the web and native projects.
+### Full Suite
 
-This is useful to run in CI to verify that the plugin builds for all platforms.
+The shared behavioral suite currently has 365 tests and 11 stress benchmarks. The same test
+definitions are used by the playground UI and the CLI runners.
 
-#### `npm run test:suite:electron` / `test:suite:android` / `test:suite:ios`
+```shell
+npm run test:suite:electron
+npm run test:suite:web
+npm run test:suite:android
+npm run test:suite:ios
+```
 
-Run the full 359-test playground suite (and, with a `:stress` suffix, the 10 stress benchmarks)
-from the command line instead of clicking through the playground UI — same test definitions
-(`playground/src/tests/`), driven directly against each platform's backend. See
-[TESTING.md](TESTING.md#running-from-the-command-line) for prerequisites and how each one connects.
+Append `:stress` to also run the stress benchmarks:
 
-#### `npm run lint` / `npm run fmt`
+```shell
+npm run test:suite:web:stress
+```
 
-Check formatting and code quality, autoformat/autofix if possible.
+See [TESTING.md](TESTING.md#running-from-the-command-line) for platform prerequisites and
+details on how each runner connects to the real backend.
 
-The project uses ESLint, Prettier, SwiftLint, Xcode, and Gradle checks. SwiftLint warnings may remain non-fatal, but serious lint errors should be fixed before review.
+## GitHub Actions
 
-### Playground
+- `CI` runs automatically on pull requests and pushes to `main`. It covers lint/format checks,
+  build, JS guard tests, Electron suite, and Web/OPFS suite.
+- `Release Matrix` is manually triggered before a release. It runs Electron, Web/OPFS, Android,
+  and iOS as separate jobs, optionally including stress benchmarks, and uploads platform logs as
+  workflow artifacts.
 
-The playground is the manual integration surface. Run the automated gate before starting it, then use the scenarios in `TESTING.md` to cover Web OPFS, Electron, iOS, and Android behaviour that cannot be fully simulated by unit tests.
+## Pull Requests
+
+Before opening a PR:
+
+- Run the smallest relevant local test first.
+- Run `npm run lint`.
+- Update `README.md`, `TESTING.md`, or `CHANGELOG.md` when behavior, commands, or release-visible
+  behavior changes.
+- Include platform notes when a change affects only one backend.
+- Avoid committing generated package tarballs (`*.tgz`) or local build artifacts.
 
 ## Publishing
 
-There is a `prepublishOnly` hook in `package.json` which prepares the plugin before publishing, so all you need to do is run:
+Publishing is done from the package root:
 
 ```shell
-npm publish
+npm run release
 ```
 
-> **Note**: The [`files`](https://docs.npmjs.com/cli/v7/configuring-npm/package-json#files) array in `package.json` specifies which files get published. If you rename files/directories or add files elsewhere, you may need to update it.
+The `prepublishOnly` hook runs `npm run build` before publishing. The `files` array in
+`package.json` controls what is included in the npm package; verify with:
+
+```shell
+npm pack --dry-run
+```
