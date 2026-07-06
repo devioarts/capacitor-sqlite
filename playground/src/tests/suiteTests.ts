@@ -576,6 +576,29 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
     },
   },
   {
+    id: 'q-16', group: 'Query', name: 'TEXT with embedded NUL byte round-trips intact',
+    fn: async () => {
+      const DB = 'suite_q06';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({
+        database: DB,
+        statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (v TEXT)'],
+      }), 'ddl');
+      const text = 'a\0b';
+      assertOk(await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES (?)', values: [text] }), 'insert');
+      const q = assertOk(await CapacitorSqlite.query({
+        database: DB,
+        statement: 'SELECT v, hex(v) AS hex FROM t',
+      }), 'query');
+      const row = q.rows[0] as { v: string; hex: string };
+      assertEqual(row.v, text, 'embedded NUL preserved in returned TEXT');
+      assertEqual(row.v.length, 3, 'JS string length includes embedded NUL');
+      assertEqual(row.hex, '610062', 'SQLite stored the full UTF-8 byte sequence');
+      await silentClose(DB);
+    },
+  },
+  {
     id: 'qph-01', group: 'Query Placeholders', name: 'anonymous ? preserves INTEGER, REAL, boolean, TEXT and NULL',
     fn: async () => {
       const DB = 'suite_qph01';

@@ -70,10 +70,16 @@ internal class CapacitorSqlite(private val context: Context) {
 
     @Throws(Exception::class)
     fun close(database: String) {
-        val db = synchronized(this) { databases.remove(database) }
-            ?: throw CapacitorSqliteException("DB_NOT_OPEN", "close: '$database' is not open")
-
-        wrap("CLOSE_FAILED") { db.close() }
+        wrap("CLOSE_FAILED") {
+            synchronized(this) {
+                val db = databases[database]
+                    ?: throw CapacitorSqliteException("DB_NOT_OPEN", "close: '$database' is not open")
+                db.close()
+                if (databases[database] === db) {
+                    databases.remove(database)
+                }
+            }
+        }
     }
 
     // MARK: - isOpen

@@ -4,7 +4,7 @@
 
 |  | Count | Status |
 |--|-------|--------|
-| **Automated** | 363 tests · 72 groups | ✅ All passing on iOS · Android · Web · Electron |
+| **Automated** | 364 tests · 72 groups | ✅ All passing on iOS · Android · Web · Electron |
 | **Manual** | 11 scenarios | 🔲 Require OS-level control or native tooling |
 
 Tests are part of the example app (`playground/`).  
@@ -23,7 +23,7 @@ platform, or from the CLI runners described below.
 
 ## Running from the command line
 
-The 363 suite tests and 11 stress benchmarks are defined once, in
+The 364 suite tests and 11 stress benchmarks are defined once, in
 `playground/src/tests/suiteTests.ts` and `playground/src/tests/stressBenchmarks.ts`, as functions
 that take a `CapacitorSqlitePlugin` implementation and return test/benchmark definitions. The
 playground UI (`PageSuite.tsx` / `PageStress.tsx`) calls these with the real `CapacitorSqlite`

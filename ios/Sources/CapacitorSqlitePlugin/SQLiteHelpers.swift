@@ -19,9 +19,9 @@ enum SQLiteHelpers {
     // Sentinel prefix for BLOB columns returned from queries.
     // The JS layer detects this prefix and decodes back to Uint8Array.
     // Must stay in sync with BLOB_PREFIX in SQLiteHelpers.kt and index.ts.
-    private static let BLOB_PREFIX = "blob64:"
-    private static let TEXT_PREFIX = "text64:"
-    private static let MAX_SAFE_INTEGER = 9_007_199_254_740_991.0
+    fileprivate static let BLOB_PREFIX = "blob64:"
+    fileprivate static let TEXT_PREFIX = "text64:"
+    fileprivate static let MAX_SAFE_INTEGER = 9_007_199_254_740_991.0
 
     // MARK: - Lifecycle
 
@@ -355,7 +355,8 @@ enum SQLiteHelpers {
                 }
             }
         case let v as String:
-            sqlite3_bind_text(stmt, idx, v, -1, SQLITE_TRANSIENT)
+            let byteCount = Int32(v.lengthOfBytes(using: .utf8))
+            sqlite3_bind_text(stmt, idx, v, byteCount, SQLITE_TRANSIENT)
         case let v as Data:
             if v.isEmpty {
                 sqlite3_bind_zeroblob(stmt, idx, 0)
@@ -377,10 +378,13 @@ enum SQLiteHelpers {
             throw SQLiteError.execute("Unsupported bind value type at index \(idx)")
         }
     }
+}
+
+extension SQLiteHelpers {
 
     // MARK: - Private: fetch rows
 
-    private static func fetchRows(stmt: OpaquePointer?, db: OpaquePointer) throws -> [[String: Any]] {
+    fileprivate static func fetchRows(stmt: OpaquePointer?, db: OpaquePointer) throws -> [[String: Any]] {
         var rows: [[String: Any]] = []
         while true {
             let rc = sqlite3_step(stmt)
@@ -408,7 +412,12 @@ enum SQLiteHelpers {
             case SQLITE_FLOAT:
                 row[name] = sqlite3_column_double(stmt, i)
             case SQLITE_TEXT:
-                if let text = sqlite3_column_text(stmt, i).map({ String(cString: $0) }) {
+                if let ptr = sqlite3_column_text(stmt, i) {
+                    let byteCount = Int(sqlite3_column_bytes(stmt, i))
+                    let bytes = UnsafeBufferPointer(start: ptr, count: byteCount)
+                    guard let text = String(bytes: bytes, encoding: .utf8) else {
+                        throw SQLiteError.query("invalid UTF-8 text at column \(i)")
+                    }
                     row[name] = encodeText(text)
                 } else {
                     row[name] = NSNull()
