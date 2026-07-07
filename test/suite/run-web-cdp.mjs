@@ -54,7 +54,13 @@ function findChrome() {
 }
 
 function spawnLogged(command, args, options) {
-  const child = spawn(command, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'] });
+  // `detached: true` makes this process (npm/chrome) the leader of its own process
+  // group, so its descendants (npm -> vite, chrome -> its own multi-process workers)
+  // share that group id. Without this, killing only the direct child can leave
+  // grandchildren running — and on Linux those orphans keep holding the piped
+  // stdout/stderr file descriptors below open, which never lets this script's Node
+  // process exit naturally even after the suite has finished and printed its result.
+  const child = spawn(command, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
   child.stdout.on('data', (chunk) => {
@@ -66,6 +72,18 @@ function spawnLogged(command, args, options) {
   return child;
 }
 
+// Signals the whole process group (negative pid), not just the direct child, so
+// grandchildren (npm's vite subprocess, Chrome's renderer/GPU/zygote workers) are
+// terminated too. `process.kill` throws ESRCH if the group is already gone — that's
+// fine, it means cleanup already happened some other way.
+function killGroup(child, signal) {
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    /* group already gone */
+  }
+}
+
 function stopChild(child) {
   return new Promise((resolve) => {
     if (child.exitCode !== null || child.signalCode !== null) {
@@ -73,14 +91,14 @@ function stopChild(child) {
       return;
     }
     const timer = setTimeout(() => {
-      child.kill('SIGKILL');
+      killGroup(child, 'SIGKILL');
       resolve();
     }, 5_000);
     child.once('exit', () => {
       clearTimeout(timer);
       resolve();
     });
-    child.kill('SIGTERM');
+    killGroup(child, 'SIGTERM');
   });
 }
 
@@ -278,7 +296,15 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error('CLI runner crashed:', err);
-  process.exitCode = 1;
-});
+main()
+  .catch((err) => {
+    console.error('CLI runner crashed:', err);
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    // Safety net: even with process-group cleanup above, an orphaned Chrome helper
+    // process can still hold an inherited stdio pipe open and keep this script's event
+    // loop alive. Force the exit explicitly instead of waiting for something that may
+    // never close on its own.
+    process.exit(process.exitCode ?? 0);
+  });
