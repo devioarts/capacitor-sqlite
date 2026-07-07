@@ -147,7 +147,6 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
     // so bundlers keep this as a runtime require.resolve call.
     try {
       const pkg = '@devioarts/capacitor-sqlite';
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
       candidates.push(require.resolve(pkg + '/electron/worker'));
     } catch {
       /* package not resolvable at runtime — fall through to the error below */

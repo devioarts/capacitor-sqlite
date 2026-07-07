@@ -138,7 +138,6 @@ function unavailablePlugin(platform: SqlitePlatform, message: string): Capacitor
 function electronPlugin(): CapacitorSqlitePlugin {
   // Capacitor's Electron bridge registers plugins on window.CapacitorCustomPlatform.
   // Guard every access so a missing main-process registration returns NOT_AVAILABLE.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const globalObj = globalThis as any;
   const customPlatform = globalObj.window?.CapacitorCustomPlatform ?? globalObj.CapacitorCustomPlatform;
   const plugin = customPlatform?.plugins?.CapacitorSqlite as CapacitorSqlitePlugin | undefined;

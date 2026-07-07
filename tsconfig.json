@@ -3,8 +3,18 @@
     "allowUnreachableCode": false,
     "declaration": true,
     "esModuleInterop": true,
+    // TS 6 renamed "node" to "node10" and deprecated it (removal in TS 7). The real
+    // replacement for a bundler-consumed esnext-module library is "bundler" resolution,
+    // which is a bigger migration to verify across all 3 tsconfigs at once — this flag
+    // is the TS-endorsed interim opt-out (see TS5107) to unblock the current major
+    // without changing actual resolution behavior.
+    "ignoreDeprecations": "6.0",
     "inlineSources": true,
-    "lib": ["dom", "es2017"],
+    // es2020 (not just es2017) is required for BigInt/BigInt64Array (used in web.ts and
+    // by the @sqlite.org/sqlite-wasm .d.mts) and Promise.finally (used in web.ts); an
+    // explicit "lib" replaces rather than extends the set target would otherwise imply,
+    // so these must be listed even though "target" stays es2017 for output syntax.
+    "lib": ["dom", "es2020", "es2022.error"],
     "module": "esnext",
     "moduleResolution": "node",
     "noFallthroughCasesInSwitch": true,
@@ -12,6 +22,9 @@
     "noUnusedParameters": true,
     "outDir": "dist/esm",
     "pretty": true,
+    // TS 6 requires this explicitly now (TS5011) instead of inferring it from the common
+    // ancestor of the input files — `index.ts`'s transitive imports all resolve under `src/`.
+    "rootDir": "./src",
     "sourceMap": true,
     "strict": true,
     "target": "es2017"
