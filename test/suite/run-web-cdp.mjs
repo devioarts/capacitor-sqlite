@@ -216,6 +216,14 @@ async function main() {
     { cwd: playground },
   );
   const browser = spawnLogged(chrome, [
+    // Headless + CI-safe flags: CDP drives everything, no window is ever shown, and a
+    // display-less runner (e.g. GitHub Actions ubuntu-latest, no Xvfb) would otherwise
+    // never bring up the DevTools endpoint — waitForUrl below would then spin silently
+    // until it times out.
+    '--headless=new',
+    '--no-sandbox',
+    '--disable-gpu',
+    '--disable-dev-shm-usage',
     `--remote-debugging-port=${cdpPort}`,
     `--user-data-dir=${profileDir}`,
     '--no-first-run',
