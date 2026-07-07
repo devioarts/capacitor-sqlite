@@ -17,9 +17,9 @@
     "open-android": "npx cap open android"
   },
   "dependencies": {
-    "@capacitor/android": "^8.4.0",
-    "@capacitor/core": "^8.4.0",
-    "@capacitor/ios": "^8.4.0",
+    "@capacitor/android": "^8.0.0",
+    "@capacitor/core": "^8.0.0",
+    "@capacitor/ios": "^8.0.0",
     "@devioarts/capacitor-sqlite": "file:..",
     "@tailwindcss/vite": "^4.3.0",
     "react": "^19.2.7",
