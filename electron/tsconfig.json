@@ -2,7 +2,9 @@
   "compilerOptions": {
     "allowSyntheticDefaultImports": true,
     "declaration": true,
-    "lib": ["es2020"],
+    // See tsconfig.json for why this is needed (TS 6 deprecated "node" resolution).
+    "ignoreDeprecations": "6.0",
+    "lib": ["es2022"],
     "module": "esnext",
     "moduleResolution": "node",
     "noImplicitAny": true,

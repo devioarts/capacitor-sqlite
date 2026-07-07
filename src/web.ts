@@ -19,7 +19,6 @@ import type {
 import { findDuplicateMigrationVersion, isValidMigrationVersion, MAX_MIGRATION_VERSION } from './migrations.js';
 import { assertSingleSqlStatement, isInsertStatement, isQueryResultStatement } from './sql.js';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Promiser = (type: string, args?: any) => Promise<any>;
 
 interface DbEntry {
@@ -725,7 +724,9 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
         } catch {
           /* ignore rollback error */
         }
-        throw new Error(`Migration v${migration.version} failed: ${err instanceof Error ? err.message : String(err)}`);
+        throw new Error(`Migration v${migration.version} failed: ${err instanceof Error ? err.message : String(err)}`, {
+          cause: err,
+        });
       }
     }
   }
@@ -781,7 +782,6 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
         try {
           const configuredWorker = sqlite3Worker1Promiser.defaultConfig.worker;
           worker = typeof configuredWorker === 'function' ? configuredWorker() : configuredWorker;
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           holder.ref = sqlite3Worker1Promiser({
             worker,
             onready: () => {
