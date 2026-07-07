@@ -10,11 +10,14 @@
     // without changing actual resolution behavior.
     "ignoreDeprecations": "6.0",
     "inlineSources": true,
-    // es2020 (not just es2017) is required for BigInt/BigInt64Array (used in web.ts and
-    // by the @sqlite.org/sqlite-wasm .d.mts) and Promise.finally (used in web.ts); an
-    // explicit "lib" replaces rather than extends the set target would otherwise imply,
-    // so these must be listed even though "target" stays es2017 for output syntax.
-    "lib": ["dom", "es2020", "es2022.error"],
+    // BigInt/BigInt64Array (web.ts, @sqlite.org/sqlite-wasm's .d.mts), Promise.finally,
+    // and Error.cause (web.ts) all need at least es2020/es2022 lib types; an explicit
+    // "lib" replaces rather than extends what "target" alone would otherwise imply, so
+    // this must be listed even though "target" stays es2017 for output syntax. Every
+    // runtime this plugin targets (Node 24+, and browsers new enough for the OPFS/
+    // SharedArrayBuffer support the Web build already requires) supports ES2022 at
+    // runtime, so there's no reason to hand-pick older/narrower lib pieces.
+    "lib": ["dom", "es2022"],
     "module": "esnext",
     "moduleResolution": "node",
     "noFallthroughCasesInSwitch": true,

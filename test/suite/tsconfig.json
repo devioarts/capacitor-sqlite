@@ -2,7 +2,7 @@
   "compilerOptions": {
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
-    "lib": ["es2020"],
+    "lib": ["es2022"],
     "module": "commonjs",
     "noImplicitAny": true,
     "outDir": "../../build/test-suite",
