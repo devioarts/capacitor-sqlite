@@ -11,15 +11,14 @@ enum SQLiteError: Error {
     case version(String)
 }
 
-// SQLITE_TRANSIENT tells SQLite to copy the string/blob before sqlite3_step returns.
-private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-
 enum SQLiteHelpers {
 
     // Sentinel prefix for BLOB columns returned from queries.
     // The JS layer detects this prefix and decodes back to Uint8Array.
     // Must stay in sync with BLOB_PREFIX in SQLiteHelpers.kt and index.ts.
-    private static let BLOB_PREFIX = "blob64:"
+    static let BLOB_PREFIX = "blob64:"
+    static let TEXT_PREFIX = "text64:"
+    static let MAX_SAFE_INTEGER = 9_007_199_254_740_991.0
 
     // MARK: - Lifecycle
 
@@ -48,6 +47,9 @@ enum SQLiteHelpers {
     // MARK: - DDL / no-result execution
 
     static func exec(db: OpaquePointer, sql: String) throws {
+        if hasMultipleStatements(sql) {
+            throw SQLiteError.execute("SQL string must contain exactly one statement")
+        }
         if sqlite3_exec(db, sql, nil, nil, nil) != SQLITE_OK {
             let msg = String(validatingUTF8: sqlite3_errmsg(db)) ?? "exec failed"
             throw SQLiteError.execute(msg)
@@ -57,6 +59,9 @@ enum SQLiteHelpers {
     // MARK: - Parameterized DML (single statement)
 
     static func run(db: OpaquePointer, sql: String, values: [Any]) throws -> (changes: Int, lastInsertId: Int64) {
+        if hasMultipleStatements(sql) {
+            throw SQLiteError.prepare("SQL string must contain exactly one statement")
+        }
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
             let msg = String(validatingUTF8: sqlite3_errmsg(db)) ?? "prepare failed"
@@ -66,24 +71,27 @@ enum SQLiteHelpers {
 
         try bind(stmt: stmt, values: values)
 
+        let before = totalChanges(db: db)
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE || rc == SQLITE_ROW else {
             let msg = String(validatingUTF8: sqlite3_errmsg(db)) ?? "step failed"
             throw SQLiteError.execute(msg)
         }
 
-        let changes = Int(sqlite3_changes(db))
-        let stmtType = sql.trimmingCharacters(in: .whitespacesAndNewlines)
-            .split(whereSeparator: { $0.isWhitespace })
-            .first?
-            .uppercased() ?? ""
-        let inserted = (stmtType == "INSERT" || stmtType == "REPLACE") && changes > 0
+        let changes = totalChanges(db: db) - before
+        let inserted = SQLStatement.isInsertLike(sql) && changes > 0
         return (changes, inserted ? sqlite3_last_insert_rowid(db) : 0)
     }
 
     // MARK: - SELECT
 
     static func query(db: OpaquePointer, sql: String, values: [Any]) throws -> [[String: Any]] {
+        if hasMultipleStatements(sql) {
+            throw SQLiteError.prepare("SQL string must contain exactly one statement")
+        }
+        guard SQLStatement.isQueryResultStatement(sql) else {
+            throw SQLiteError.prepare("'statement' must be a SELECT, PRAGMA, EXPLAIN, or DML statement with RETURNING")
+        }
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
             let msg = String(validatingUTF8: sqlite3_errmsg(db)) ?? "prepare failed"
@@ -136,136 +144,6 @@ enum SQLiteHelpers {
 
     static func vacuum(db: OpaquePointer) throws {
         try exec(db: db, sql: "VACUUM;")
-    }
-
-    // MARK: - Private: bind
-
-    private static func bind(stmt: OpaquePointer?, values: [Any]) throws {
-        for (i, value) in values.enumerated() {
-            try bindValue(stmt: stmt, value: value, idx: Int32(i + 1))
-        }
-    }
-
-    private static func bindValue(stmt: OpaquePointer?, value: Any, idx: Int32) throws {
-        switch value {
-        case is NSNull:
-            sqlite3_bind_null(stmt, idx)
-        case let v as NSArray:
-            // A JS plain-number array arrives here when the caller passed Array.from(uint8Array).
-            // Treat every element as a BLOB byte (0-255).
-            var bytes = [UInt8]()
-            bytes.reserveCapacity(v.count)
-            for item in v {
-                guard let n = item as? NSNumber else {
-                    throw SQLiteError.execute("BLOB value at index \(idx) contains a non-number")
-                }
-                bytes.append(UInt8(clamping: n.intValue))
-            }
-            if bytes.isEmpty {
-                // sqlite3_bind_blob with a nil pointer (empty Data) binds NULL, not empty BLOB.
-                sqlite3_bind_zeroblob(stmt, idx, 0)
-            } else {
-                let blobData = Data(bytes)
-                blobData.withUnsafeBytes { ptr in
-                    _ = sqlite3_bind_blob(stmt, idx, ptr.baseAddress, Int32(blobData.count), SQLITE_TRANSIENT)
-                }
-            }
-        case let v as NSNumber:
-            if CFGetTypeID(v) == CFBooleanGetTypeID() {
-                sqlite3_bind_int(stmt, idx, v.boolValue ? 1 : 0)
-            } else {
-                let t = String(cString: v.objCType)
-                if t == "d" || t == "f" {
-                    let d = v.doubleValue
-                    // Capacitor's JSON bridge encodes JS integers as Double-backed NSNumber
-                    // (objCType = "d"), losing integer type information. Restore it by treating
-                    // whole-number doubles as INT64 — consistent with JS Number.isInteger()
-                    // semantics and Android/Web/Electron behaviour.
-                    if !d.isNaN && !d.isInfinite && d == d.rounded(.towardZero)
-                        && d >= Double(Int64.min) && d <= Double(Int64.max) {
-                        sqlite3_bind_int64(stmt, idx, Int64(d))
-                    } else {
-                        sqlite3_bind_double(stmt, idx, d)
-                    }
-                } else {
-                    sqlite3_bind_int64(stmt, idx, v.int64Value)
-                }
-            }
-        case let v as String:
-            sqlite3_bind_text(stmt, idx, v, -1, SQLITE_TRANSIENT)
-        case let v as Data:
-            if v.isEmpty {
-                sqlite3_bind_zeroblob(stmt, idx, 0)
-            } else {
-                v.withUnsafeBytes { ptr in
-                    _ = sqlite3_bind_blob(stmt, idx, ptr.baseAddress, Int32(v.count), SQLITE_TRANSIENT)
-                }
-            }
-        case let v as [UInt8]:
-            if v.isEmpty {
-                sqlite3_bind_zeroblob(stmt, idx, 0)
-            } else {
-                let d = Data(v)
-                d.withUnsafeBytes { ptr in
-                    _ = sqlite3_bind_blob(stmt, idx, ptr.baseAddress, Int32(d.count), SQLITE_TRANSIENT)
-                }
-            }
-        default:
-            throw SQLiteError.execute("Unsupported bind value type at index \(idx)")
-        }
-    }
-
-    // MARK: - Private: fetch rows
-
-    private static func fetchRows(stmt: OpaquePointer?, db: OpaquePointer) throws -> [[String: Any]] {
-        var rows: [[String: Any]] = []
-        while true {
-            let rc = sqlite3_step(stmt)
-            if rc == SQLITE_DONE { break }
-            guard rc == SQLITE_ROW else {
-                let msg = String(validatingUTF8: sqlite3_errmsg(db)) ?? "step failed"
-                throw SQLiteError.query(msg)
-            }
-            rows.append(try readRow(stmt: stmt))
-        }
-        return rows
-    }
-
-    private static func readRow(stmt: OpaquePointer?) throws -> [String: Any] {
-        let count = sqlite3_column_count(stmt)
-        var row: [String: Any] = [:]
-        for i in 0..<count {
-            guard let namePtr = sqlite3_column_name(stmt, i) else {
-                throw SQLiteError.query("column_name failed at index \(i)")
-            }
-            let name = String(cString: namePtr)
-            switch sqlite3_column_type(stmt, i) {
-            case SQLITE_INTEGER:
-                row[name] = sqlite3_column_int64(stmt, i)
-            case SQLITE_FLOAT:
-                row[name] = sqlite3_column_double(stmt, i)
-            case SQLITE_TEXT:
-                row[name] = sqlite3_column_text(stmt, i).map { String(cString: $0) } ?? NSNull()
-            case SQLITE_BLOB:
-                let byteCount = Int(sqlite3_column_bytes(stmt, i))
-                if byteCount == 0 {
-                    // sqlite3_column_blob() returns NULL for zero-length blobs, but the
-                    // column type is SQLITE_BLOB (not SQLITE_NULL), so distinguish from
-                    // SQL NULL by returning the sentinel with empty base64 → Uint8Array(0).
-                    row[name] = BLOB_PREFIX
-                } else if let ptr = sqlite3_column_blob(stmt, i) {
-                    let d = Data(bytes: ptr, count: byteCount)
-                    row[name] = BLOB_PREFIX + d.base64EncodedString()
-                } else {
-                    row[name] = NSNull()
-                }
-            case SQLITE_NULL:
-                row[name] = NSNull()
-            default:
-                row[name] = NSNull()
-            }
-        }
-        return row
     }
 }
 // swiftlint:enable identifier_name

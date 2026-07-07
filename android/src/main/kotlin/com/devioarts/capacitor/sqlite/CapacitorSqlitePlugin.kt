@@ -1,12 +1,15 @@
 package com.devioarts.capacitor.sqlite
 
 import android.util.Base64
+import java.nio.charset.StandardCharsets
 import com.getcapacitor.JSArray
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.CapacitorPlugin
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -14,9 +17,20 @@ import org.json.JSONObject
 class CapacitorSqlitePlugin : Plugin() {
 
     private lateinit var impl: CapacitorSqlite
+    private val sqliteExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "capacitor-sqlite")
+    }
 
     override fun load() {
         impl = CapacitorSqlite(context)
+    }
+
+    override fun handleOnDestroy() {
+        sqliteExecutor.shutdownNow()
+        sqliteExecutor.awaitTermination(2, TimeUnit.SECONDS)
+        if (::impl.isInitialized) {
+            impl.closeAll()
+        }
     }
 
     // MARK: - Unified response helpers
@@ -26,6 +40,10 @@ class CapacitorSqlitePlugin : Plugin() {
     }
 
     private fun failure(call: PluginCall, code: String, message: String, method: String) {
+        val details = JSObject()
+            .put("nativeCode", code)
+            .put("nativeMessage", message)
+            .put("source", "android-native")
         call.resolve(
             JSObject()
                 .put("success", false)
@@ -34,26 +52,17 @@ class CapacitorSqlitePlugin : Plugin() {
                     .put("message", message)
                     .put("platform", "android")
                     .put("method", method)
-                    .put("details", JSObject())
+                    .put("details", details)
                 )
         )
     }
 
     private fun errorCode(e: Exception, fallback: String): String {
-        val message = e.message.orEmpty()
-        return when {
-            message.contains("not open") -> "DB_NOT_OPEN"
-            message.contains("Invalid directory") -> "INVALID_PARAMS"
-            message.contains("placeholder") -> "INVALID_PARAMS"
-            message.contains("bind values") -> "INVALID_PARAMS"
-            message.contains("Unsupported query value type") -> "INVALID_PARAMS"
-            message.contains("Numeric bind value") -> "INVALID_PARAMS"
-            message.contains("Invalid database name") -> "INVALID_NAME"
-            message.contains("already open") -> "DB_ALREADY_OPEN"
-            message.contains("transaction is already active") -> "TRANSACTION_FAILED"
-            message.contains("no transaction is active") -> "TRANSACTION_FAILED"
-            else -> fallback
-        }
+        return if (e is CapacitorSqliteException) e.code else fallback
+    }
+
+    private fun executeSqlite(block: () -> Unit) {
+        sqliteExecutor.execute(block)
     }
 
     // MARK: - getPlatform
@@ -84,13 +93,12 @@ class CapacitorSqlitePlugin : Plugin() {
             return failure(call, "MIGRATION_FAILED", e.message ?: "Invalid migrations", "open")
         }
 
-        bridge.execute {
+        executeSqlite {
             try {
                 impl.open(database, readonly, directory, migrations)
                 success(call)
             } catch (e: Exception) {
-                val code = if (e.message?.contains("Migration") == true) "MIGRATION_FAILED" else "OPEN_FAILED"
-                failure(call, errorCode(e, code), e.message ?: "open failed", "open")
+                failure(call, errorCode(e, "OPEN_FAILED"), e.message ?: "open failed", "open")
             }
         }
     }
@@ -102,7 +110,7 @@ class CapacitorSqlitePlugin : Plugin() {
         val database = call.getString("database")
             ?: return failure(call, "INVALID_PARAMS", "'database' is required", "close")
 
-        bridge.execute {
+        executeSqlite {
             try {
                 impl.close(database)
                 success(call)
@@ -118,7 +126,14 @@ class CapacitorSqlitePlugin : Plugin() {
     fun isOpen(call: PluginCall) {
         val database = call.getString("database")
             ?: return failure(call, "INVALID_PARAMS", "'database' is required", "isOpen")
-        success(call, JSObject().put("open", impl.isOpen(database)))
+
+        executeSqlite {
+            try {
+                success(call, JSObject().put("open", impl.isOpen(database)))
+            } catch (e: Exception) {
+                failure(call, errorCode(e, "UNKNOWN"), e.message ?: "isOpen failed", "isOpen")
+            }
+        }
     }
 
     // MARK: - getVersion
@@ -128,7 +143,7 @@ class CapacitorSqlitePlugin : Plugin() {
         val database = call.getString("database")
             ?: return failure(call, "INVALID_PARAMS", "'database' is required", "getVersion")
 
-        bridge.execute {
+        executeSqlite {
             try {
                 val version = impl.getVersion(database)
                 success(call, JSObject().put("version", version))
@@ -145,7 +160,7 @@ class CapacitorSqlitePlugin : Plugin() {
         val database = call.getString("database")
             ?: return failure(call, "INVALID_PARAMS", "'database' is required", "getSchemaVersion")
 
-        bridge.execute {
+        executeSqlite {
             try {
                 val version = impl.getSchemaVersion(database)
                 success(call, JSObject().put("version", version))
@@ -167,7 +182,7 @@ class CapacitorSqlitePlugin : Plugin() {
         val database = call.getString("database")
             ?: return failure(call, "INVALID_PARAMS", "'database' is required", "vacuum")
 
-        bridge.execute {
+        executeSqlite {
             try {
                 impl.vacuum(database)
                 success(call)
@@ -193,7 +208,7 @@ class CapacitorSqlitePlugin : Plugin() {
         }
         val transaction = call.getBoolean("transaction", true) ?: true
 
-        bridge.execute {
+        executeSqlite {
             try {
                 val changes = impl.execute(database, stmts, transaction)
                 success(call, JSObject().put("changes", changes))
@@ -220,7 +235,7 @@ class CapacitorSqlitePlugin : Plugin() {
             return failure(call, "INVALID_PARAMS", e.message ?: "Invalid values", "run")
         }
 
-        bridge.execute {
+        executeSqlite {
             try {
                 val result = impl.run(database, statement, values)
                 success(call, JSObject().put("changes", result.changes).put("lastInsertId", result.lastInsertId))
@@ -246,7 +261,7 @@ class CapacitorSqlitePlugin : Plugin() {
         }
         val transaction = call.getBoolean("transaction", true) ?: true
 
-        bridge.execute {
+        executeSqlite {
             try {
                 val result = impl.runBatch(database, set, transaction)
                 success(call, JSObject().put("changes", result.changes).put("lastInsertId", result.lastInsertId))
@@ -273,7 +288,7 @@ class CapacitorSqlitePlugin : Plugin() {
             return failure(call, "INVALID_PARAMS", e.message ?: "Invalid values", "query")
         }
 
-        bridge.execute {
+        executeSqlite {
             try {
                 val rows = impl.query(database, statement, values)
                 val result = JSArray()
@@ -283,6 +298,7 @@ class CapacitorSqlitePlugin : Plugin() {
                         when (value) {
                             null         -> obj.put(key, JSONObject.NULL)
                             is ByteArray -> obj.put(key, SQLiteHelpers.BLOB_PREFIX + Base64.encodeToString(value, Base64.NO_WRAP))
+                            is String    -> obj.put(key, encodeText(value))
                             else         -> obj.put(key, value)
                         }
                     }
@@ -302,7 +318,7 @@ class CapacitorSqlitePlugin : Plugin() {
         val database = call.getString("database")
             ?: return failure(call, "INVALID_PARAMS", "'database' is required", "beginTransaction")
 
-        bridge.execute {
+        executeSqlite {
             try {
                 impl.beginTransaction(database)
                 success(call)
@@ -319,7 +335,7 @@ class CapacitorSqlitePlugin : Plugin() {
         val database = call.getString("database")
             ?: return failure(call, "INVALID_PARAMS", "'database' is required", "commitTransaction")
 
-        bridge.execute {
+        executeSqlite {
             try {
                 impl.commitTransaction(database)
                 success(call)
@@ -336,7 +352,7 @@ class CapacitorSqlitePlugin : Plugin() {
         val database = call.getString("database")
             ?: return failure(call, "INVALID_PARAMS", "'database' is required", "rollbackTransaction")
 
-        bridge.execute {
+        executeSqlite {
             try {
                 impl.rollbackTransaction(database)
                 success(call)
@@ -393,5 +409,13 @@ class CapacitorSqlitePlugin : Plugin() {
         }
         is JSONObject   -> throw IllegalArgumentException("'$label' must not be an object")
         else -> v
+    }
+
+    private fun encodeText(value: String): String {
+        if (!value.startsWith(SQLiteHelpers.BLOB_PREFIX) && !value.startsWith(SQLiteHelpers.TEXT_PREFIX)) {
+            return value
+        }
+        val encoded = Base64.encodeToString(value.toByteArray(StandardCharsets.UTF_8), Base64.NO_WRAP)
+        return SQLiteHelpers.TEXT_PREFIX + encoded
     }
 }

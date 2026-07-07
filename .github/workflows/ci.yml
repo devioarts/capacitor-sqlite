@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  js-web-electron:
+    name: JS, Web, Electron
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CHROME_BIN: google-chrome
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install playground dependencies
+        run: npm ci --prefix playground
+
+      - name: Lint TypeScript and formatting
+        run: |
+          npm run eslint
+          npm run prettier -- --check
+
+      - name: Build package
+        run: npm run build
+
+      - name: Run JS guard tests
+        run: |
+          npm run test:p0:js
+          npm run test:p2:js
+
+      - name: Run Electron suite
+        run: npm run test:suite:electron
+
+      - name: Run Web/OPFS suite
+        run: npm run test:suite:web

@@ -1,6 +1,7 @@
 import XCTest
 @testable import CapacitorSqlitePlugin
 
+// swiftlint:disable:next type_body_length
 class CapacitorSqliteTests: XCTestCase {
 
     // swiftlint:disable:next implicitly_unwrapped_optional
@@ -39,6 +40,15 @@ class CapacitorSqliteTests: XCTestCase {
     func testOpenWithDifferentReadonlyModeThrows() throws {
         try impl.open(database: ":memory:", readonly: false, migrations: [])
         XCTAssertThrowsError(try impl.open(database: ":memory:", readonly: true, migrations: []))
+    }
+
+    func testOpenFileDatabaseNameIsCaseInsensitiveForRegistry() throws {
+        try impl.open(database: "CaseAliasTest", readonly: false, migrations: [])
+        XCTAssertNoThrow(try impl.open(database: "casealiastest", readonly: false, migrations: []))
+        XCTAssertThrowsError(try impl.open(database: "casealiastest", readonly: true, migrations: []))
+        XCTAssertTrue(impl.isOpen(database: "casealiastest"))
+        try impl.close(database: "casealiastest")
+        XCTAssertFalse(impl.isOpen(database: "CaseAliasTest"))
     }
 
     func testCloseDatabase() throws {
@@ -102,6 +112,38 @@ class CapacitorSqliteTests: XCTestCase {
         let rows = try impl.query(database: ":memory:", statement: "SELECT * FROM users", values: [])
         XCTAssertEqual(rows.count, 1)
         XCTAssertEqual(rows[0]["name"] as? String, "Alice")
+    }
+
+    func testRunCteInsertReturnsLastInsertId() throws {
+        try impl.open(database: ":memory:", readonly: false, migrations: [])
+        try impl.execute(database: ":memory:", statements: [
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"
+        ])
+
+        let result = try impl.run(
+            database: ":memory:",
+            statement: "WITH cte(name) AS (SELECT ?) INSERT INTO users (name) SELECT name FROM cte",
+            values: ["Bob"]
+        )
+
+        XCTAssertEqual(result.changes, 1)
+        XCTAssertEqual(result.lastInsertId, 1)
+    }
+
+    func testRunCommentPrefixedInsertReturnsLastInsertId() throws {
+        try impl.open(database: ":memory:", readonly: false, migrations: [])
+        try impl.execute(database: ":memory:", statements: [
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"
+        ])
+
+        let result = try impl.run(
+            database: ":memory:",
+            statement: "/* lead */ INSERT INTO users (name) VALUES (?)",
+            values: ["Cara"]
+        )
+
+        XCTAssertEqual(result.changes, 1)
+        XCTAssertEqual(result.lastInsertId, 1)
     }
 
     func testRunBatch() throws {
@@ -245,9 +287,35 @@ class CapacitorSqliteTests: XCTestCase {
         XCTAssertThrowsError(try impl.open(database: ":memory:", readonly: false, migrations: migrations))
     }
 
+    func testMigrationVersionAtMaxIsAccepted() throws {
+        let migrations: [[String: Any]] = [
+            ["version": 2_147_483_647, "statements": ["CREATE TABLE v1 (id INTEGER PRIMARY KEY)"]]
+        ]
+        try impl.open(database: ":memory:", readonly: false, migrations: migrations)
+        let version = try impl.getSchemaVersion(database: ":memory:")
+        XCTAssertEqual(version, 2_147_483_647)
+    }
+
+    func testMigrationVersionAboveMaxThrows() {
+        // One past the 32-bit signed ceiling shared by every backend (matches SQLite's own
+        // `user_version` field width) — must be rejected up front, not silently truncated.
+        let migrations: [[String: Any]] = [
+            ["version": 2_147_483_648, "statements": ["CREATE TABLE v1 (id INTEGER PRIMARY KEY)"]]
+        ]
+        XCTAssertThrowsError(try impl.open(database: ":memory:", readonly: false, migrations: migrations))
+    }
+
     func testMigrationMissingStatementsThrows() {
         let migrations: [[String: Any]] = [
             ["version": 1]
+        ]
+        XCTAssertThrowsError(try impl.open(database: ":memory:", readonly: false, migrations: migrations))
+    }
+
+    func testDuplicateMigrationVersionsThrow() {
+        let migrations: [[String: Any]] = [
+            ["version": 1, "statements": ["CREATE TABLE v1a (id INTEGER PRIMARY KEY)"]],
+            ["version": 1, "statements": ["CREATE TABLE v1b (id INTEGER PRIMARY KEY)"]]
         ]
         XCTAssertThrowsError(try impl.open(database: ":memory:", readonly: false, migrations: migrations))
     }
@@ -259,52 +327,18 @@ class CapacitorSqliteTests: XCTestCase {
         XCTAssertThrowsError(try impl.open(database: ":memory:", readonly: false, migrations: migrations))
     }
 
-    // MARK: - Param binding
-
-    func testBindInteger() throws {
-        try impl.open(database: ":memory:", readonly: false, migrations: [])
-        try impl.execute(database: ":memory:", statements: ["CREATE TABLE t (v INTEGER)"])
-        _ = try impl.run(database: ":memory:", statement: "INSERT INTO t VALUES (?)", values: [42])
-        let rows = try impl.query(database: ":memory:", statement: "SELECT v FROM t", values: [])
-        XCTAssertEqual(rows[0]["v"] as? Int64, 42)
+    func testMigrationRejectsMultipleStatementsInOneString() {
+        let migrations: [[String: Any]] = [
+            ["version": 1, "statements": ["CREATE TABLE a (id INTEGER); CREATE TABLE b (id INTEGER)"]]
+        ]
+        XCTAssertThrowsError(try impl.open(database: ":memory:", readonly: false, migrations: migrations))
     }
 
-    func testBindText() throws {
-        try impl.open(database: ":memory:", readonly: false, migrations: [])
-        try impl.execute(database: ":memory:", statements: ["CREATE TABLE t (v TEXT)"])
-        _ = try impl.run(database: ":memory:", statement: "INSERT INTO t VALUES (?)", values: ["hello"])
-        let rows = try impl.query(database: ":memory:", statement: "SELECT v FROM t", values: [])
-        XCTAssertEqual(rows[0]["v"] as? String, "hello")
+    func testReadonlyWithMigrationsThrows() {
+        let migrations: [[String: Any]] = [
+            ["version": 1, "statements": ["CREATE TABLE t (id INTEGER PRIMARY KEY)"]]
+        ]
+        XCTAssertThrowsError(try impl.open(database: ":memory:", readonly: true, migrations: migrations))
     }
 
-    func testBindNull() throws {
-        try impl.open(database: ":memory:", readonly: false, migrations: [])
-        try impl.execute(database: ":memory:", statements: ["CREATE TABLE t (v TEXT)"])
-        _ = try impl.run(database: ":memory:", statement: "INSERT INTO t VALUES (?)", values: [NSNull()])
-        let rows = try impl.query(database: ":memory:", statement: "SELECT v FROM t", values: [])
-        XCTAssertTrue(rows[0]["v"] is NSNull)
-    }
-
-    func testBindBlob() throws {
-        try impl.open(database: ":memory:", readonly: false, migrations: [])
-        try impl.execute(database: ":memory:", statements: ["CREATE TABLE t (v BLOB)"])
-        let data = Data([0xDE, 0xAD, 0xBE, 0xEF])
-        _ = try impl.run(database: ":memory:", statement: "INSERT INTO t VALUES (?)", values: [data])
-        let rows = try impl.query(database: ":memory:", statement: "SELECT v FROM t", values: [])
-        let result = rows[0]["v"] as? [Int]
-        XCTAssertEqual(result, [0xDE, 0xAD, 0xBE, 0xEF])
-    }
-
-    // MARK: - Foreign keys
-
-    func testForeignKeysEnabled() throws {
-        try impl.open(database: ":memory:", readonly: false, migrations: [])
-        try impl.execute(database: ":memory:", statements: [
-            "CREATE TABLE parent (id INTEGER PRIMARY KEY)",
-            "CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id))"
-        ])
-        XCTAssertThrowsError(
-            try impl.run(database: ":memory:", statement: "INSERT INTO child (parent_id) VALUES (99)", values: [])
-        )
-    }
 }

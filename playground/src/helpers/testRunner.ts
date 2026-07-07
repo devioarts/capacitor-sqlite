@@ -1,5 +1,3 @@
-import { CapacitorSqlite } from '@devioarts/capacitor-sqlite';
-
 // ── assertion helpers ─────────────────────────────────────────────────────────
 
 export function assert(condition: boolean, msg: string): void {
@@ -37,12 +35,6 @@ export function assertFail(
       `${label}: expected error code ${expectedCode}, got ${result.error?.code} (${result.error?.message})`,
     );
   }
-}
-
-// ── DB cleanup helper ─────────────────────────────────────────────────────────
-
-export async function silentClose(database: string): Promise<void> {
-  await CapacitorSqlite.close({ database }).catch(() => undefined);
 }
 
 // ── test runner ───────────────────────────────────────────────────────────────

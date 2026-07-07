@@ -1,0 +1,141 @@
+name: Release Matrix
+
+on:
+  workflow_dispatch:
+    inputs:
+      stress:
+        description: Run stress benchmarks after the 365-test suite
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      artifact-retention-days:
+        description: Days to keep test log artifacts
+        required: true
+        default: '14'
+        type: choice
+        options:
+          - '7'
+          - '14'
+          - '30'
+
+permissions:
+  contents: read
+
+jobs:
+  platform:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: electron
+            runner: ubuntu-latest
+            timeout: 30
+            suite_command: npm run test:suite:electron
+            stress_command: npm run test:suite:electron:stress
+          - platform: web
+            runner: ubuntu-latest
+            timeout: 45
+            suite_command: npm run test:suite:web
+            stress_command: npm run test:suite:web:stress
+          - platform: android
+            runner: ubuntu-latest
+            timeout: 90
+            suite_command: npm run test:suite:android
+            stress_command: npm run test:suite:android:stress
+          - platform: ios
+            runner: macos-latest
+            timeout: 90
+            suite_command: npm run test:suite:ios
+            stress_command: npm run test:suite:ios:stress
+
+    env:
+      CHROME_BIN: google-chrome
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Setup Java for Android
+        if: matrix.platform == 'android'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Enable KVM for Android emulator
+        if: matrix.platform == 'android'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install playground dependencies
+        if: matrix.platform != 'electron'
+        run: npm ci --prefix playground
+
+      - name: Select and boot iOS Simulator
+        if: matrix.platform == 'ios'
+        run: |
+          set -euo pipefail
+          SIM_UDID="$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/ && /(Shutdown|Booted)/ { print $2; exit }')"
+          if [ -z "$SIM_UDID" ]; then
+            echo "No available iPhone simulator found"
+            xcrun simctl list devices available
+            exit 1
+          fi
+          echo "IOS_DESTINATION=platform=iOS Simulator,id=$SIM_UDID" >> "$GITHUB_ENV"
+          xcrun simctl boot "$SIM_UDID" || true
+          xcrun simctl bootstatus "$SIM_UDID" -b
+
+      - name: Run Android suite
+        if: matrix.platform == 'android'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: |
+            mkdir -p artifacts
+            set -o pipefail
+            if [ "${{ inputs.stress }}" = "true" ]; then
+              ${{ matrix.stress_command }} 2>&1 | tee artifacts/${{ matrix.platform }}.log
+            else
+              ${{ matrix.suite_command }} 2>&1 | tee artifacts/${{ matrix.platform }}.log
+            fi
+
+      - name: Run suite
+        if: matrix.platform != 'android'
+        run: |
+          mkdir -p artifacts
+          set -o pipefail
+          if [ "${{ inputs.stress }}" = "true" ]; then
+            ${{ matrix.stress_command }} 2>&1 | tee artifacts/${{ matrix.platform }}.log
+          else
+            ${{ matrix.suite_command }} 2>&1 | tee artifacts/${{ matrix.platform }}.log
+          fi
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-matrix-${{ matrix.platform }}-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: ${{ inputs.artifact-retention-days }}

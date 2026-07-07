@@ -3,21 +3,25 @@ export type SQLiteValues = SQLiteValue[];
 export type SqliteDirectory = 'default' | 'documents' | 'library' | 'cache';
 
 export interface Migration {
-  /** Target schema version. Migrations run in ascending order. */
+  /** Target schema version. Must be unique within an `open()` call. Migrations run in ascending order. */
   version: number;
-  /** SQL statements executed when upgrading to this version. */
+  /** SQL statements executed when upgrading to this version. Each string must contain exactly one statement. */
   statements: string[];
 }
 
 export interface OpenOptions {
-  /** Database file name (without extension). */
+  /**
+   * Database file name (without extension). On iOS and Electron, open database
+   * registry keys are matched case-insensitively to avoid two handles pointing
+   * at the same file on case-insensitive filesystems.
+   */
   database: string;
   /**
    * When `true`, opens the database in read-only mode.
    * Read operations are allowed, while write operations (`execute`, `run`,
    * `runBatch`, `vacuum`, write transactions, and migrations) return a failure.
    * Attempting to reopen an already-open database with a different `readonly`
-   * value returns DB_ALREADY_OPEN.
+   * value or `directory` returns DB_ALREADY_OPEN.
    */
   readonly?: boolean;
   /**
@@ -54,7 +58,8 @@ export interface OpenOptions {
    * When provided the plugin reads `PRAGMA user_version`, then runs every
    * migration whose `version` is greater than the stored value, in order.
    * After all migrations complete it writes the highest version back.
-   * Returns MIGRATION_FAILED if any entry is malformed or a statement fails.
+   * Returns MIGRATION_FAILED if any entry is malformed, versions are duplicated,
+   * or a statement fails.
    */
   migrations?: Migration[];
 }
@@ -76,6 +81,11 @@ export interface RunOptions {
   statement: string;
   /**
    * Positional values bound to anonymous `?` placeholders, in order.
+   * `number` values must be finite; integer `number` values must be within
+   * `Number.MAX_SAFE_INTEGER`.
+   *
+   * BLOB values should use `Uint8Array`. Keep BLOB bind values at or below
+   * about 1 MB per value when crossing the Capacitor native bridge.
    *
    * Numbered placeholders (`?1`) and named placeholders (`:name`, `@name`,
    * `$name`) are not part of the cross-platform API contract.
@@ -92,10 +102,15 @@ export interface RunBatchOptions {
 
 export interface QueryOptions {
   database: string;
-  /** `SELECT` statement using anonymous `?` placeholders for bound values. */
+  /** Result-producing statement using anonymous `?` placeholders for bound values. */
   statement: string;
   /**
    * Positional values bound to anonymous `?` placeholders, in order.
+   * `number` values must be finite; integer `number` values must be within
+   * `Number.MAX_SAFE_INTEGER`.
+   *
+   * BLOB values should use `Uint8Array`. Keep BLOB bind values at or below
+   * about 1 MB per value when crossing the Capacitor native bridge.
    *
    * On Android, `query()` uses a small SQL scanner before calling
    * `rawQuery(String[])` so numeric, boolean, and BLOB values keep their SQLite
@@ -131,6 +146,11 @@ export interface SqliteError {
   message: string;
   platform: SqlitePlatform;
   method: string;
+  /**
+   * Platform diagnostic metadata. All implementations include `nativeCode`,
+   * `nativeMessage`, and `source`; callers should treat additional keys as
+   * platform-specific debugging hints.
+   */
   details?: Record<string, unknown>;
 }
 
@@ -160,7 +180,7 @@ export interface CapacitorSqlitePlugin {
    * Open (or create) a database. If `migrations` are supplied, pending
    * migrations are applied before the promise resolves.
    * Returns MIGRATION_FAILED if a migration entry
-   * is malformed or a migration statement fails.
+   * is malformed, versions are duplicated, or a migration statement fails.
    */
   open(options: OpenOptions): Promise<SqliteResult>;
 
@@ -182,7 +202,7 @@ export interface CapacitorSqlitePlugin {
    * Use for DDL (`CREATE TABLE`, …) or bulk DML without params.
    * `statements` must be a non-empty array.
    * **Each array element must be a single SQL statement** — multiple semicolon-separated
-   * statements in one string work on iOS/Web but fail on Android/Electron.
+   * statements in one string return a failure on every platform.
    * Statements run in a single transaction by default; pass
    * `transaction: false` to keep prior successful statements if a later one fails.
    * When called inside `beginTransaction()`, pass `transaction: false`;
@@ -195,28 +215,28 @@ export interface CapacitorSqlitePlugin {
    * Returns the number of affected rows and the row ID inserted by this statement.
    * `lastInsertId` is `0` for UPDATE, DELETE, statements that insert no row,
    * and other non-INSERT/REPLACE statements.
+   * Leading SQL comments and common `WITH ... INSERT` CTE forms are detected as inserts.
    * `lastInsertId` is a JavaScript number and is precise up to `Number.MAX_SAFE_INTEGER`.
-   * **Android caveat:** a multi-value `INSERT INTO t VALUES (…),(…)` always reports
-   * `changes = 1` regardless of the number of inserted rows; other platforms report
-   * the real count. Single-row inserts are correct on all platforms.
    */
   run(options: RunOptions): Promise<SqliteResult<{ changes: number; lastInsertId: number }>>;
 
   /**
    * Execute multiple parameterized statements in a single native call.
    * `lastInsertId` is always `0`; use `run()` when you need the inserted row ID.
-   * **Android caveat:** a multi-value `INSERT INTO t VALUES (…),(…)` always reports
-   * `changes = 1` regardless of the number of inserted rows; other platforms report
-   * the real count.
    * When called inside `beginTransaction()`, pass `transaction: false`;
    * nested transactions return TRANSACTION_FAILED.
    */
   runBatch(options: RunBatchOptions): Promise<SqliteResult<{ changes: number; lastInsertId: number }>>;
 
   /**
-   * Execute a `SELECT` statement and return rows as plain objects.
+   * Execute a result-producing statement and return rows as plain objects.
+   * Supported forms are `SELECT`, `PRAGMA`, `EXPLAIN`, and
+   * `INSERT`/`UPDATE`/`DELETE`/`REPLACE ... RETURNING`.
+   * DML without `RETURNING` returns `INVALID_PARAMS`; use `run()` instead.
    * Use anonymous `?` placeholders with `values: [...]` for parameters.
    * Numbered and named placeholders are not guaranteed across platforms.
+   * INTEGER result values outside JavaScript's safe integer range are returned
+   * as strings rather than imprecise numbers.
    * Column names become object keys. Results are in `data.rows`.
    */
   query<T = Record<string, unknown>>(options: QueryOptions): Promise<SqliteResult<{ rows: T[] }>>;

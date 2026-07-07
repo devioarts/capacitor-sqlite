@@ -1,0 +1,73 @@
+name: Bug report
+description: Report a reproducible plugin bug
+title: '[Bug]: '
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. Please include a small reproduction when possible.
+  - type: input
+    id: version
+    attributes:
+      label: Plugin version
+      placeholder: '0.1.0'
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      multiple: true
+      options:
+        - iOS
+        - Android
+        - Web/OPFS
+        - Electron
+    validations:
+      required: true
+  - type: input
+    id: capacitor
+    attributes:
+      label: Capacitor version
+      placeholder: '8.x'
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Include SQL statements, API calls, and platform setup details.
+      placeholder: |
+        1. Open database...
+        2. Run...
+        3. Observe...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or error output
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues.
+          required: true
+        - label: I can reproduce this with trusted app code and parameterized values where applicable.
+          required: true
