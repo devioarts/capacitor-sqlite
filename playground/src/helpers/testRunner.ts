@@ -46,11 +46,19 @@ export interface TestCase {
   fn: () => Promise<void>;
 }
 
+class TestSkip extends Error {}
+
+/** Marks a capability/platform exclusion explicitly instead of counting it as a pass. */
+export function skipTest(reason: string): never {
+  throw new TestSkip(reason);
+}
+
 export interface TestResult {
   id: string;
   group: string;
   name: string;
   pass: boolean;
+  skipped: boolean;
   message: string;
   durationMs: number;
 }
@@ -59,13 +67,33 @@ export async function runTestCase(tc: TestCase): Promise<TestResult> {
   const start = Date.now();
   try {
     await tc.fn();
-    return { id: tc.id, group: tc.group, name: tc.name, pass: true, message: 'OK', durationMs: Date.now() - start };
+    return {
+      id: tc.id,
+      group: tc.group,
+      name: tc.name,
+      pass: true,
+      skipped: false,
+      message: 'OK',
+      durationMs: Date.now() - start,
+    };
   } catch (e) {
+    if (e instanceof TestSkip) {
+      return {
+        id: tc.id,
+        group: tc.group,
+        name: tc.name,
+        pass: true,
+        skipped: true,
+        message: e.message,
+        durationMs: Date.now() - start,
+      };
+    }
     return {
       id: tc.id,
       group: tc.group,
       name: tc.name,
       pass: false,
+      skipped: false,
       message: e instanceof Error ? e.message : String(e),
       durationMs: Date.now() - start,
     };

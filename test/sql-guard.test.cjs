@@ -3,6 +3,8 @@ const { test } = require('node:test');
 
 const {
   assertSingleSqlStatement,
+  hasConflictClause,
+  hasRollbackConflictClause,
   hasMultipleSqlStatements,
   isInsertStatement,
   isQueryResultStatement,
@@ -140,6 +142,14 @@ test('does not mistake a bare begin/case identifier for a trigger-body opener', 
   );
 });
 
+test('qualified NEW.end does not close a trigger body early', () => {
+  const trigger =
+    'CREATE TRIGGER trg AFTER INSERT ON t BEGIN INSERT INTO log VALUES (NEW.end); INSERT INTO log VALUES (2); END';
+  assert.equal(hasMultipleSqlStatements(trigger), false);
+  assertSingleSqlStatement(trigger, 'statement');
+  assert.equal(hasMultipleSqlStatements(`${trigger}; SELECT 1`), true);
+});
+
 test('handles a trigger with a WHEN clause and nested CASE expressions', () => {
   assert.equal(
     hasMultipleSqlStatements(
@@ -188,4 +198,26 @@ test('classifies statements that are valid for query()', () => {
   assert.equal(isQueryResultStatement('INSERT INTO t VALUES (1)'), false);
   assert.equal(isQueryResultStatement('UPDATE t SET v = 1'), false);
   assert.equal(isQueryResultStatement("INSERT INTO t VALUES ('RETURNING')"), false);
+});
+
+test('detects an UPSERT conflict clause so run() can avoid a stale lastInsertId', () => {
+  assert.equal(hasConflictClause('INSERT INTO t VALUES (1) ON CONFLICT(id) DO UPDATE SET v = 1'), true);
+  assert.equal(hasConflictClause('INSERT INTO t VALUES (1) ON CONFLICT(id) DO NOTHING'), true);
+  assert.equal(hasConflictClause('INSERT OR REPLACE INTO t VALUES (1)'), false);
+  assert.equal(hasConflictClause('INSERT OR IGNORE INTO t VALUES (1)'), false);
+  assert.equal(hasConflictClause('INSERT INTO t VALUES (1)'), false);
+  assert.equal(hasConflictClause('UPDATE t SET v = 1'), false);
+  // The word must be a real keyword, not text inside a string/quoted identifier/comment.
+  assert.equal(hasConflictClause("INSERT INTO t (note) VALUES ('ON CONFLICT nice')"), false);
+  assert.equal(hasConflictClause('INSERT INTO t ("conflict") VALUES (1)'), false);
+  assert.equal(hasConflictClause('INSERT INTO t VALUES (1) /* on conflict */'), false);
+});
+
+test('detects OR ROLLBACK only as real adjacent SQL tokens', () => {
+  assert.equal(hasRollbackConflictClause('INSERT OR ROLLBACK INTO t VALUES (1)'), true);
+  assert.equal(hasRollbackConflictClause('UPDATE OR ROLLBACK t SET v = 1'), true);
+  assert.equal(hasRollbackConflictClause("INSERT INTO t VALUES ('OR ROLLBACK')"), false);
+  assert.equal(hasRollbackConflictClause('INSERT INTO t VALUES (1) /* OR ROLLBACK */'), false);
+  assert.equal(hasRollbackConflictClause('INSERT OR\n-- gap\nROLLBACK INTO t VALUES (1)'), true);
+  assert.equal(hasRollbackConflictClause('INSERT OR FAIL INTO t VALUES (1)'), false);
 });

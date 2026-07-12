@@ -49,6 +49,14 @@ extension CapacitorSqlite {
         switch error {
         case let err as CapacitorSqliteError:
             return err
+        // queryCompact() deliberately bypasses Database.queryUnsafe() so it can
+        // return the compact column/value envelope. Preserve validation failures
+        // raised by that direct SQLiteHelpers path instead of relabelling them as
+        // QUERY_FAILED. Keeping this here also protects future direct helper paths.
+        case SQLiteError.invalidParams(let message):
+            return .failed(code: "INVALID_PARAMS", message: message)
+        case DatabaseError.invalidParams(let message):
+            return .failed(code: "INVALID_PARAMS", message: message)
         case DatabaseError.notOpen(let message):
             return .failed(code: "DB_NOT_OPEN", message: message)
         case DatabaseError.transaction(let message):

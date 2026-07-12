@@ -5,7 +5,7 @@
 // It starts the playground Vite dev server with the existing COOP/COEP headers,
 // launches a temporary Chrome/Chromium profile, then calls window.__capSuite.
 //
-// Usage: node test/suite/run-web-cdp.mjs [--stress] [--timeout-ms=900000]
+// Usage: node test/suite/run-web-cdp.mjs [--stress|--stress-only|--diagnostics|--diagnostics-only] [--timeout-ms=900000]
 
 import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
@@ -15,7 +15,11 @@ import net from 'node:net';
 
 const PER_CALL_TIMEOUT_MS = 15_000;
 const POLL_INTERVAL_MS = 1_500;
-const runStress = process.argv.includes('--stress');
+const stressOnly = process.argv.includes('--stress-only');
+const runStress = stressOnly || process.argv.includes('--stress');
+const diagnosticsOnly = process.argv.includes('--diagnostics-only');
+const runDiagnostics = diagnosticsOnly || process.argv.includes('--diagnostics');
+const skipSuite = stressOnly || diagnosticsOnly;
 const DEFAULT_TIMEOUT_MS = runStress ? 900_000 : 300_000;
 const TIMEOUT_MS = Number(process.argv.find((a) => a.startsWith('--timeout-ms='))?.split('=')[1] ?? DEFAULT_TIMEOUT_MS);
 
@@ -271,12 +275,17 @@ async function main() {
       throw new Error(`Web OPFS prerequisites missing: ${JSON.stringify(webCaps)}`);
     }
 
-    console.log('Running suite tests against the real Web (sqlite-wasm/OPFS) backend...\n');
-    const report = await runAsync(page.webSocketDebuggerUrl, 'window.__capSuite.runAll()', '__capWebSuiteReport');
-    for (const f of report.failures) {
-      console.log(`✗ [${f.group}] ${f.name} — ${f.message}`);
+    let report;
+    if (!skipSuite) {
+      console.log('Running suite tests against the real Web (sqlite-wasm/OPFS) backend...\n');
+      report = await runAsync(page.webSocketDebuggerUrl, 'window.__capSuite.runAll()', '__capWebSuiteReport');
+      for (const f of report.failures) {
+        console.log(`✗ [${f.group}] ${f.name} — ${f.message}`);
+      }
+      console.log(
+        `\n${report.passed}/${report.total} passed${report.skipped > 0 ? `, ${report.skipped} skipped` : ''}${report.failed > 0 ? `, ${report.failed} failed` : ''}`,
+      );
     }
-    console.log(`\n${report.passed}/${report.total} passed${report.failed > 0 ? `, ${report.failed} failed` : ''}`);
 
     if (runStress) {
       console.log('\nRunning stress benchmarks...\n');
@@ -289,7 +298,22 @@ async function main() {
       }
     }
 
-    if (report.failed > 0) process.exitCode = 1;
+    if (runDiagnostics) {
+      console.log('\nRunning layer diagnostics...\n');
+      const results = await runAsync(
+        page.webSocketDebuggerUrl,
+        'window.__capSuite.runDiagnostics()',
+        '__capWebSuiteDiagnostics',
+      );
+      for (const r of results) {
+        const parts = [`${r.durationMs}ms`];
+        if (r.throughput) parts.push(r.throughput);
+        if (r.detail) parts.push(r.detail);
+        console.log(`${r.id} ${r.name}: ${parts.join(' — ')}`);
+      }
+    }
+
+    if (report?.failed > 0) process.exitCode = 1;
   } finally {
     await Promise.all([stopChild(vite), stopChild(browser)]);
     await removeTempDir(profileDir);

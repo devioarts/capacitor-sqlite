@@ -14,7 +14,7 @@
 // connection, while short-lived connect → evaluate → disconnect round trips
 // have been reliable in testing.
 //
-// Usage: node test/suite/run-ios-cdp.mjs [--stress] [--timeout-ms=900000]
+// Usage: node test/suite/run-ios-cdp.mjs [--stress|--stress-only|--diagnostics|--diagnostics-only] [--timeout-ms=900000]
 
 import { execFileSync } from 'node:child_process';
 
@@ -26,7 +26,11 @@ appiumSupportLogger.log.level = 'warn';
 const BUNDLE_ID = 'com.devioarts.example.sqlite';
 const PER_CALL_TIMEOUT_MS = 15_000;
 const POLL_INTERVAL_MS = 1_500;
-const runStress = process.argv.includes('--stress');
+const stressOnly = process.argv.includes('--stress-only');
+const runStress = stressOnly || process.argv.includes('--stress');
+const diagnosticsOnly = process.argv.includes('--diagnostics-only');
+const runDiagnostics = diagnosticsOnly || process.argv.includes('--diagnostics');
+const skipSuite = stressOnly || diagnosticsOnly;
 const DEFAULT_TIMEOUT_MS = runStress ? 900_000 : 180_000;
 const TIMEOUT_MS = Number(process.argv.find((a) => a.startsWith('--timeout-ms='))?.split('=')[1] ?? DEFAULT_TIMEOUT_MS);
 
@@ -89,7 +93,14 @@ function withTimeout(promise, ms, label) {
   ]);
 }
 
-const quietLog = { debug() {}, info() {}, warn() {}, error(...args) { console.error(...args); } };
+const quietLog = {
+  debug() {},
+  info() {},
+  warn() {},
+  error(...args) {
+    console.error(...args);
+  },
+};
 
 async function evalOnce(socketPath, platformVersion, expression) {
   const { RemoteDebugger } = await import('appium-remote-debugger');
@@ -146,17 +157,27 @@ async function main() {
   const socketPath = findWebInspectorSocket(udid);
   console.log(`Found Web Inspector socket: ${socketPath}`);
 
-  const ready = await evalOnce(socketPath, platformVersion, 'typeof window.__capSuite');
+  let ready = null;
+  for (let attempt = 0; attempt < 30; attempt++) {
+    ready = await evalOnce(socketPath, platformVersion, 'typeof window.__capSuite');
+    if (ready === 'object') break;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
   if (ready !== 'object') {
-    throw new Error("window.__capSuite is not present — is this a build with src/cliHook.ts included?");
+    throw new Error('window.__capSuite is not present — is this a build with src/cliHook.ts included?');
   }
 
-  console.log('Running suite tests against the real iOS (Swift/SQLite) backend...\n');
-  const report = await runAsync(socketPath, platformVersion, 'window.__capSuite.runAll()', '__capSuiteResult');
-  for (const f of report.failures) {
-    console.log(`✗ [${f.group}] ${f.name} — ${f.message}`);
+  let report;
+  if (!skipSuite) {
+    console.log('Running suite tests against the real iOS (Swift/SQLite) backend...\n');
+    report = await runAsync(socketPath, platformVersion, 'window.__capSuite.runAll()', '__capSuiteResult');
+    for (const f of report.failures) {
+      console.log(`✗ [${f.group}] ${f.name} — ${f.message}`);
+    }
+    console.log(
+      `\n${report.passed}/${report.total} passed${report.skipped > 0 ? `, ${report.skipped} skipped` : ''}${report.failed > 0 ? `, ${report.failed} failed` : ''}`,
+    );
   }
-  console.log(`\n${report.passed}/${report.total} passed${report.failed > 0 ? `, ${report.failed} failed` : ''}`);
 
   if (runStress) {
     console.log('\nRunning stress benchmarks...\n');
@@ -169,7 +190,23 @@ async function main() {
     }
   }
 
-  if (report.failed > 0) {
+  if (runDiagnostics) {
+    console.log('\nRunning layer diagnostics...\n');
+    const results = await runAsync(
+      socketPath,
+      platformVersion,
+      'window.__capSuite.runDiagnostics()',
+      '__capDiagnosticsResult',
+    );
+    for (const r of results) {
+      const parts = [`${r.durationMs}ms`];
+      if (r.throughput) parts.push(r.throughput);
+      if (r.detail) parts.push(r.detail);
+      console.log(`${r.id} ${r.name}: ${parts.join(' — ')}`);
+    }
+  }
+
+  if (report?.failed > 0) {
     process.exitCode = 1;
   }
 }

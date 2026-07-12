@@ -64,20 +64,26 @@ final class CapacitorSqlite {
     // MARK: - close
 
     func close(database: String) throws {
-        let instance: Database? = {
-            lock.lock()
-            defer { lock.unlock() }
-            return databases[databaseKey(database)]
-        }()
-        guard let instance else {
+        let key = databaseKey(database)
+        lock.lock()
+        guard let instance = databases[key] else {
+            lock.unlock()
             throw CapacitorSqliteError.failed(code: "DB_NOT_OPEN", message: "close: '\(database)' is not open")
         }
         do {
+            // Keep the registry lock until close completes and the exact instance is
+            // removed. Otherwise a concurrent reopen can reopen this same Database
+            // between close() and removeValue(), after which the old close path removes
+            // the newly-open live handle from the registry.
             try instance.close()
+            if databases[key] === instance {
+                databases.removeValue(forKey: key)
+            }
+            lock.unlock()
         } catch {
+            lock.unlock()
             throw mapError(error, fallback: "CLOSE_FAILED")
         }
-        lock.lock(); databases.removeValue(forKey: databaseKey(database)); lock.unlock()
     }
 
     func closeAll() {
@@ -159,10 +165,35 @@ final class CapacitorSqlite {
 
     // MARK: - runBatch
 
-    func runBatch(database: String, set: [[String: Any]], transaction: Bool) throws -> (changes: Int, lastInsertId: Int64) {
+    func runBatch(
+        database: String,
+        set: [[String: Any]],
+        transaction: Bool,
+        diagnostics: BatchDiagnostics? = nil
+    ) throws -> (changes: Int, lastInsertId: Int64) {
         let inst = try requireOpen(database, context: "runBatch")
         do {
-            return try inst.runBatch(set: set, transaction: transaction)
+            return try inst.runBatch(set: set, transaction: transaction, diagnostics: diagnostics)
+        } catch {
+            throw mapError(error, fallback: "EXECUTE_FAILED")
+        }
+    }
+
+    func runMany(
+        database: String,
+        statement: String,
+        valueSets: [[Any]],
+        transaction: Bool,
+        returnResults: Bool
+    ) throws -> (changes: Int, results: [(changes: Int, lastInsertId: Int64)]?) {
+        let inst = try requireOpen(database, context: "runMany")
+        do {
+            return try inst.runMany(
+                statement: statement,
+                valueSets: valueSets,
+                transaction: transaction,
+                returnResults: returnResults
+            )
         } catch {
             throw mapError(error, fallback: "EXECUTE_FAILED")
         }
@@ -174,6 +205,19 @@ final class CapacitorSqlite {
         let inst = try requireOpen(database, context: "query")
         do {
             return try inst.query(statement: statement, values: values)
+        } catch {
+            throw mapError(error, fallback: "QUERY_FAILED")
+        }
+    }
+
+    func queryCompact(
+        database: String,
+        statement: String,
+        values: [Any]
+    ) throws -> SQLiteHelpers.CompactRows {
+        let inst = try requireOpen(database, context: "query")
+        do {
+            return try inst.queryCompact(statement: statement, values: values)
         } catch {
             throw mapError(error, fallback: "QUERY_FAILED")
         }

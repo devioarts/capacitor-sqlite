@@ -147,4 +147,69 @@ class CapacitorSqliteBindingTests: XCTestCase {
             try impl.run(database: ":memory:", statement: "INSERT INTO child (parent_id) VALUES (99)", values: [])
         )
     }
+
+    // Defense in depth: not reachable via the documented public JS API (index.ts/web.ts
+    // already reject non-finite numbers before crossing the bridge), but the native bind
+    // layer must not silently write NaN/Infinity into SQLite if ever called directly.
+    func testBindRejectsNonFiniteFloats() throws {
+        try impl.open(database: ":memory:", readonly: false, migrations: [])
+        try impl.execute(database: ":memory:", statements: ["CREATE TABLE t (v REAL)"])
+        XCTAssertThrowsError(
+            try impl.run(database: ":memory:", statement: "INSERT INTO t VALUES (?)", values: [Double.nan])
+        )
+        XCTAssertThrowsError(
+            try impl.run(database: ":memory:", statement: "INSERT INTO t VALUES (?)", values: [Double.infinity])
+        )
+        XCTAssertThrowsError(
+            try impl.run(database: ":memory:", statement: "INSERT INTO t VALUES (?)", values: [-Double.infinity])
+        )
+    }
+
+    // Regression: an UPSERT resolved via its DO UPDATE arm must not surface
+    // sqlite3_last_insert_rowid() from an unrelated earlier INSERT (see hasConflictClause).
+    func testUpsertUpdatePathDoesNotSurfaceStaleLastInsertId() throws {
+        try impl.open(database: ":memory:", readonly: false, migrations: [])
+        try impl.execute(database: ":memory:", statements: [
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, hits INTEGER DEFAULT 0)"
+        ])
+        let seed = try impl.run(database: ":memory:", statement: "INSERT INTO t VALUES (1, 1)", values: [])
+        XCTAssertEqual(seed.lastInsertId, 1)
+
+        let upsert = try impl.run(
+            database: ":memory:",
+            statement: "INSERT INTO t VALUES (1, 1) ON CONFLICT(id) DO UPDATE SET hits = hits + 1",
+            values: []
+        )
+        XCTAssertEqual(upsert.changes, 1)
+        XCTAssertEqual(upsert.lastInsertId, 0, "DO UPDATE arm must not report the seed row's stale id")
+    }
+
+    func testBindCountMismatchRejectsMissingAndExtraValues() throws {
+        try impl.open(database: ":memory:", readonly: false, migrations: [])
+        try impl.execute(database: ":memory:", statements: ["CREATE TABLE t (a INTEGER, b INTEGER)"])
+        XCTAssertThrowsError(
+            try impl.run(database: ":memory:", statement: "INSERT INTO t VALUES (?, ?)", values: [1])
+        )
+        XCTAssertThrowsError(
+            try impl.run(database: ":memory:", statement: "INSERT INTO t VALUES (?)", values: [1, 2])
+        )
+        XCTAssertThrowsError(
+            try impl.query(database: ":memory:", statement: "SELECT ?", values: [])
+        )
+        let rows = try impl.query(database: ":memory:", statement: "SELECT COUNT(*) AS n FROM t", values: [])
+        XCTAssertEqual(rows[0]["n"] as? Int64, 0, "mismatched binds must not execute a partial write")
+    }
+
+    func testWithoutRowidDoesNotSurfaceEarlierInsertId() throws {
+        try impl.open(database: ":memory:", readonly: false, migrations: [])
+        try impl.execute(database: ":memory:", statements: [
+            "CREATE TABLE seed (id INTEGER PRIMARY KEY)",
+            "CREATE TABLE no_rowid (key TEXT PRIMARY KEY) WITHOUT ROWID"
+        ])
+        let seed = try impl.run(database: ":memory:", statement: "INSERT INTO seed VALUES (73)", values: [])
+        XCTAssertEqual(seed.lastInsertId, 73)
+        let result = try impl.run(database: ":memory:", statement: "INSERT INTO no_rowid VALUES ('x')", values: [])
+        XCTAssertEqual(result.changes, 1)
+        XCTAssertEqual(result.lastInsertId, 0, "WITHOUT ROWID must not leak stale id 73")
+    }
 }

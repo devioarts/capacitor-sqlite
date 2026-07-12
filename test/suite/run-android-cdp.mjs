@@ -7,7 +7,7 @@
 // debug APK (with the CLI hook from src/cliHook.ts) is installed and launched.
 // See package.json's "test:suite:android" script, which does all of this.
 //
-// Usage: node test/suite/run-android-cdp.mjs [--stress] [--timeout-ms=900000]
+// Usage: node test/suite/run-android-cdp.mjs [--stress|--stress-only|--diagnostics|--diagnostics-only]
 
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -18,7 +18,11 @@ const APP_ID = 'com.devioarts.capacitor.sqlite';
 const FORWARD_PORT = 9333;
 const PER_CALL_TIMEOUT_MS = 15_000;
 const POLL_INTERVAL_MS = 1_500;
-const runStress = process.argv.includes('--stress');
+const stressOnly = process.argv.includes('--stress-only');
+const runStress = stressOnly || process.argv.includes('--stress');
+const diagnosticsOnly = process.argv.includes('--diagnostics-only');
+const runDiagnostics = diagnosticsOnly || process.argv.includes('--diagnostics');
+const skipSuite = stressOnly || diagnosticsOnly;
 const DEFAULT_TIMEOUT_MS = runStress ? 900_000 : 300_000;
 const TIMEOUT_MS = Number(process.argv.find((a) => a.startsWith('--timeout-ms='))?.split('=')[1] ?? DEFAULT_TIMEOUT_MS);
 
@@ -53,14 +57,20 @@ async function retry(fn, { attempts = 20, delayMs = 1000 } = {}) {
 }
 
 function findWebviewSocket(adbPath) {
+  const pid = adb(adbPath, ['shell', 'pidof', APP_ID]).trim().split(/\s+/)[0];
+  if (!pid) throw new Error(`${APP_ID} is not running yet`);
   const out = adb(adbPath, ['shell', 'cat', '/proc/net/unix']);
-  const match = out
+  const sockets = out
     .split('\n')
     .map((line) => line.match(/@(webview_devtools_remote_\d+)/)?.[1])
-    .find(Boolean);
+    .filter(Boolean);
+  // Android can expose sockets for several foreground/background WebViews.
+  // The numeric suffix is the owning app process PID; selecting the first socket
+  // can silently drive an unrelated app and wait until the suite timeout.
+  const match = sockets.find((socket) => socket === `webview_devtools_remote_${pid}`);
   if (!match) {
     throw new Error(
-      `No webview_devtools_remote_* socket found for a running app. Is ${APP_ID} installed and in the foreground?`,
+      `No WebView debug socket found for ${APP_ID} (pid ${pid}); visible sockets: ${sockets.join(', ') || 'none'}`,
     );
   }
   return match;
@@ -123,10 +133,7 @@ async function runAsync(wsUrl, expression, resultVar) {
 
   const deadline = Date.now() + TIMEOUT_MS;
   while (Date.now() < deadline) {
-    const state = await evaluate(
-      wsUrl,
-      `JSON.stringify({ result: window.${resultVar}, error: window.${errorVar} })`,
-    );
+    const state = await evaluate(wsUrl, `JSON.stringify({ result: window.${resultVar}, error: window.${errorVar} })`);
     const parsed = JSON.parse(state);
     if (parsed.error) throw new Error(parsed.error);
     if (parsed.result !== null) return JSON.parse(parsed.result);
@@ -137,6 +144,16 @@ async function runAsync(wsUrl, expression, resultVar) {
 
 async function main() {
   const adbPath = findAdb();
+  // A sleeping/locked physical device pauses or freezes its WebView JavaScript,
+  // making a healthy suite appear hung until the global timeout. Keep USB-powered
+  // test targets awake for the run and bring the app back to an interactive state.
+  adb(adbPath, ['shell', 'svc', 'power', 'stayon', 'usb']);
+  adb(adbPath, ['shell', 'input', 'keyevent', 'KEYCODE_WAKEUP']);
+  try {
+    adb(adbPath, ['shell', 'wm', 'dismiss-keyguard']);
+  } catch {
+    // Older Android builds may not implement dismiss-keyguard; wakeup still helps.
+  }
   console.log('Waiting for the app to attach a WebView debug socket...');
   const socket = await retry(() => findWebviewSocket(adbPath));
   console.log(`Found WebView debug socket: ${socket}`);
@@ -157,15 +174,20 @@ async function main() {
     return value;
   });
   if (ready !== 'object') {
-    throw new Error("window.__capSuite is not present — is this a build with src/cliHook.ts included?");
+    throw new Error('window.__capSuite is not present — is this a build with src/cliHook.ts included?');
   }
 
-  console.log('Running suite tests against the real Android (Kotlin/SQLite) backend...\n');
-  const report = await runAsync(page.webSocketDebuggerUrl, 'window.__capSuite.runAll()', '__capSuiteReport');
-  for (const f of report.failures) {
-    console.log(`✗ [${f.group}] ${f.name} — ${f.message}`);
+  let report;
+  if (!skipSuite) {
+    console.log('Running suite tests against the real Android (Kotlin/SQLite) backend...\n');
+    report = await runAsync(page.webSocketDebuggerUrl, 'window.__capSuite.runAll()', '__capSuiteReport');
+    for (const f of report.failures) {
+      console.log(`✗ [${f.group}] ${f.name} — ${f.message}`);
+    }
+    console.log(
+      `\n${report.passed}/${report.total} passed${report.skipped > 0 ? `, ${report.skipped} skipped` : ''}${report.failed > 0 ? `, ${report.failed} failed` : ''}`,
+    );
   }
-  console.log(`\n${report.passed}/${report.total} passed${report.failed > 0 ? `, ${report.failed} failed` : ''}`);
 
   if (runStress) {
     console.log('\nRunning stress benchmarks...\n');
@@ -178,7 +200,22 @@ async function main() {
     }
   }
 
-  if (report.failed > 0) {
+  if (runDiagnostics) {
+    console.log('\nRunning layer diagnostics...\n');
+    const results = await runAsync(
+      page.webSocketDebuggerUrl,
+      'window.__capSuite.runDiagnostics()',
+      '__capSuiteDiagnostics',
+    );
+    for (const r of results) {
+      const parts = [`${r.durationMs}ms`];
+      if (r.throughput) parts.push(r.throughput);
+      if (r.detail) parts.push(r.detail);
+      console.log(`${r.id} ${r.name}: ${parts.join(' — ')}`);
+    }
+  }
+
+  if (report?.failed > 0) {
     process.exitCode = 1;
   }
 }

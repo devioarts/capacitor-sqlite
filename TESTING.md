@@ -2,16 +2,18 @@
 
 ## Overview
 
-|               | Count                 | Status                                                                          |
-| ------------- | --------------------- | -------------------------------------------------------------------------------- |
-| **Automated** | 367 tests · 72 groups | Verified 2026-07-06: iOS · Android · Web · Electron (365); `me-05` and `mstmt-06` added 2026-07-07, verified on Electron (both) and iOS/Android (`mstmt-06`'s underlying scanner fix, via platform unit tests) |
-| **Manual**    | 11 scenarios          | 🔲 Require OS-level control or native tooling       |
+|               | Scope                                        | Purpose                                                                                 |
+| ------------- | -------------------------------------------- | --------------------------------------------------------------------------------------- |
+| **Automated** | 401 tests · 75 groups · 12 stress benchmarks · 24 diagnostics | Cross-platform behavioral, compatibility, and performance-regression coverage           |
+| **Manual**    | 11 scenarios                                 | OS lifecycle, storage-failure, profiler, and native-environment checks outside JS reach |
 
 Tests are part of the example app (`playground/`).  
 Build and launch it on a target platform, open the **Test Suite** tab, and press **Run All**.  
-Throughput and latency benchmarks run separately from the **Load Tests** tab (11 scenarios).
+Throughput and latency benchmarks run separately from the **Load Tests** tab: 12 original
+full-load scenarios plus 24 shorter layer diagnostics.
 
-The same test definitions (`playground/src/tests/suiteTests.ts` and `stressBenchmarks.ts`) are
+The same test definitions (`playground/src/tests/suiteTests.ts`, `stressBenchmarks.ts`, and
+`diagnosticBenchmarks.ts`) are
 shared with a set of CLI runners — see [Running from the command line](#running-from-the-command-line)
 — so the full suite can also be run outside the playground UI, without clicking through the app.
 
@@ -19,15 +21,18 @@ shared with a set of CLI runners — see [Running from the command line](#runnin
 cross-platform behavioral suite above is run from the playground app on each target
 platform, or from the CLI runners described below.
 
-For release gating, record the date, commit, platform version, and command output
-for each full platform run. A local verification may cover only a subset of the matrix.
+For release gating, record the date, commit, platform versions, target type
+(simulator/emulator/device/browser/Electron), and command output for each full platform
+run. A local verification may cover only a subset of the matrix, but release notes should
+state which matrix entries were actually executed.
 
 ---
 
 ## Running from the command line
 
-The 367 suite tests and 11 stress benchmarks are defined once, in
-`playground/src/tests/suiteTests.ts` and `playground/src/tests/stressBenchmarks.ts`, as functions
+The 401 suite tests, 12 full-load benchmarks, and 24 layer diagnostics are defined once, in
+`playground/src/tests/suiteTests.ts`, `playground/src/tests/stressBenchmarks.ts`, and
+`playground/src/tests/diagnosticBenchmarks.ts`, as functions
 that take a `CapacitorSqlitePlugin` implementation and return test/benchmark definitions. The
 playground UI (`PageSuite.tsx` / `PageStress.tsx`) calls these with the real `CapacitorSqlite`
 import; the CLI runners below call them with a platform backend directly, so it's the same test
@@ -41,16 +46,109 @@ code running either way, not a copy.
 | `npm run test:suite:ios`      | iOS (Swift/SQLite)      | Builds, installs and launches the playground on the currently booted Simulator, then drives its WKWebView over the WebKit Remote Web Inspector protocol (via `appium-remote-debugger`, without a full Appium server) |
 
 Append `:stress` to any of the four (e.g. `npm run test:suite:android:stress`) to also run the
-11 stress benchmarks after the suite. Each command exits non-zero if any test failed, so they're
+12 stress benchmarks after the suite. Append `:stress-only` to run only the benchmark profile
+through the same non-UI driver. Each command exits non-zero if any test failed, so they're
 usable as CI gates.
+
+For timing-only reruns, prefer the `:stress-only` commands over clicking the **Load Tests**
+page. They execute `window.__capSuite.runStress()` from the platform runner without rendering
+the benchmark list or updating React state, which avoids measuring the playground UI and
+Android WebView compositor/debugger scheduling as part of plugin throughput. The UI remains
+useful as a manual end-to-end smoke path and to expose visible-page overhead.
+
+Inside the playground app, the **Load Tests** page provides both visible buttons and quiet
+buttons. The visible buttons keep the result list mounted and are useful for checking the
+user-facing page behavior. The quiet buttons run the same benchmark definitions from inside the
+app, but hide the result list and write React state only once at the end, giving a cleaner
+in-app timing without switching to an external CLI runner.
+
+```sh
+npm run test:suite:web:stress-only
+npm run test:suite:android:stress-only
+npm run test:suite:ios:stress-only
+npm run test:suite:electron:stress-only
+```
+
+Set `ANDROID_SERIAL` when multiple Android targets are connected.
 
 Current stress benchmark sizes:
 
-- `s-01`, `s-02`, `s-03`, `s-04`, `s-11`: 10,000 write operations.
-- `s-05`: 5,000 writes plus 5,000 reads.
-- `s-06`, `s-07`: 100,000 inserted rows.
-- `s-08`, `s-09`: 1 MB TEXT/BLOB round-trip.
-- `s-10`: 2 open databases with 10,000 rows each.
+- `s-01`, `s-04`, `s-12`: 10,000 individually awaited end-to-end calls. These
+  intentionally retain the original high load even on platforms where the run takes
+  minutes; reducing the iteration count is not a performance improvement.
+- `s-02`: 10,000 writes through one batch.
+- `s-03`: 10,000 writes through one repeated-statement `runMany()` call.
+- `s-05`: 10,000 simultaneously submitted writes; `s-06`: 5,000 writes plus
+  5,000 reads.
+- `s-07`, `s-08`: 100,000 inserted rows.
+- `s-09`, `s-10`: 1 MB TEXT/BLOB round-trip.
+- `s-11`: 2 open databases with 10,000 rows each.
+
+### Performance layer diagnostics
+
+Run only the shorter diagnostic profile with one of:
+
+```sh
+npm run test:suite:web:diagnostics
+npm run test:suite:android:diagnostics
+npm run test:suite:ios:diagnostics
+npm run test:suite:electron:diagnostics
+```
+
+The **Load Tests** page also exposes **Run diagnostics (24)**. Use the UI for the
+actual Electron end-to-end path: the Electron CLI runner instantiates
+`ElectronSqliteBackend` directly and therefore excludes Electron IPC and the worker boundary.
+Web, Android, and iOS CLI diagnostics run through their real browser/native bridge.
+
+The diagnostics deliberately keep setup, seed, verification, and close operations outside
+each reported interval. Sequential cases report average, p50, p95, p99, and min/max latency:
+
+Interpret `s-05`, `s-06`, and `d-20..d-22` as bridge/queue fan-out measurements, not as
+recommended bulk-write patterns. They intentionally submit thousands of individual
+`run()`/`query()` calls so platform callback and queue-drain behavior is visible. Real bulk
+imports should use `runMany()` for one repeated statement or `runBatch()` for mixed SQL.
+On Web/OPFS, autocommit write fan-out also multiplies the browser's per-write durability
+barrier; compare `d-20` with transactional `d-21` before treating a long web fan-out run
+as SQLite or plugin overhead.
+Similarly, `d-23`/`d-24` are query-planner checks: a large `WHERE + ORDER BY + LIMIT`
+query without a matching index measures SQLite scan/sort work, not plugin transport.
+
+| ID              | Timed path                                          | Primary comparison                                                           |
+| --------------- | --------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `d-01`          | Promise/timer harness only                          | Baseline to subtract from very fast JS-only cases                            |
+| `d-02`          | 200 sequential `getPluginPlatform()` calls                | Small platform request/response without this plugin's SQLite queue           |
+| `d-03`          | 200 sequential `isOpen()` calls                     | `d-03 − d-02`: plugin dispatch, queue, and registry lookup without SQL       |
+| `d-04`          | 200 sequential `SELECT 1` calls                     | `d-04 − d-03`: minimal prepare/step plus one-row conversion                  |
+| `d-05`          | 200 sequential `run()` calls inside one transaction | Write wrapper and metadata work without a durable commit per row             |
+| `d-06`          | 200 sequential autocommit `run()` calls             | `d-06 − d-05`: framework transaction and storage commit contribution         |
+| `d-07`          | 1,000 concurrent `getPluginPlatform()` calls              | Pipelined bridge throughput and completion-latency distribution              |
+| `d-08`          | One recursive SQL statement creates 10,000 rows     | SQLite-heavy single-call reference with almost no per-row JS/bridge work     |
+| `d-09`          | One `runBatch()` carries 10,000 items               | `d-09 − d-08`: payload, validation, binding loop, and batch wrapper cost     |
+| `d-10` / `d-11` | 1 MB TEXT write / read                              | Separates input and output direction; compare platforms                      |
+| `d-12` / `d-13` | 1 MB BLOB write / read                              | Measures tagged-base64 native transport versus Web/Electron structured clone |
+| `d-14`          | Return 100,000 rows × 2 columns                     | SQLite scan plus row-object materialization and response transfer            |
+| `d-15`          | One `runMany()` carries 10,000 value sets           | Compare with `d-09`: repeated SQL/object transport and parsing overhead      |
+| `d-16`          | Reconstruct 100,000 JS objects from compact rows    | Pure JS allocation baseline for `d-14`                                       |
+| `d-17`          | Encode a 1 MB native BLOB envelope                  | Pure JS tagged-base64 cost baseline for `d-12`                               |
+| `d-18`          | JSON-serialize equivalent batch/many payloads       | Repeated SQL/object payload size and serialization reference                 |
+| `d-19`          | Native `runBatch(10,000)` timing breakdown          | Android/iOS-only split for getArray, decode, queue, parse, prepare/prevalidate, reset, bind, step, commit |
+| `d-20`          | 10,000 concurrent autocommit `run()` writes         | Full-load concurrent-write shape with wall time and completion latency       |
+| `d-21`          | 10,000 concurrent `run()` writes in one transaction | `d-20 − d-21`: durable commit/autocommit cost under fan-out                  |
+| `d-22`          | 5,000 concurrent writes + 5,000 concurrent reads    | Mixed workload split into separate write/read completion distributions       |
+| `d-23`          | Filtered query without an index                     | Captures query plan and no-index WHERE+ORDER BY+LIMIT timing                 |
+| `d-24`          | Filtered query with an index                        | Separates scan/sort planner cost from bridge and 100-row result overhead     |
+
+The shared `rm-01..13` group covers aggregate and per-item results, generated IDs,
+pre-write bind validation, atomic rollback, `transaction:false` partial persistence,
+trigger changes, NULL/BLOB rebinding, closed/readonly handles, manual transactions,
+conservative UPSERT IDs, and statements without placeholders.
+
+These are controlled **end-to-end differential measurements**, not native profiler timestamps.
+For example, `d-08` still includes one public call and one commit, while `d-10` includes both
+transfer and SQLite binding/write. Interpret differences between paired cases and platforms;
+do not claim that subtracting two noisy wall-clock values is an exact SQLite-core duration.
+If a pair remains ambiguous, capture native traces/counters for the implicated path before
+changing production code.
 
 GitHub Actions:
 
@@ -66,6 +164,9 @@ Prerequisites:
 - **Web**: Chrome/Chromium available on PATH or via `CHROME_BIN`; the runner uses a temporary
   browser profile and requires OPFS + cross-origin isolation support.
 - **Android**: an emulator or device already running and visible to `adb` (`$ANDROID_HOME/platform-tools/adb devices`).
+  If more than one target is connected, set `ANDROID_SERIAL=<serial>`; the runner
+  selects the WebView socket belonging to the playground PID and keeps USB-powered
+  devices awake so another app's WebView or screen sleep cannot cause a false hang.
 - **iOS**: a Simulator already booted (`xcrun simctl boot "iPhone 17 Pro"`), matching the
   destination name used in the `test:suite:ios:build` script.
 
@@ -73,34 +174,36 @@ Prerequisites:
 
 ## Automated Tests
 
-Tests that require a minimum SQLite version skip gracefully on older builds rather than failing.
+Tests that require a minimum SQLite version skip explicitly on older builds rather than failing.
+The runner records these as `skipped` with a reason; a capability/platform branch can no longer
+return early and be counted as a pass. Release logs must report passed, skipped, and failed counts.
 Platform-specific quirks are documented in [Platform Notes](#platform-notes).
 
 ### Core API
 
-| Group        | IDs         | Tests                                                                                                    |
-| ------------ | ----------- | -------------------------------------------------------------------------------------------------------- |
-| Platform     | plat-01..02 | `getPlatform`, `isAvailable`                                                                             |
-| Lifecycle    | lc-01..08   | open · close · isOpen · idempotence · persistence · re-open cycles                                       |
-| Execute      | ex-01..06   | DDL/DML · rollback on error · `transaction:false` · nested transaction guard                             |
-| Run          | run-01..11  | INSERT/UPDATE/DELETE · `lastInsertId` · `changes` · UPSERT (graceful skip)                               |
-| Query        | q-01..17    | SELECT · params · types · JOINs · GROUP BY · HAVING · subqueries · CTE · DML-without-RETURNING rejection |
-| RunBatch     | rb-01..05   | batch insert · rollback · `transaction:false` · error cases                                              |
-| Transactions | tx-01..08   | begin/commit/rollback · nesting guard · visibility within txn                                            |
-| Migrations   | mig-01..09  | v1 apply · sequential · idempotence · failure isolation · ordering                                       |
-| Metadata     | gv-01..04   | `getVersion` · `vacuum` · `getSchemaVersion`                                                             |
-| Directory    | dir-01..03  | invalid enum · all logical directories · same DB/different directory guard                               |
+| Group        | IDs         | Tests                                                                                                                                             |
+| ------------ | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Platform     | plat-01..02 | `getPluginPlatform`, `isAvailable`                                                                                                                      |
+| Lifecycle    | lc-01..08   | open · close · isOpen · idempotence · persistence · re-open cycles                                                                                |
+| Execute      | ex-01..06   | DDL/DML · rollback on error · `transaction:false` · nested transaction guard                                                                      |
+| Run          | run-01..12  | INSERT/UPDATE/DELETE/REPLACE · conservative `lastInsertId` · `changes` · UPSERT paths                                                             |
+| Query        | q-01..17    | SELECT · params · types · JOINs · GROUP BY · HAVING · subqueries · CTE · DML-without-RETURNING rejection                                          |
+| RunBatch     | rb-01..08   | batch insert · rollback · `transaction:false` · trigger changes · safe repeated-SQL rebind · `lastInsertId` stays 0                               |
+| Transactions | tx-01..08   | begin/commit/rollback · nesting guard · visibility within txn                                                                                     |
+| Migrations   | mig-01..13  | v1 apply · sequential · idempotence · failure isolation · ordering · partial commit · migration on live connection · active-transaction rejection |
+| Metadata     | gv-01..05   | `getVersion` · `vacuum` · `getSchemaVersion` · `busy_timeout` set on every platform                                                               |
+| Directory    | dir-01..03  | invalid enum · all logical directories · same DB/different directory guard                                                                        |
 
 ### Data Types
 
-| Group          | IDs         | Tests                                                                             |
-| -------------- | ----------- | --------------------------------------------------------------------------------- |
-| BLOB           | blob-01..08 | `Uint8Array` round-trip · NULL · empty · full byte range · 50 KB                  |
-| Numeric        | num-01..05  | `MAX_SAFE_INTEGER` · float precision · zero · arithmetic functions                |
-| String         | str-01..06  | empty · Unicode/emoji · SQL metacharacters · 10 KB · `\n`/`\t` · backslash        |
-| NULL Handling  | null-01..08 | arithmetic · `IS NULL` · `COUNT` · UNIQUE NULLs · sort order · `NOT IN` gotcha    |
-| Boolean Policy | bool-01..04 | stored as INTEGER 1/0 · `TYPEOF` · round-trip · multiple params                   |
-| Type Casting   | cast-01..08 | `CAST` rules · integer vs real division · division by zero → NULL · type affinity |
+| Group          | IDs         | Tests                                                                                              |
+| -------------- | ----------- | -------------------------------------------------------------------------------------------------- |
+| BLOB           | blob-01..08 | `Uint8Array` round-trip · NULL · empty · full byte range · 50 KB                                   |
+| Numeric        | num-01..05  | `MAX_SAFE_INTEGER` · float precision · zero · arithmetic functions                                 |
+| String         | str-01..07  | empty · Unicode/emoji · SQL metacharacters · 10 KB · `\n`/`\t` · backslash · transport-marker text |
+| NULL Handling  | null-01..08 | arithmetic · `IS NULL` · `COUNT` · UNIQUE NULLs · sort order · `NOT IN` gotcha                     |
+| Boolean Policy | bool-01..04 | stored as INTEGER 1/0 · `TYPEOF` · round-trip · multiple params                                    |
+| Type Casting   | cast-01..08 | `CAST` rules · integer vs real division · division by zero → NULL · type affinity                  |
 
 ### Schema & Constraints
 
@@ -138,6 +241,7 @@ Platform-specific quirks are documented in [Platform Notes](#platform-notes).
 | Quote Semantics       | quote-01..02   | single-quote = string · double-quote = identifier · backtick extension                                                                                       |
 | Column Names          | colname-01..03 | space in name · reserved keyword · Unicode characters                                                                                                        |
 | Semicolons & Comments | mstmt-01..06   | trailing `;` · `--` inline · `/* */` block · multiple statements · bare `begin` column doesn't mask a second statement                                       |
+| Multi-Statement Guard | mstmt-07       | trigger containing qualified `NEW.end` remains one statement; genuine second statement is rejected                                                           |
 | Query Placeholders    | qph-01..13     | anonymous `?` typing · comments · quoted identifiers · escaped strings · BLOBs · expressions · Android unsupported forms                                     |
 
 ### PRAGMA & Configuration
@@ -165,8 +269,8 @@ Platform-specific quirks are documented in [Platform Notes](#platform-notes).
 | Group                 | IDs            | Tests                                                                                                           |
 | --------------------- | -------------- | --------------------------------------------------------------------------------------------------------------- |
 | Transaction Atomicity | txn-01..05     | mixed-API rollback · in-txn visibility · cross-DB isolation                                                     |
-| Transaction State     | txstate-01..02 | nested begin fails · commit without begin fails                                                                 |
-| lastInsertId          | lid-01..05     | implicit rowid · explicit PK · UPDATE/DELETE return 0 · AUTOINCREMENT                                           |
+| Transaction State     | txstate-01..05 | nested/invalid boundaries · automatic state recovery after `OR ROLLBACK` through run/execute/runBatch           |
+| lastInsertId          | lid-01..06     | implicit/explicit rowid · UPDATE/DELETE 0 · AUTOINCREMENT · conservative 0 when a deleted rowid is reused       |
 | Migration Extras      | me-01..05      | version 0 skip · exact tracking · partial re-apply · failure isolation · version above 32-bit ceiling           |
 | Error Handling        | err-01..05     | missing table · syntax error · constraint violations                                                            |
 | Error Format          | ef-01..04      | `{ success, error: { code, message } }` shape · `SCREAMING_SNAKE_CASE` codes                                    |
@@ -175,7 +279,8 @@ Platform-specific quirks are documented in [Platform Notes](#platform-notes).
 | Recovery              | rec-01..05     | DB usable after run failure · rollback · syntax error · missing table · 3 consecutive errors                    |
 | Concurrency           | cc-01..05      | 10 parallel open · 10 parallel INSERT · 10 parallel query · rapid open/close · batch + query                    |
 | Multi-DB              | mdb-01..05     | two DBs simultaneously · `:memory:` lifecycle · cross-txn isolation · independent close                         |
-| Readonly              | ro-01..07      | write rejected · read allowed · `execute`/`runBatch`/`vacuum`/transaction rejected · `getSchemaVersion` allowed |
+| Readonly              | ro-01..08      | write rejected · read allowed · mutation APIs rejected · Web `query_only` tampering cannot enable DML RETURNING |
+| Bind Count            | bindcnt-01..04 | missing/extra values rejected for run/query; whole batch validated before any `transaction:false` write         |
 
 ### Scale & Real-world
 
@@ -190,51 +295,23 @@ Platform-specific quirks are documented in [Platform Notes](#platform-notes).
 
 ---
 
-## Fixed Issues
+## Regression Coverage Policy
 
-**Triggers with a multi-statement `BEGIN ... END` body (8 tests, all platforms) — fixed.**
-The single-statement guard used by `execute()` (`hasMultipleSqlStatements` — `src/sql.ts` for
-Web/Electron, `SQLiteHelpers.kt` for Android, `SQLiteHelpers.swift` for iOS: three independent
-ports of the same character-scanning algorithm) didn't track `BEGIN ... END` nesting, so a
-semicolon inside a trigger body (or a `CASE ... END` expression) was mistaken for a statement
-separator. This either rejected the `CREATE TRIGGER` outright
-(`'statements[n]' must contain exactly one SQL statement`) or — since `execute()` validates every
-statement in a batch before running any of them — silently aborted the whole batch, so earlier
-`CREATE TABLE` statements in the same call never ran either (`no such table: <side-effect table>`
-later, when the test queried it). Fixed by tracking `BEGIN`/`CASE` → `END` nesting depth (matched
-on keyword boundaries) in all three implementations; a semicolon only ends a statement at depth 0.
+Every production fix should add coverage at the lowest useful layer and, when practical,
+through the shared end-to-end suite:
 
-Regression coverage added alongside the fix:
+- parser or SQL-classification fixes should include unit tests for every maintained port
+  plus at least one shared suite case that exercises the public API;
+- platform-specific lifecycle, transaction, or bridge fixes should include native/unit
+  coverage where available and an end-to-end regression when the behavior is observable
+  from JavaScript;
+- performance fixes should preserve the release-scale stress counts and, when the cause is
+  not obvious, add or update a diagnostic benchmark that isolates the affected layer;
+- capability-dependent SQLite features should skip explicitly with a reason rather than
+  silently returning early or counting an unsupported path as passed.
 
-- `test/sql-guard.test.cjs` — trigger bodies with multiple statements and nested `CASE`, a `WHEN`
-  clause, and identifiers that contain `begin`/`end`/`case` as substrings (e.g. `end_date`,
-  `usecase`) without being mistaken for the keywords.
-- `trg-06..09` in the shared suite — the same scenarios exercised end-to-end against all four
-  real backends (Kotlin, Swift, WASM, node:sqlite), not just the JS-side guard.
-- `s-11` in the Load Tests tab — trigger-firing overhead under load (10,000 inserts through an
-  `AFTER INSERT` trigger with a `CASE` body), comparable against `s-01`'s no-trigger baseline.
-
-**Bare `begin`/`case` identifiers mistaken for trigger-body keywords (2026-07-07) — fixed.**
-A follow-up to the fix above, found via automated code review. SQLite does not reserve `BEGIN`
-or `CASE`, so `CREATE TABLE t(begin TEXT)` is valid SQL, but the guard's
-`i !== firstTokenStart` / unconditional-`CASE` heuristic couldn't tell a bare `begin`/`case`
-identifier from the real trigger-body keyword — it opened a block for either, which swallowed
-the following semicolon. `CREATE TABLE t(begin TEXT); DROP TABLE users` was misread as a single
-statement, so `execute()`'s per-statement guard let both run instead of rejecting the string.
-Fixed by adding two more signals in all three ports: a `BEGIN` only opens a block outside any
-parentheses (`parenDepth === 0` — a real trigger `BEGIN` never appears inside a column-definition
-list), and `CASE` only nests inside an already-open `BEGIN` block (a bare top-level `case` is now
-inert); a `.` immediately before either keyword (`NEW.begin`) also rules it out as a qualified
-column reference. Quoting (`"begin"`) already worked and is unaffected.
-
-Regression coverage added alongside the fix:
-
-- `test/sql-guard.test.cjs`, `SqlStatementGuardTest.kt`, and the new `SQLStatementGuardTests.swift`
-  (iOS previously had no direct unit test for this scanner, only indirect coverage through
-  plugin-level tests) — bare `begin`/`case` column names, a qualified `NEW.begin` reference in a
-  trigger `WHEN` clause, and confirmation that quoting and real trigger bodies still work.
-- `mstmt-06` in the shared suite — `execute()` rejects the two-statement `begin`-as-column string
-  end-to-end, and a legitimate single-statement use of a `begin` column still works.
+Historical bug narratives belong in `CHANGELOG.md` or issue/PR discussions. This document
+tracks the current test matrix, release procedure, and regression coverage expectations.
 
 ## Manual Testing
 
@@ -265,8 +342,8 @@ precise timing control, or native profiling tools.
 | `sqlite3_column_blob()` returns NULL for zero-length BLOBs                                                               | iOS                      | blob-03                    |
 | `:memory:` DB survives `close()` due to the connection pool                                                              | Android                  | mdb-02 (skip)              |
 | `compileStatement` does not support SELECT                                                                               | Android                  | run-08 (skip)              |
-| `rawQuery(String[])` binds all values as TEXT — fixed by scanning anonymous `?` placeholders and inlining typed literals | Android                  | qph-01..13                 |
-| `node:sqlite` stores all JS numbers as REAL — fixed by using `BigInt` for integers                                       | Electron                 | run-05 · bool-02           |
+| `rawQuery(String[])` binds all values as TEXT; query binding preserves types by inlining safe typed literals              | Android                  | qph-01..13                 |
+| `node:sqlite` stores JS numbers as REAL; integer semantics are preserved with `BigInt` where needed                       | Electron                 | run-05 · bool-02           |
 | `directory` accepts logical locations only (`default`, `documents`, `library`, `cache`)                                  | All                      | manual review · extras tab |
 | `cache` locations are not intended for cloud backup and may be purged by the OS                                          | iOS · Android · Electron | manual review              |
 | `NOT IN (…, NULL)` returns no rows — SQL NULL semantics                                                                  | All                      | null-07                    |

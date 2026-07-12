@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       stress:
-        description: Run stress benchmarks after the 365-test suite
+        description: Run stress benchmarks after the full suite
         required: true
         default: 'true'
         type: choice

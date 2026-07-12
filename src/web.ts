@@ -8,6 +8,8 @@ import type {
   OpenOptions,
   QueryOptions,
   RunBatchOptions,
+  RunManyOptions,
+  RunManyResult,
   RunOptions,
   SqliteDirectory,
   SqliteErrorCode,
@@ -17,14 +19,28 @@ import type {
   SqliteSuccess,
 } from './definitions';
 import { findDuplicateMigrationVersion, isValidMigrationVersion, MAX_MIGRATION_VERSION } from './migrations.js';
-import { assertSingleSqlStatement, isInsertStatement, isQueryResultStatement } from './sql.js';
+import {
+  assertSingleSqlStatement,
+  assertAnonymousBindParameterCount,
+  hasConflictClause,
+  hasRollbackConflictClause,
+  isInsertStatement,
+  isQueryResultStatement,
+} from './sql.js';
 
 type Promiser = (type: string, args?: any) => Promise<any>;
 
 interface DbEntry {
   dbId: string;
   readonly: boolean;
+  // Web maps every `directory` value to the same origin-scoped OPFS path, but the value
+  // is still tracked (not just `readonly`) so reopening with a different `directory`
+  // returns DB_ALREADY_OPEN like the other 3 platforms, instead of silently succeeding.
+  directory: SqliteDirectory;
   inTransaction: boolean;
+  // sqlite-wasm worker1 already returns the post-statement rowid with exec.
+  // Mirroring it removes a separate worker round-trip from the hot run() path.
+  lastInsertRowId: number;
 }
 
 const SAFE_DB_NAME = /^[A-Za-z0-9_-]+$/;
@@ -106,6 +122,14 @@ function validateStatements(value: unknown): string[] {
   return value.map((item, index) => validateSql(item, `statements[${index}]`));
 }
 
+function validateBindParameterCount(sql: string, count: number, label = 'values'): void {
+  try {
+    assertAnonymousBindParameterCount(sql, count, label);
+  } catch (err) {
+    throw new SqliteRuntimeError('INVALID_PARAMS', err instanceof Error ? err.message : String(err));
+  }
+}
+
 function validateMigrations(value: unknown): Migration[] {
   if (value === undefined) return [];
   if (!Array.isArray(value)) {
@@ -152,10 +176,10 @@ function validateRunBatchSet(value: unknown): { statement: string; values?: unkn
       throw new SqliteRuntimeError('INVALID_PARAMS', `set[${index}] must be an object`);
     }
     const batchItem = item as Record<string, unknown>;
-    return {
-      statement: validateSql(batchItem.statement, `set[${index}].statement`),
-      values: validateValues(batchItem.values, `set[${index}].values`),
-    };
+    const statement = validateSql(batchItem.statement, `set[${index}].statement`);
+    const values = validateValues(batchItem.values, `set[${index}].values`);
+    validateBindParameterCount(statement, values.length, `set[${index}].values`);
+    return { statement, values };
   });
 }
 
@@ -176,6 +200,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
   // Stores in-flight open Promises so concurrent open() calls for the same db coalesce.
   private pendingOpens = new Map<string, Promise<SqliteResult>>();
   private pendingOpenModes = new Map<string, boolean>();
+  private pendingOpenDirectories = new Map<string, SqliteDirectory>();
   private spCounter = 0;
   // Per-database serial queue: ensures only one operation runs at a time on each connection.
   private dbQueues = new Map<string, Promise<void>>();
@@ -223,9 +248,9 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
     return next;
   }
 
-  // MARK: - getPlatform
+  // MARK: - getPluginPlatform
 
-  async getPlatform(): Promise<SqliteResult<{ platform: SqlitePlatform }>> {
+  async getPluginPlatform(): Promise<SqliteResult<{ platform: SqlitePlatform }>> {
     return this.ok({ platform: 'web' });
   }
 
@@ -250,6 +275,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
   async open(options: OpenOptions): Promise<SqliteResult> {
     let database: string;
     let readonly: boolean;
+    let directory: SqliteDirectory;
     let migrations: Migration[];
     try {
       const opts = assertPlainObject(options, 'open');
@@ -257,7 +283,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
       readonly = opts.readonly === true;
       // Web accepts the shared directory enum for API parity, but every value
       // resolves to the origin-scoped OPFS database URL.
-      validateDirectory(opts.directory);
+      directory = validateDirectory(opts.directory);
       migrations = validateMigrations(opts.migrations);
       if (readonly && migrations.length) {
         throw new SqliteRuntimeError('MIGRATION_FAILED', 'migrations cannot run when readonly is true');
@@ -267,14 +293,35 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
     }
 
     return this.enqueue(database, async () => {
-      const openModeError = this.openModeError(database, readonly);
+      const openModeError = this.openModeError(database, readonly, directory);
       if (openModeError) return openModeError;
-      if (this.openDbs.has(database)) return this.okEmpty();
+      const existing = this.openDbs.get(database);
+      if (existing) {
+        if (migrations.length) {
+          if (existing.inTransaction) {
+            return this.err(
+              'MIGRATION_FAILED',
+              'open',
+              new Error(`open: migrations cannot run while a transaction is active on '${database}'`),
+            );
+          }
+          try {
+            const promiser = this.promiser;
+            if (!promiser) throw new Error('SQLite worker is not initialized');
+            await this.runMigrations(promiser, existing.dbId, migrations);
+            existing.lastInsertRowId = await getLastInsertRowId(promiser, existing.dbId);
+          } catch (err) {
+            return this.err('MIGRATION_FAILED', 'open', err);
+          }
+        }
+        return this.okEmpty();
+      }
 
       const pending = this.pendingOpens.get(database);
       if (pending) {
         const pendingReadonly = this.pendingOpenModes.get(database);
-        if (pendingReadonly !== readonly) {
+        const pendingDirectory = this.pendingOpenDirectories.get(database);
+        if (pendingReadonly !== readonly || pendingDirectory !== directory) {
           return this.err(
             'DB_ALREADY_OPEN',
             'open',
@@ -286,17 +333,24 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
         return pending;
       }
 
-      const openOp = this._doOpen(database, readonly, migrations).finally(() => {
+      const openOp = this._doOpen(database, readonly, directory, migrations).finally(() => {
         this.pendingOpens.delete(database);
         this.pendingOpenModes.delete(database);
+        this.pendingOpenDirectories.delete(database);
       });
       this.pendingOpens.set(database, openOp);
       this.pendingOpenModes.set(database, readonly);
+      this.pendingOpenDirectories.set(database, directory);
       return openOp;
     });
   }
 
-  private async _doOpen(database: string, readonly: boolean, migrations: Migration[]): Promise<SqliteResult> {
+  private async _doOpen(
+    database: string,
+    readonly: boolean,
+    directory: SqliteDirectory,
+    migrations: Migration[],
+  ): Promise<SqliteResult> {
     let openedDbId: string | null = null;
     let promiserForCleanup: Promiser | null = null;
     try {
@@ -307,7 +361,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
       promiserForCleanup = promiser;
 
       // Re-check after awaiting the promiser.
-      const openModeError = this.openModeError(database, readonly);
+      const openModeError = this.openModeError(database, readonly, directory);
       if (openModeError) return openModeError;
       if (this.openDbs.has(database)) return this.okEmpty();
 
@@ -318,6 +372,11 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
       const dbId: string = res.dbId;
       openedDbId = dbId;
 
+      // Matches the busy_timeout set by Android/iOS (5000ms) and Electron's `timeout`
+      // constructor option, so lock contention (e.g. a stale handle from another tab,
+      // see the OPFS caveat in README) retries briefly instead of failing immediately.
+      await execSql(promiser, dbId, 'PRAGMA busy_timeout = 5000');
+
       if (readonly) {
         await execSql(promiser, dbId, 'PRAGMA query_only = ON');
       } else {
@@ -326,7 +385,10 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
           await this.runMigrations(promiser, dbId, migrations);
         }
       }
-      this.openDbs.set(database, { dbId, readonly, inTransaction: false });
+      // last_insert_rowid() is connection-local and starts at zero. Migrations may
+      // contain inserts, so synchronize once after opening; run() keeps it mirrored.
+      const lastInsertRowId = migrations.length ? await getLastInsertRowId(promiser, dbId) : 0;
+      this.openDbs.set(database, { dbId, readonly, directory, inTransaction: false, lastInsertRowId });
       return this.okEmpty();
     } catch (err) {
       if (openedDbId && promiserForCleanup) {
@@ -484,6 +546,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
             await execSql(promiser, dbId, trimmed);
           }
           const total = (await getTotalChanges(promiser, dbId)) - before;
+          entry.lastInsertRowId = await getLastInsertRowId(promiser, dbId);
           if (sp) await execSql(promiser, dbId, `RELEASE "${sp}"`);
           return this.ok({ changes: total });
         } catch (innerErr) {
@@ -498,6 +561,10 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
           throw innerErr;
         }
       } catch (err) {
+        const entry = this.openDbs.get(database);
+        if (entry?.inTransaction && statements.some((sql) => hasRollbackConflictClause(sql))) {
+          entry.inTransaction = false;
+        }
         return this.err(errorCode(err, 'EXECUTE_FAILED'), 'execute', err);
       }
     });
@@ -514,6 +581,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
       database = validateName(opts.database);
       statement = validateSql(opts.statement, 'statement');
       values = validateValues(opts.values, 'values');
+      validateBindParameterCount(statement, values.length);
     } catch (err) {
       return this.err(errorCode(err, 'INVALID_PARAMS'), 'run', err);
     }
@@ -522,12 +590,34 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
         const { entry, promiser } = this.requireOpen(database, 'run');
         this.requireWritable(entry, database, 'run', 'EXECUTE_FAILED');
         const { dbId } = entry;
-        const before = await getTotalChanges(promiser, dbId);
-        await execSql(promiser, dbId, statement, values);
-        const [row] = await selectRows<{ id: number }>(promiser, dbId, 'SELECT last_insert_rowid() AS id');
-        const changes = (await getTotalChanges(promiser, dbId)) - before;
-        return this.ok({ changes, lastInsertId: isInsertStatement(statement) && changes > 0 ? (row?.id ?? 0) : 0 });
+        // worker1 can calculate total-change delta and post-statement rowid in the
+        // same exec request. A single pre-state query is still required for
+        // the conservative "unchanged/reused rowid => 0" contract. This reduces run()
+        // from five worker round-trips to two without weakening result semantics.
+        const beforeInsertRowId = entry.lastInsertRowId;
+        const outcome = await execRunSql(promiser, dbId, statement, values);
+        entry.lastInsertRowId = outcome.lastInsertRowId;
+        const changes = outcome.changes;
+        // An UPSERT resolved via its DO UPDATE arm leaves last_insert_rowid() pointing at
+        // the connection's last real insert, not this statement's affected row — see
+        // hasConflictClause in sql.ts.
+        const isReliableInsert =
+          isInsertStatement(statement) &&
+          changes > 0 &&
+          !hasConflictClause(statement) &&
+          outcome.lastInsertRowId !== beforeInsertRowId;
+        return this.ok({ changes, lastInsertId: isReliableInsert ? outcome.lastInsertRowId : 0 });
       } catch (err) {
+        const entry = this.openDbs.get(database);
+        if (entry) {
+          try {
+            const promiser = this.promiser;
+            if (promiser) entry.lastInsertRowId = await getLastInsertRowId(promiser, entry.dbId);
+          } catch {
+            /* keep the last known mirror; the original SQL error is authoritative */
+          }
+        }
+        if (entry?.inTransaction && hasRollbackConflictClause(statement)) entry.inTransaction = false;
         return this.err(errorCode(err, 'EXECUTE_FAILED'), 'run', err);
       }
     });
@@ -566,6 +656,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
             await execSql(promiser, dbId, item.statement, item.values ?? []);
           }
           const totalChanges = (await getTotalChanges(promiser, dbId)) - before;
+          entry.lastInsertRowId = await getLastInsertRowId(promiser, dbId);
           if (sp) await execSql(promiser, dbId, `RELEASE "${sp}"`);
           return this.ok({ changes: totalChanges, lastInsertId: 0 });
         } catch (innerErr) {
@@ -580,7 +671,106 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
           throw innerErr;
         }
       } catch (err) {
+        const entry = this.openDbs.get(database);
+        if (entry) {
+          try {
+            const promiser = this.promiser;
+            if (promiser) entry.lastInsertRowId = await getLastInsertRowId(promiser, entry.dbId);
+          } catch {
+            /* preserve original batch error */
+          }
+        }
+        if (entry?.inTransaction && set.some((item) => hasRollbackConflictClause(item.statement))) {
+          entry.inTransaction = false;
+        }
         return this.err(errorCode(err, 'EXECUTE_FAILED'), 'runBatch', err);
+      }
+    });
+  }
+
+  // MARK: - runMany
+
+  async runMany(options: RunManyOptions): Promise<SqliteResult<RunManyResult>> {
+    let database: string;
+    let statement: string;
+    let valueSets: unknown[][];
+    let transaction: boolean;
+    let returnResults: boolean;
+    try {
+      const opts = assertPlainObject(options, 'runMany');
+      database = validateName(opts.database);
+      statement = validateSql(opts.statement, 'statement');
+      if (!Array.isArray(opts.values) || opts.values.length === 0) {
+        throw new SqliteRuntimeError('INVALID_PARAMS', "'values' must be a non-empty array of value arrays");
+      }
+      valueSets = opts.values.map((values, index) => {
+        const decoded = validateValues(values, `values[${index}]`);
+        validateBindParameterCount(statement, decoded.length);
+        return decoded;
+      });
+      transaction = opts.transaction !== false;
+      returnResults = opts.returnResults === true;
+    } catch (err) {
+      return this.err(errorCode(err, 'INVALID_PARAMS'), 'runMany', err);
+    }
+
+    return this.enqueue(database, async () => {
+      try {
+        const { entry, promiser } = this.requireOpen(database, 'runMany');
+        this.requireWritable(entry, database, 'runMany', 'EXECUTE_FAILED');
+        if (transaction && entry.inTransaction) {
+          throw new SqliteRuntimeError(
+            'TRANSACTION_FAILED',
+            `runMany: a transaction is already active on '${database}'`,
+          );
+        }
+        const sp = transaction ? `sp_${++this.spCounter}` : null;
+        if (sp) await execSql(promiser, entry.dbId, `SAVEPOINT "${sp}"`);
+        const before = await getTotalChanges(promiser, entry.dbId);
+        const results: { changes: number; lastInsertId: number }[] | undefined = returnResults ? [] : undefined;
+        try {
+          for (const values of valueSets) {
+            if (results) {
+              const beforeId = entry.lastInsertRowId;
+              const outcome = await execRunSql(promiser, entry.dbId, statement, values);
+              entry.lastInsertRowId = outcome.lastInsertRowId;
+              const reliable =
+                isInsertStatement(statement) &&
+                outcome.changes > 0 &&
+                !hasConflictClause(statement) &&
+                outcome.lastInsertRowId !== beforeId;
+              results.push({ changes: outcome.changes, lastInsertId: reliable ? outcome.lastInsertRowId : 0 });
+            } else {
+              await execSql(promiser, entry.dbId, statement, values);
+            }
+          }
+          const changes = (await getTotalChanges(promiser, entry.dbId)) - before;
+          if (!results) entry.lastInsertRowId = await getLastInsertRowId(promiser, entry.dbId);
+          if (sp) await execSql(promiser, entry.dbId, `RELEASE "${sp}"`);
+          return this.ok({ changes, lastInsertId: 0 as const, ...(results ? { results } : {}) });
+        } catch (innerErr) {
+          if (sp) {
+            try {
+              await execSql(promiser, entry.dbId, `ROLLBACK TO "${sp}"`);
+              await execSql(promiser, entry.dbId, `RELEASE "${sp}"`);
+            } catch {
+              /* preserve original error */
+            }
+          }
+          throw innerErr;
+        }
+      } catch (err) {
+        const entry = this.openDbs.get(database);
+        if (entry) {
+          try {
+            const promiser = this.promiser;
+            if (promiser) entry.lastInsertRowId = await getLastInsertRowId(promiser, entry.dbId);
+          } catch {
+            /* preserve original error */
+          }
+          if (entry.inTransaction && hasRollbackConflictClause(statement)) entry.inTransaction = false;
+        }
+        return this.err(errorCode(err, 'EXECUTE_FAILED'), 'runMany', err);
       }
     });
   }
@@ -602,6 +792,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
         );
       }
       values = validateValues(opts.values, 'values');
+      validateBindParameterCount(statement, values.length);
     } catch (err) {
       return this.err(errorCode(err, 'INVALID_PARAMS'), 'query', err);
     }
@@ -609,9 +800,27 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
       try {
         const { entry, promiser } = this.requireOpen(database, 'query');
         const { dbId } = entry;
-        const rows = await selectRows<T>(promiser, dbId, statement, values);
+        // Web OPFS does not expose a native read-only open flag through worker1.
+        // Re-assert query_only around every read so `PRAGMA query_only=OFF` cannot
+        // turn a logical readonly connection into a writable one for a later call.
+        if (entry.readonly) await execSql(promiser, dbId, 'PRAGMA query_only = ON');
+        let rows: T[];
+        try {
+          rows = await selectRows<T>(promiser, dbId, statement, values);
+          if (isInsertStatement(statement)) entry.lastInsertRowId = await getLastInsertRowId(promiser, dbId);
+        } finally {
+          if (entry.readonly) {
+            try {
+              await execSql(promiser, dbId, 'PRAGMA query_only = ON');
+            } catch {
+              /* the original query error is more useful */
+            }
+          }
+        }
         return this.ok({ rows });
       } catch (err) {
+        const entry = this.openDbs.get(database);
+        if (entry?.inTransaction && hasRollbackConflictClause(statement)) entry.inTransaction = false;
         return this.err(errorCode(err, 'QUERY_FAILED'), 'query', err);
       }
     });
@@ -748,9 +957,9 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
     }
   }
 
-  private openModeError(database: string, readonly: boolean): SqliteFailure | null {
+  private openModeError(database: string, readonly: boolean, directory: SqliteDirectory): SqliteFailure | null {
     const existing = this.openDbs.get(database);
-    if (!existing || existing.readonly === readonly) return null;
+    if (!existing || (existing.readonly === readonly && existing.directory === directory)) return null;
     return this.err(
       'DB_ALREADY_OPEN',
       'open',
@@ -862,6 +1071,36 @@ async function selectRows<T = Record<string, unknown>>(
 async function getTotalChanges(promiser: Promiser, dbId: string): Promise<number> {
   const [row] = await selectRows<{ c: number }>(promiser, dbId, 'SELECT total_changes() AS c');
   return row?.c ?? 0;
+}
+
+async function getLastInsertRowId(promiser: Promiser, dbId: string): Promise<number> {
+  const [row] = await selectRows<{ id: number }>(promiser, dbId, 'SELECT last_insert_rowid() AS id');
+  return row?.id ?? 0;
+}
+
+async function execRunSql(
+  promiser: Promiser,
+  dbId: string,
+  sql: string,
+  bind: unknown[],
+): Promise<{ changes: number; lastInsertRowId: number }> {
+  const response = await promiser('exec', {
+    dbId,
+    sql,
+    bind,
+    countChanges: 64,
+    lastInsertRowId: true,
+  });
+  const result = response?.result ?? response ?? {};
+  return {
+    changes: integerResult(result.changeCount),
+    lastInsertRowId: integerResult(result.lastInsertRowId),
+  };
+}
+
+function integerResult(value: unknown): number {
+  if (typeof value === 'bigint') return Number(value);
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
 function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {

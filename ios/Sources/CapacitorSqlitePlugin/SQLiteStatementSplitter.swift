@@ -2,7 +2,20 @@
 import Foundation
 
 extension SQLiteHelpers {
+    private static let statementSplitCache: NSCache<NSString, NSNumber> = {
+        let cache = NSCache<NSString, NSNumber>()
+        cache.countLimit = 256
+        return cache
+    }()
+
     static func hasMultipleStatements(_ sql: String) -> Bool {
+        if let cached = statementSplitCache.object(forKey: sql as NSString) { return cached.boolValue }
+        let result = computeHasMultipleStatements(sql)
+        statementSplitCache.setObject(NSNumber(value: result), forKey: sql as NSString)
+        return result
+    }
+
+    private static func computeHasMultipleStatements(_ sql: String) -> Bool {
         var idx = sql.startIndex
         var blockDepth = 0
         // Tracks '(' / ')' nesting. SQLite does not reserve BEGIN as a keyword, so
@@ -63,6 +76,7 @@ extension SQLiteHelpers {
             guard !isQualifiedRef, depth > 0 else { return depth }
             return depth + 1
         case "END":
+            guard !isQualifiedRef else { return depth }
             return max(0, depth - 1)
         default:
             return depth

@@ -9,6 +9,8 @@ import type {
   OpenOptions,
   QueryOptions,
   RunBatchOptions,
+  RunManyOptions,
+  RunManyResult,
   RunOptions,
   SqliteDirectory,
   SqliteErrorCode,
@@ -18,7 +20,14 @@ import type {
   SqliteSuccess,
 } from '../../src/definitions';
 import { findDuplicateMigrationVersion, isValidMigrationVersion, MAX_MIGRATION_VERSION } from '../../src/migrations.js';
-import { assertSingleSqlStatement, isInsertStatement, isQueryResultStatement } from '../../src/sql.js';
+import {
+  assertSingleSqlStatement,
+  assertAnonymousBindParameterCount,
+  hasConflictClause,
+  hasRollbackConflictClause,
+  isInsertStatement,
+  isQueryResultStatement,
+} from '../../src/sql.js';
 
 export interface ElectronSqliteBackendPaths {
   userData: string;
@@ -40,6 +49,11 @@ interface DatabaseEntry {
   readonly: boolean;
   path: string;
   inTransaction: boolean;
+}
+
+export interface CompactQueryRows {
+  columns: string[];
+  values: unknown[][];
 }
 
 const SAFE_DB_NAME = /^[A-Za-z0-9_-]+$/;
@@ -164,6 +178,14 @@ function validateStatements(value: unknown): string[] {
   return value.map((item, index) => validateSql(item, `statements[${index}]`));
 }
 
+function validateBindParameterCount(sql: string, count: number, label = 'values'): void {
+  try {
+    assertAnonymousBindParameterCount(sql, count, label);
+  } catch (err) {
+    throw new SqliteRuntimeError('INVALID_PARAMS', err instanceof Error ? err.message : String(err));
+  }
+}
+
 function validateMigrations(value: unknown): Migration[] {
   if (value === undefined) return [];
   if (!Array.isArray(value)) {
@@ -210,10 +232,10 @@ function validateRunBatchSet(value: unknown): RunBatchItem[] {
       throw new SqliteRuntimeError('INVALID_PARAMS', `set[${index}] must be an object`);
     }
     const batchItem = item as Record<string, unknown>;
-    return {
-      statement: validateSql(batchItem.statement, `set[${index}].statement`),
-      values: validateValues(batchItem.values, `set[${index}].values`),
-    };
+    const statement = validateSql(batchItem.statement, `set[${index}].statement`);
+    const values = validateValues(batchItem.values, `set[${index}].values`);
+    validateBindParameterCount(statement, values.length, `set[${index}].values`);
+    return { statement, values };
   });
 }
 
@@ -260,9 +282,9 @@ export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
     };
   }
 
-  // MARK: - getPlatform
+  // MARK: - getPluginPlatform
 
-  async getPlatform(): Promise<SqliteResult<{ platform: SqlitePlatform }>> {
+  async getPluginPlatform(): Promise<SqliteResult<{ platform: SqlitePlatform }>> {
     return this.ok({ platform: 'electron' });
   }
 
@@ -270,6 +292,21 @@ export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
 
   async isAvailable(): Promise<SqliteResult<{ available: boolean }>> {
     return this.ok({ available: isSqliteAvailable() });
+  }
+
+  /** Closes every connection before the owning worker exits. */
+  async shutdown(): Promise<SqliteResult> {
+    let firstError: unknown = null;
+    for (const entry of this.databases.values()) {
+      try {
+        if (entry.db.isTransaction) entry.db.exec('ROLLBACK');
+        entry.db.close();
+      } catch (err) {
+        firstError ??= err;
+      }
+    }
+    this.databases.clear();
+    return firstError ? this.err('CLOSE_FAILED', 'shutdown', firstError) : this.okEmpty();
   }
 
   // MARK: - open
@@ -301,7 +338,24 @@ export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
 
     const openModeError = this.openModeError(key, database, readonly, dbPath);
     if (openModeError) return openModeError;
-    if (this.databases.has(key)) return this.okEmpty();
+    const existing = this.databases.get(key);
+    if (existing) {
+      if (migrations.length) {
+        if (existing.db.isTransaction) {
+          return this.err(
+            'MIGRATION_FAILED',
+            'open',
+            new Error(`open: migrations cannot run while a transaction is active on '${database}'`),
+          );
+        }
+        try {
+          this.runMigrations(existing.db, migrations);
+        } catch (err) {
+          return this.err(errorCode(err, 'MIGRATION_FAILED'), 'open', err);
+        }
+      }
+      return this.okEmpty();
+    }
 
     const pending = this.pendingOpens.get(key);
     if (pending) {
@@ -491,6 +545,13 @@ export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
         throw innerErr;
       }
     } catch (err) {
+      const opts =
+        typeof options === 'object' && options !== null ? (options as unknown as Record<string, unknown>) : null;
+      const database = typeof opts?.database === 'string' ? opts.database : null;
+      if (database) {
+        const entry = this.databases.get(databaseKey(database));
+        if (entry) entry.inTransaction = entry.db.isTransaction;
+      }
       return this.err(errorCode(err, 'EXECUTE_FAILED'), 'execute', err);
     }
   }
@@ -503,16 +564,35 @@ export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
       const database = validateName(opts.database);
       const statement = validateSql(opts.statement, 'statement');
       const values = convertValues(validateValues(opts.values, 'values'));
+      validateBindParameterCount(statement, values.length);
       const entry = this.requireOpenEntry(database, 'run');
       this.requireWritable(entry, database, 'run', 'EXECUTE_FAILED');
       const before = totalChanges(entry.db);
+      const beforeId = lastInsertRowId(entry.db);
       const result = entry.db.prepare(statement).run(...values);
       const changes = totalChanges(entry.db) - before;
+      // An UPSERT resolved via its DO UPDATE arm leaves lastInsertRowid pointing at the
+      // connection's last real insert, not this statement's affected row — see
+      // hasConflictClause in src/sql.ts.
+      const resultId = toNumber(result.lastInsertRowid);
+      const isReliableInsert =
+        isInsertStatement(statement) && changes > 0 && !hasConflictClause(statement) && resultId !== beforeId;
       return this.ok({
         changes,
-        lastInsertId: isInsertStatement(statement) && changes > 0 ? toNumber(result.lastInsertRowid) : 0,
+        lastInsertId: isReliableInsert ? resultId : 0,
       });
     } catch (err) {
+      const opts =
+        typeof options === 'object' && options !== null ? (options as unknown as Record<string, unknown>) : null;
+      const database = typeof opts?.database === 'string' ? opts.database : null;
+      const statement = typeof opts?.statement === 'string' ? opts.statement : '';
+      if (database) {
+        const entry = this.databases.get(databaseKey(database));
+        if (entry) entry.inTransaction = entry.db.isTransaction;
+      }
+      // Keep the scanner call here as an explicit regression signal for runtimes
+      // where isTransaction is unavailable in a future node:sqlite compatibility layer.
+      void hasRollbackConflictClause(statement);
       return this.err(errorCode(err, 'EXECUTE_FAILED'), 'run', err);
     }
   }
@@ -534,12 +614,18 @@ export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
         );
       }
       const db = entry.db;
+      // Compile each distinct SQL string once. StatementSync resets itself after
+      // run(), so repeated batch items only bind and step.
+      const prepared = new Map<string, ReturnType<DatabaseSync['prepare']>>();
+      for (const item of set) {
+        if (!prepared.has(item.statement)) prepared.set(item.statement, db.prepare(item.statement));
+      }
 
       if (transaction) db.exec('BEGIN');
       try {
         const before = totalChanges(db);
         for (const item of set) {
-          db.prepare(item.statement).run(...convertValues(item.values));
+          prepared.get(item.statement)!.run(...convertValues(item.values));
         }
         const changed = totalChanges(db) - before;
         if (transaction) db.exec('COMMIT');
@@ -555,7 +641,85 @@ export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
         throw innerErr;
       }
     } catch (err) {
+      const opts =
+        typeof options === 'object' && options !== null ? (options as unknown as Record<string, unknown>) : null;
+      const database = typeof opts?.database === 'string' ? opts.database : null;
+      if (database) {
+        const entry = this.databases.get(databaseKey(database));
+        if (entry) entry.inTransaction = entry.db.isTransaction;
+      }
       return this.err(errorCode(err, 'EXECUTE_FAILED'), 'runBatch', err);
+    }
+  }
+
+  // MARK: - runMany
+
+  async runMany(options: RunManyOptions): Promise<SqliteResult<RunManyResult>> {
+    try {
+      const opts = assertPlainObject(options, 'runMany');
+      const database = validateName(opts.database);
+      const statement = validateSql(opts.statement, 'statement');
+      if (!Array.isArray(opts.values) || opts.values.length === 0) {
+        throw new SqliteRuntimeError('INVALID_PARAMS', "'values' must be a non-empty array of value arrays");
+      }
+      const valueSets = opts.values.map((values, index) => {
+        const validated = validateValues(values, `values[${index}]`);
+        validateBindParameterCount(statement, validated.length);
+        return convertValues(validated);
+      });
+      const transaction = opts.transaction !== false;
+      const returnResults = opts.returnResults === true;
+      const entry = this.requireOpenEntry(database, 'runMany');
+      this.requireWritable(entry, database, 'runMany', 'EXECUTE_FAILED');
+      if (transaction && entry.inTransaction) {
+        throw new SqliteRuntimeError('TRANSACTION_FAILED', `runMany: a transaction is already active on '${database}'`);
+      }
+      const db = entry.db;
+      const prepared = db.prepare(statement);
+      const results: { changes: number; lastInsertId: number }[] | undefined = returnResults ? [] : undefined;
+      if (transaction) db.exec('BEGIN');
+      try {
+        const beforeTotal = totalChanges(db);
+        if (results) {
+          let beforeId = lastInsertRowId(db);
+          for (const values of valueSets) {
+            const beforeItem = totalChanges(db);
+            const runResult = prepared.run(...values);
+            const afterItem = totalChanges(db);
+            const resultId = toNumber(runResult.lastInsertRowid);
+            const reliable =
+              isInsertStatement(statement) &&
+              afterItem > beforeItem &&
+              !hasConflictClause(statement) &&
+              resultId !== beforeId;
+            results.push({ changes: afterItem - beforeItem, lastInsertId: reliable ? resultId : 0 });
+            beforeId = resultId;
+          }
+        } else {
+          for (const values of valueSets) prepared.run(...values);
+        }
+        const changes = totalChanges(db) - beforeTotal;
+        if (transaction) db.exec('COMMIT');
+        return this.ok({ changes, lastInsertId: 0 as const, ...(results ? { results } : {}) });
+      } catch (innerErr) {
+        if (transaction) {
+          try {
+            db.exec('ROLLBACK');
+          } catch {
+            /* preserve original error */
+          }
+        }
+        throw innerErr;
+      }
+    } catch (err) {
+      const opts =
+        typeof options === 'object' && options !== null ? (options as unknown as Record<string, unknown>) : null;
+      const database = typeof opts?.database === 'string' ? opts.database : null;
+      if (database) {
+        const entry = this.databases.get(databaseKey(database));
+        if (entry) entry.inTransaction = entry.db.isTransaction;
+      }
+      return this.err(errorCode(err, 'EXECUTE_FAILED'), 'runMany', err);
     }
   }
 
@@ -573,6 +737,7 @@ export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
         );
       }
       const values = convertValues(validateValues(opts.values, 'values'));
+      validateBindParameterCount(statement, values.length);
       const db = this.requireOpen(database, 'query');
       const stmt = db.prepare(statement);
       if (typeof stmt.setReadBigInts === 'function') {
@@ -580,6 +745,36 @@ export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
       }
       const rows = stmt.all(...values).map((row) => normalizeRow(row as Record<string, unknown>)) as T[];
       return this.ok({ rows });
+    } catch (err) {
+      return this.err(errorCode(err, 'QUERY_FAILED'), 'query', err);
+    }
+  }
+
+  /**
+   * Electron IPC-only query representation. Repeating property names in every row
+   * made a 100k-row result extremely expensive to clone worker→main→renderer.
+   * The renderer reconstructs the documented row objects after both IPC hops.
+   */
+  async queryCompact(options: QueryOptions): Promise<SqliteResult<{ compactRows: CompactQueryRows }>> {
+    try {
+      const opts = assertPlainObject(options, 'query');
+      const database = validateName(opts.database);
+      const statement = validateSql(opts.statement, 'statement');
+      if (!isQueryResultStatement(statement)) {
+        throw new SqliteRuntimeError(
+          'INVALID_PARAMS',
+          "'statement' must be a SELECT, PRAGMA, EXPLAIN, or DML statement with RETURNING",
+        );
+      }
+      const values = convertValues(validateValues(opts.values, 'values'));
+      validateBindParameterCount(statement, values.length);
+      const db = this.requireOpen(database, 'query');
+      const stmt = db.prepare(statement);
+      if (typeof stmt.setReadBigInts === 'function') stmt.setReadBigInts(true);
+      const rawRows = stmt.all(...values) as Record<string, unknown>[];
+      const columns = rawRows.length > 0 ? Object.keys(rawRows[0]) : [];
+      const compactValues = rawRows.map((row) => columns.map((column) => normalizeValue(row[column])));
+      return this.ok({ compactRows: { columns, values: compactValues } });
     } catch (err) {
       return this.err(errorCode(err, 'QUERY_FAILED'), 'query', err);
     }
@@ -622,6 +817,12 @@ export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
       entry.inTransaction = false;
       return this.okEmpty();
     } catch (err) {
+      const opts = typeof options === 'object' && options !== null ? (options as Record<string, unknown>) : null;
+      const database = typeof opts?.database === 'string' ? opts.database : null;
+      if (database) {
+        const entry = this.databases.get(databaseKey(database));
+        if (entry) entry.inTransaction = entry.db.isTransaction;
+      }
       return this.err(errorCode(err, 'TRANSACTION_FAILED'), 'commitTransaction', err);
     }
   }
@@ -641,6 +842,12 @@ export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
       entry.inTransaction = false;
       return this.okEmpty();
     } catch (err) {
+      const opts = typeof options === 'object' && options !== null ? (options as Record<string, unknown>) : null;
+      const database = typeof opts?.database === 'string' ? opts.database : null;
+      if (database) {
+        const entry = this.databases.get(databaseKey(database));
+        if (entry) entry.inTransaction = entry.db.isTransaction;
+      }
       return this.err(errorCode(err, 'TRANSACTION_FAILED'), 'rollbackTransaction', err);
     }
   }
@@ -747,6 +954,11 @@ function toNumber(v: number | bigint | undefined | null): number {
 function totalChanges(db: DatabaseSync): number {
   const row = db.prepare('SELECT total_changes() AS c').get() as { c: number | bigint } | undefined;
   return toNumber(row?.c);
+}
+
+function lastInsertRowId(db: DatabaseSync): number {
+  const row = db.prepare('SELECT last_insert_rowid() AS id').get() as { id: number | bigint } | undefined;
+  return toNumber(row?.id);
 }
 
 function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {

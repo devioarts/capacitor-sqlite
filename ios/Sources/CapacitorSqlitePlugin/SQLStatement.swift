@@ -2,7 +2,30 @@ import Foundation
 
 // swiftlint:disable cyclomatic_complexity
 enum SQLStatement {
+    private static let typeCache: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 256
+        return cache
+    }()
+    private static let conflictCache: NSCache<NSString, NSNumber> = {
+        let cache = NSCache<NSString, NSNumber>()
+        cache.countLimit = 256
+        return cache
+    }()
+    private static let returningCache: NSCache<NSString, NSNumber> = {
+        let cache = NSCache<NSString, NSNumber>()
+        cache.countLimit = 256
+        return cache
+    }()
+
     static func type(_ sql: String) -> String {
+        if let cached = typeCache.object(forKey: sql as NSString) { return cached as String }
+        let result = computeType(sql)
+        typeCache.setObject(result as NSString, forKey: sql as NSString)
+        return result
+    }
+
+    private static func computeType(_ sql: String) -> String {
         let first = readKeyword(sql, from: skipIgnorable(sql, from: sql.startIndex))
         guard let first else { return "" }
         if first.keyword != "WITH" { return first.keyword }
@@ -20,9 +43,30 @@ enum SQLStatement {
             return true
         }
         if stmtType == "INSERT" || stmtType == "UPDATE" || stmtType == "DELETE" || stmtType == "REPLACE" {
-            return hasKeyword(sql, target: "RETURNING")
+            return cachedKeyword(sql, target: "RETURNING", cache: returningCache)
         }
         return false
+    }
+
+    // `INSERT ... ON CONFLICT (...) DO UPDATE ...` (SQLite upsert, 3.24+) can resolve as an
+    // UPDATE of an existing row instead of an INSERT. SQLite only updates
+    // sqlite3_last_insert_rowid() on an actual row-table INSERT, so when the DO UPDATE arm
+    // runs, it still reflects whatever the connection's last *real* insert was — a stale,
+    // unrelated value. SQLiteHelpers.run() uses this to fall back to lastInsertId 0 for any
+    // statement that could take that arm.
+    static func hasConflictClause(_ sql: String) -> Bool {
+        cachedKeyword(sql, target: "CONFLICT", cache: conflictCache)
+    }
+
+    private static func cachedKeyword(
+        _ sql: String,
+        target: String,
+        cache: NSCache<NSString, NSNumber>
+    ) -> Bool {
+        if let cached = cache.object(forKey: sql as NSString) { return cached.boolValue }
+        let result = hasKeyword(sql, target: target)
+        cache.setObject(NSNumber(value: result), forKey: sql as NSString)
+        return result
     }
 
     // `WITH cte1 AS (...), cte2 AS (...) <main statement>` — walks past each CTE

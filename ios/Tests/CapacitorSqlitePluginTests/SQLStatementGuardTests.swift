@@ -72,4 +72,24 @@ class SQLStatementGuardTests: XCTestCase {
             )
         )
     }
+
+    func testDetectsUpsertConflictClauseSoRunAvoidsStaleLastInsertId() {
+        XCTAssertTrue(SQLStatement.hasConflictClause("INSERT INTO t VALUES (1) ON CONFLICT(id) DO UPDATE SET v = 1"))
+        XCTAssertTrue(SQLStatement.hasConflictClause("INSERT INTO t VALUES (1) ON CONFLICT(id) DO NOTHING"))
+        XCTAssertFalse(SQLStatement.hasConflictClause("INSERT OR REPLACE INTO t VALUES (1)"))
+        XCTAssertFalse(SQLStatement.hasConflictClause("INSERT OR IGNORE INTO t VALUES (1)"))
+        XCTAssertFalse(SQLStatement.hasConflictClause("INSERT INTO t VALUES (1)"))
+        XCTAssertFalse(SQLStatement.hasConflictClause("UPDATE t SET v = 1"))
+        // The word must be a real keyword, not text inside a string/quoted identifier/comment.
+        XCTAssertFalse(SQLStatement.hasConflictClause("INSERT INTO t (note) VALUES ('ON CONFLICT nice')"))
+        XCTAssertFalse(SQLStatement.hasConflictClause("INSERT INTO t (\"conflict\") VALUES (1)"))
+        XCTAssertFalse(SQLStatement.hasConflictClause("INSERT INTO t VALUES (1) /* on conflict */"))
+    }
+
+    func testQualifiedNewEndDoesNotCloseTriggerBodyEarly() {
+        let trigger = "CREATE TRIGGER trg AFTER INSERT ON t BEGIN INSERT INTO log VALUES " +
+            "(NEW.end); INSERT INTO log VALUES (2); END"
+        XCTAssertFalse(SQLiteHelpers.hasMultipleStatements(trigger))
+        XCTAssertTrue(SQLiteHelpers.hasMultipleStatements(trigger + "; SELECT 1"))
+    }
 }

@@ -4,6 +4,7 @@ const config: CapacitorConfig = {
   appId: 'com.devioarts.capacitor.sqlite',
   appName: 'cap-sqlite',
   webDir: 'dist',
+  loggingBehavior: 'none'
 };
 
 export default config;

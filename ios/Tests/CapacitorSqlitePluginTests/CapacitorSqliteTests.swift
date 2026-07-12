@@ -341,4 +341,47 @@ class CapacitorSqliteTests: XCTestCase {
         XCTAssertThrowsError(try impl.open(database: ":memory:", readonly: true, migrations: migrations))
     }
 
+    func testPendingMigrationAppliesWhileConnectionAlreadyOpen() throws {
+        try impl.open(database: ":memory:", readonly: false, migrations: [])
+        let migrations: [[String: Any]] = [
+            ["version": 1, "statements": ["CREATE TABLE added_live (v INTEGER)"]]
+        ]
+        try impl.open(database: ":memory:", readonly: false, migrations: migrations)
+        XCTAssertEqual(try impl.getSchemaVersion(database: ":memory:"), 1)
+        let rows = try impl.query(
+            database: ":memory:",
+            statement: "SELECT name FROM sqlite_master WHERE name='added_live'",
+            values: []
+        )
+        XCTAssertEqual(rows.count, 1)
+    }
+
+    func testMigrationWhileTransactionActiveIsRejectedWithoutEndingTransaction() throws {
+        try impl.open(database: ":memory:", readonly: false, migrations: [])
+        try impl.beginTransaction(database: ":memory:")
+        let migrations: [[String: Any]] = [
+            ["version": 1, "statements": ["CREATE TABLE must_not_exist (v INTEGER)"]]
+        ]
+        XCTAssertThrowsError(
+            try impl.open(database: ":memory:", readonly: false, migrations: migrations)
+        )
+        XCTAssertNoThrow(try impl.rollbackTransaction(database: ":memory:"))
+        XCTAssertEqual(try impl.getSchemaVersion(database: ":memory:"), 0)
+    }
+
+    func testOrRollbackSynchronizesTransactionState() throws {
+        try impl.open(database: ":memory:", readonly: false, migrations: [])
+        try impl.execute(database: ":memory:", statements: [
+            "CREATE TABLE t (v INTEGER UNIQUE)",
+            "INSERT INTO t VALUES (1)"
+        ])
+        try impl.beginTransaction(database: ":memory:")
+        _ = try impl.run(database: ":memory:", statement: "INSERT INTO t VALUES (2)", values: [])
+        XCTAssertThrowsError(
+            try impl.run(database: ":memory:", statement: "INSERT OR ROLLBACK INTO t VALUES (1)", values: [])
+        )
+        XCTAssertNoThrow(try impl.beginTransaction(database: ":memory:"))
+        XCTAssertNoThrow(try impl.rollbackTransaction(database: ":memory:"))
+    }
+
 }

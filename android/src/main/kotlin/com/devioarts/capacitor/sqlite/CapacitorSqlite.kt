@@ -11,7 +11,6 @@ internal class CapacitorSqliteException(
 ) : Exception(message, cause)
 
 internal class CapacitorSqlite(private val context: Context) {
-
     private val databases = HashMap<String, Database>()
 
     // MARK: - isAvailable
@@ -21,11 +20,16 @@ internal class CapacitorSqlite(private val context: Context) {
     // MARK: - open
 
     @Throws(Exception::class)
-    fun open(database: String, readonly: Boolean, directory: String?, migrations: List<Map<String, Any?>>) {
+    fun open(
+        database: String,
+        readonly: Boolean,
+        directory: String?,
+        migrations: List<Map<String, Any?>>,
+    ) {
         if (database != ":memory:" && !database.matches(Regex("^[A-Za-z0-9_-]+\$"))) {
             throw CapacitorSqliteException(
                 "INVALID_NAME",
-                "Invalid database name '$database'. Use only A-Z, a-z, 0-9, _ or -"
+                "Invalid database name '$database'. Use only A-Z, a-z, 0-9, _ or -",
             )
         }
         val path = if (database == ":memory:") ":memory:" else databasePath(database, directory)
@@ -38,22 +42,23 @@ internal class CapacitorSqlite(private val context: Context) {
         // Atomically get-or-create the Database instance.
         // Storing before open() ensures concurrent callers share the same instance,
         // and Database.open() is idempotent (serialized by its ReentrantLock).
-        val db = synchronized(this) {
-            val existing = databases[database]
-            if (existing != null) {
-                if (existing.readonly != readonly || existing.path != path) {
-                    throw CapacitorSqliteException(
-                        "DB_ALREADY_OPEN",
-                        "open: '$database' is already open with a different readonly mode or directory"
-                    )
-                }
-                existing
-            } else {
-                Database(name = database, path = path, readonly = readonly).also {
-                    databases[database] = it
+        val db =
+            synchronized(this) {
+                val existing = databases[database]
+                if (existing != null) {
+                    if (existing.readonly != readonly || existing.path != path) {
+                        throw CapacitorSqliteException(
+                            "DB_ALREADY_OPEN",
+                            "open: '$database' is already open with a different readonly mode or directory",
+                        )
+                    }
+                    existing
+                } else {
+                    Database(name = database, path = path, readonly = readonly).also {
+                        databases[database] = it
+                    }
                 }
             }
-        }
 
         try {
             db.open(entries)
@@ -72,8 +77,9 @@ internal class CapacitorSqlite(private val context: Context) {
     fun close(database: String) {
         wrap("CLOSE_FAILED") {
             synchronized(this) {
-                val db = databases[database]
-                    ?: throw CapacitorSqliteException("DB_NOT_OPEN", "close: '$database' is not open")
+                val db =
+                    databases[database]
+                        ?: throw CapacitorSqliteException("DB_NOT_OPEN", "close: '$database' is not open")
                 db.close()
                 if (databases[database] === db) {
                     databases.remove(database)
@@ -83,9 +89,10 @@ internal class CapacitorSqlite(private val context: Context) {
     }
 
     fun closeAll() {
-        val openDatabases = synchronized(this) {
-            databases.values.toList().also { databases.clear() }
-        }
+        val openDatabases =
+            synchronized(this) {
+                databases.values.toList().also { databases.clear() }
+            }
         for (db in openDatabases) {
             try {
                 db.close()
@@ -97,14 +104,12 @@ internal class CapacitorSqlite(private val context: Context) {
 
     // MARK: - isOpen
 
-    fun isOpen(database: String): Boolean =
-        synchronized(this) { databases[database]?.isOpen } ?: false
+    fun isOpen(database: String): Boolean = synchronized(this) { databases[database]?.isOpen } ?: false
 
     // MARK: - getVersion
 
     @Throws(Exception::class)
-    fun getVersion(database: String): String =
-        wrap("VERSION_FAILED") { requireOpen(database, "getVersion").getVersion() }
+    fun getVersion(database: String): String = wrap("VERSION_FAILED") { requireOpen(database, "getVersion").getVersion() }
 
     @Throws(Exception::class)
     fun getSchemaVersion(database: String): Int =
@@ -113,42 +118,71 @@ internal class CapacitorSqlite(private val context: Context) {
     // MARK: - vacuum
 
     @Throws(Exception::class)
-    fun vacuum(database: String) =
-        wrap("VACUUM_FAILED") { requireOpen(database, "vacuum").vacuum() }
+    fun vacuum(database: String) = wrap("VACUUM_FAILED") { requireOpen(database, "vacuum").vacuum() }
 
     // MARK: - execute
 
     @Throws(Exception::class)
-    fun execute(database: String, statements: List<String>, transaction: Boolean): Long =
-        wrap("EXECUTE_FAILED") { requireOpen(database, "execute").execute(statements, transaction) }
+    fun execute(
+        database: String,
+        statements: List<String>,
+        transaction: Boolean,
+    ): Long = wrap("EXECUTE_FAILED") { requireOpen(database, "execute").execute(statements, transaction) }
 
     // MARK: - run
 
     @Throws(Exception::class)
-    fun run(database: String, statement: String, values: List<Any?>): RunResult =
-        wrap("EXECUTE_FAILED") { requireOpen(database, "run").run(statement, values) }
+    fun run(
+        database: String,
+        statement: String,
+        values: List<Any?>,
+    ): RunResult = wrap("EXECUTE_FAILED") { requireOpen(database, "run").run(statement, values) }
 
     // MARK: - runBatch
 
     @Throws(Exception::class)
-    fun runBatch(database: String, set: List<Map<String, Any?>>, transaction: Boolean): RunResult =
-        wrap("EXECUTE_FAILED") { requireOpen(database, "runBatch").runBatch(set, transaction) }
+    fun runBatch(
+        database: String,
+        set: List<Map<String, Any?>>,
+        transaction: Boolean,
+        timings: MutableMap<String, Double>? = null,
+    ): RunResult = wrap("EXECUTE_FAILED") { requireOpen(database, "runBatch").runBatch(set, transaction, timings) }
+
+    @Throws(Exception::class)
+    fun runMany(
+        database: String,
+        statement: String,
+        values: List<List<Any?>>,
+        transaction: Boolean,
+        returnResults: Boolean,
+    ): RunManyResult =
+        wrap("EXECUTE_FAILED") {
+            requireOpen(database, "runMany").runMany(statement, values, transaction, returnResults)
+        }
 
     // MARK: - query
 
     @Throws(Exception::class)
-    fun query(database: String, statement: String, values: List<Any?>): List<Map<String, Any?>> =
-        wrap("QUERY_FAILED") { requireOpen(database, "query").query(statement, values) }
+    fun query(
+        database: String,
+        statement: String,
+        values: List<Any?>,
+    ): List<Map<String, Any?>> = wrap("QUERY_FAILED") { requireOpen(database, "query").query(statement, values) }
+
+    @Throws(Exception::class)
+    fun queryCompact(
+        database: String,
+        statement: String,
+        values: List<Any?>,
+    ): SQLiteHelpers.CompactRows = wrap("QUERY_FAILED") { requireOpen(database, "query").queryCompact(statement, values) }
 
     // MARK: - transactions
 
     @Throws(Exception::class)
-    fun beginTransaction(database: String) =
-        wrap("TRANSACTION_FAILED") { requireOpen(database, "beginTransaction").beginTransaction() }
+    fun beginTransaction(database: String) = wrap("TRANSACTION_FAILED") { requireOpen(database, "beginTransaction").beginTransaction() }
 
     @Throws(Exception::class)
-    fun commitTransaction(database: String) =
-        wrap("TRANSACTION_FAILED") { requireOpen(database, "commitTransaction").commitTransaction() }
+    fun commitTransaction(database: String) = wrap("TRANSACTION_FAILED") { requireOpen(database, "commitTransaction").commitTransaction() }
 
     @Throws(Exception::class)
     fun rollbackTransaction(database: String) =
@@ -157,7 +191,10 @@ internal class CapacitorSqlite(private val context: Context) {
     // MARK: - Private helpers
 
     @Throws(IllegalStateException::class)
-    private fun requireOpen(name: String, context: String): Database {
+    private fun requireOpen(
+        name: String,
+        context: String,
+    ): Database {
         val db = synchronized(this) { databases[name] }
         if (db == null || !db.isOpen) {
             throw CapacitorSqliteException("DB_NOT_OPEN", "$context: '$name' is not open")
@@ -165,7 +202,10 @@ internal class CapacitorSqlite(private val context: Context) {
         return db
     }
 
-    private inline fun <T> wrap(fallbackCode: String, block: () -> T): T {
+    private inline fun <T> wrap(
+        fallbackCode: String,
+        block: () -> T,
+    ): T {
         try {
             return block()
         } catch (e: CapacitorSqliteException) {
@@ -175,7 +215,10 @@ internal class CapacitorSqlite(private val context: Context) {
         }
     }
 
-    private fun removeFailedOpen(database: String, db: Database) {
+    private fun removeFailedOpen(
+        database: String,
+        db: Database,
+    ) {
         synchronized(this) {
             // Only remove the instance that failed. A concurrent retry may already
             // have replaced the map entry after the failed open released its lock.
@@ -185,25 +228,30 @@ internal class CapacitorSqlite(private val context: Context) {
         }
     }
 
-    private fun databasePath(name: String, directory: String?): String {
+    private fun databasePath(
+        name: String,
+        directory: String?,
+    ): String {
         // Keep this mapping aligned with OpenOptions.directory documentation.
         // Raw paths are intentionally not accepted across the bridge.
-        val base = when (directory ?: "default") {
-            "default", "library" -> context.filesDir
-            "documents" -> context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
-                ?: File(context.filesDir, "Documents")
-            "cache" -> context.cacheDir
-            else -> throw CapacitorSqliteException(
-                "INVALID_PARAMS",
-                "Invalid directory '$directory'. Use default, documents, library or cache"
-            )
-        }
+        val base =
+            when (directory ?: "default") {
+                "default", "library" -> context.filesDir
+                "documents" ->
+                    context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
+                        ?: File(context.filesDir, "Documents")
+                "cache" -> context.cacheDir
+                else -> throw CapacitorSqliteException(
+                    "INVALID_PARAMS",
+                    "Invalid directory '$directory'. Use default, documents, library or cache",
+                )
+            }
         val dir = File(base, "CapacitorSQLite")
         dir.mkdirs()
         return File(dir, "$name.db").absolutePath
     }
 
-    /// Parses migration definitions; throws on any malformed entry instead of silently dropping it.
+    // / Parses migration definitions; throws on any malformed entry instead of silently dropping it.
     private fun parseMigrations(raw: List<Map<String, Any?>>): List<MigrationEntry> {
         val seenVersions = mutableSetOf<Int>()
         return raw.mapIndexed { index, item ->
@@ -215,18 +263,19 @@ internal class CapacitorSqlite(private val context: Context) {
             if (rawStatements.isNullOrEmpty()) {
                 throw CapacitorSqliteException(
                     "MIGRATION_FAILED",
-                    "Migration at index $index: 'statements' must be a non-empty [String]"
+                    "Migration at index $index: 'statements' must be a non-empty [String]",
                 )
             }
-            val statements = rawStatements.mapIndexed { statementIndex, statement ->
-                if (statement !is String || statement.trim().isEmpty()) {
-                    throw CapacitorSqliteException(
-                        "MIGRATION_FAILED",
-                        "Migration at index $index: statements[$statementIndex] must be a non-empty string"
-                    )
+            val statements =
+                rawStatements.mapIndexed { statementIndex, statement ->
+                    if (statement !is String || statement.trim().isEmpty()) {
+                        throw CapacitorSqliteException(
+                            "MIGRATION_FAILED",
+                            "Migration at index $index: statements[$statementIndex] must be a non-empty string",
+                        )
+                    }
+                    statement
                 }
-                statement
-            }
             MigrationEntry(version, statements)
         }
     }
@@ -236,7 +285,10 @@ internal class CapacitorSqlite(private val context: Context) {
     // ceiling, not just a sanity check. Web/Electron (isValidMigrationVersion in
     // migrations.ts) and iOS (maxMigrationVersion in CapacitorSqlite+Helpers.swift) enforce
     // the same numeric limit for cross-platform consistency.
-    private fun parseMigrationVersion(value: Any?, index: Int): Int {
+    private fun parseMigrationVersion(
+        value: Any?,
+        index: Int,
+    ): Int {
         val number = value as? Number
         val version = number?.toDouble()
         if (version == null ||
@@ -247,7 +299,7 @@ internal class CapacitorSqlite(private val context: Context) {
         ) {
             throw CapacitorSqliteException(
                 "MIGRATION_FAILED",
-                "Migration at index $index: 'version' must be a positive integer"
+                "Migration at index $index: 'version' must be a positive integer",
             )
         }
         return version.toInt()
