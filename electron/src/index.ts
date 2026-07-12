@@ -22,7 +22,7 @@ import type {
   SqliteResult,
 } from '../../src/definitions';
 
-type PluginWorkerMethod = Exclude<keyof CapacitorSqlitePlugin, 'getPlatform'>;
+type PluginWorkerMethod = Exclude<keyof CapacitorSqlitePlugin, 'getPluginPlatform'>;
 type WorkerMethod = PluginWorkerMethod | '__queryCompact' | '__shutdown';
 type AnySqliteResult = SqliteResult<Record<string, unknown>>;
 
@@ -51,7 +51,7 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
 
   // MARK: - Plugin metadata
 
-  async getPlatform(): Promise<SqliteResult<{ platform: SqlitePlatform }>> {
+  async getPluginPlatform(): Promise<SqliteResult<{ platform: SqlitePlatform }>> {
     return { success: true, data: { platform: 'electron' } };
   }
 

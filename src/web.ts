@@ -248,9 +248,9 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
     return next;
   }
 
-  // MARK: - getPlatform
+  // MARK: - getPluginPlatform
 
-  async getPlatform(): Promise<SqliteResult<{ platform: SqlitePlatform }>> {
+  async getPluginPlatform(): Promise<SqliteResult<{ platform: SqlitePlatform }>> {
     return this.ok({ platform: 'web' });
   }
 

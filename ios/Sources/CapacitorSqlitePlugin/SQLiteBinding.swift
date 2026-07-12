@@ -195,7 +195,10 @@ extension SQLiteHelpers {
         var bytes = [UInt8]()
         bytes.reserveCapacity(value.count)
         for item in value {
-            bytes.append(UInt8((item as! NSNumber).intValue))
+            guard let number = item as? NSNumber else {
+                throw SQLiteError.execute("BLOB value at index \(idx) contains a non-number")
+            }
+            bytes.append(UInt8(number.intValue))
         }
         try bindBlob(stmt: stmt, data: Data(bytes), idx: idx)
     }

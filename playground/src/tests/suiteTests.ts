@@ -43,9 +43,9 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
   return [
   // ── Platform ──────────────────────────────────────────────────────────────
   {
-    id: 'plat-01', group: 'Platform', name: 'getPlatform returns known value',
+    id: 'plat-01', group: 'Platform', name: 'getPluginPlatform returns known value',
     fn: async () => {
-      const r = assertOk(await CapacitorSqlite.getPlatform(), 'getPlatform');
+      const r = assertOk(await CapacitorSqlite.getPluginPlatform(), 'getPluginPlatform');
       assert(['ios', 'android', 'web', 'electron'].includes(r.platform), `unknown platform: ${r.platform}`);
     },
   },
@@ -701,7 +701,7 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
   {
     id: 'qph-05', group: 'Query Placeholders', name: 'Android rejects unsupported placeholder forms and count mismatch',
     fn: async () => {
-      const plat = assertOk(await CapacitorSqlite.getPlatform(), 'platform');
+      const plat = assertOk(await CapacitorSqlite.getPluginPlatform(), 'platform');
       if (plat.platform !== 'android') skipTest('Android-specific placeholder scanner test');
 
       const DB = 'suite_qph05';
@@ -825,7 +825,7 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
   {
     id: 'qph-12', group: 'Query Placeholders', name: 'Android rejects named placeholders even without values',
     fn: async () => {
-      const plat = assertOk(await CapacitorSqlite.getPlatform(), 'platform');
+      const plat = assertOk(await CapacitorSqlite.getPluginPlatform(), 'platform');
       if (plat.platform !== 'android') skipTest('Android-specific named-placeholder rejection test');
 
       const DB = 'suite_qph12';
@@ -840,7 +840,7 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
   {
     id: 'qph-13', group: 'Query Placeholders', name: 'Android rejects extra string/null values too',
     fn: async () => {
-      const plat = assertOk(await CapacitorSqlite.getPlatform(), 'platform');
+      const plat = assertOk(await CapacitorSqlite.getPluginPlatform(), 'platform');
       if (plat.platform !== 'android') skipTest('Android-specific extra-value scanner test');
 
       const DB = 'suite_qph13';
@@ -1032,7 +1032,7 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
     id: 'mdb-02', group: 'Multi-DB', name: ':memory: DB is not persisted across close/reopen',
     fn: async () => {
       // Android's SQLiteDatabase connection pool keeps :memory: alive across close() — skip.
-      const plat = assertOk(await CapacitorSqlite.getPlatform(), 'getPlatform');
+      const plat = assertOk(await CapacitorSqlite.getPluginPlatform(), 'getPluginPlatform');
       if (plat.platform === 'android') skipTest('Android framework keeps this :memory: connection pool alive');
 
       const DB = ':memory:';
@@ -1467,7 +1467,7 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
     id: 'run-08', group: 'Run', name: 'run() with SELECT — succeeds, lastInsertId=0',
     fn: async () => {
       // Android uses compileStatement which rejects SELECT statements — skip.
-      const plat = assertOk(await CapacitorSqlite.getPlatform(), 'getPlatform');
+      const plat = assertOk(await CapacitorSqlite.getPluginPlatform(), 'getPluginPlatform');
       if (plat.platform === 'android') skipTest('Android compileStatement does not execute SELECT');
 
       const DB = 'suite_run08';
@@ -4009,7 +4009,7 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
   {
     id: 'prg-05', group: 'PRAGMA', name: 'PRAGMA page_count returns non-negative number',
     fn: async () => {
-      const plat = assertOk(await CapacitorSqlite.getPlatform(), 'platform');
+      const plat = assertOk(await CapacitorSqlite.getPluginPlatform(), 'platform');
       const DB = 'suite_prg05';
       await silentClose(DB);
       assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
@@ -4699,7 +4699,7 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
   {
     id: 'wal-01', group: 'WAL Mode', name: 'PRAGMA journal_mode=WAL — graceful on platforms that support it',
     fn: async () => {
-      const plat = assertOk(await CapacitorSqlite.getPlatform(), 'platform');
+      const plat = assertOk(await CapacitorSqlite.getPluginPlatform(), 'platform');
       if (plat.platform === 'web') skipTest('OPFS WAL is not reliably supported in sqlite-wasm');
       const DB = 'suite_wal01';
       await silentClose(DB);
@@ -4717,7 +4717,7 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
   {
     id: 'wal-02', group: 'WAL Mode', name: 'PRAGMA synchronous=NORMAL — read back as 1',
     fn: async () => {
-      const plat = assertOk(await CapacitorSqlite.getPlatform(), 'platform');
+      const plat = assertOk(await CapacitorSqlite.getPluginPlatform(), 'platform');
       if (plat.platform === 'web') skipTest('OPFS synchronous mode differs from native WAL backends');
       const DB = 'suite_wal02';
       await silentClose(DB);
@@ -7020,7 +7020,7 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
   {
     id: 'ro-08', group: 'Readonly', name: 'Web query_only cannot be disabled to write via query RETURNING',
     fn: async () => {
-      const platform = assertOk(await CapacitorSqlite.getPlatform(), 'platform');
+      const platform = assertOk(await CapacitorSqlite.getPluginPlatform(), 'platform');
       if (platform.platform !== 'web') skipTest('Web-specific logical-readonly hardening test');
       const DB = 'suite_ro08';
       await silentClose(DB);

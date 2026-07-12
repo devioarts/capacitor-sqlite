@@ -96,7 +96,7 @@ function unavailablePlugin(platform: SqlitePlatform, message: string): Capacitor
     Promise.resolve(failureResult(method, 'NOT_AVAILABLE', new Error(message), platform, 'capacitor-js-bridge'));
 
   return {
-    getPlatform: async () => ({ success: true, data: { platform } }),
+    getPluginPlatform: async () => ({ success: true, data: { platform } }),
     isAvailable: async () => ({ success: true, data: { available: false } }),
     open: () => failure('open'),
     close: () => failure('close'),
@@ -227,7 +227,7 @@ async function callRunMany(options: RunManyOptions): Promise<SqliteResult<RunMan
 
 export const CapacitorSqlite: CapacitorSqlitePlugin = normalizesRejectedCalls
   ? {
-      getPlatform: () => nativeCall('getPlatform', () => _raw.getPlatform()),
+      getPluginPlatform: () => nativeCall('getPluginPlatform', () => _raw.getPluginPlatform()),
       isAvailable: () => nativeCall('isAvailable', () => _raw.isAvailable()),
       open: (o) => nativeCall('open', () => _raw.open(o)),
       close: (o) => nativeCall('close', () => _raw.close(o)),

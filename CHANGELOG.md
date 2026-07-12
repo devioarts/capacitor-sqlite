@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.1 - 2026-07-12
+## [0.1.1] - 2026-07-12
 
 ### Added
 
@@ -31,7 +31,7 @@
 - **Packaging and generated-output issues were fixed.** The published package includes `android/proguard-rules.pro`, generated ESM output is importable by plain Node ESM consumers, and Electron's `runMany()` metadata/compatibility path is covered.
 - **Benchmark and suite reliability improved.** Capability skips are explicit, runners report skip counts, Android CDP attaches to the intended WebView, stress tests validate API results and large payload contents, and the full-load matrix keeps its original release-scale counts.
 
-## 0.1.0 - 2026-07-06
+## [0.1.0] - 2026-07-06
 
 ### Added
 

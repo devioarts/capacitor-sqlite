@@ -2,18 +2,22 @@
 
 SQLite plugin for Capacitor — iOS, Android, Web (OPFS), and Electron.
 
+## Features
+
 - Schema migrations via `PRAGMA user_version` — each version runs in its own transaction
 - Thread-safe serialized SQLite work (serial queues on iOS and Android)
 - Full transaction control: `beginTransaction` / `commitTransaction` / `rollbackTransaction`
 - In-memory databases via `':memory:'`
 - No encryption, no JSON import/export, no sync tables
 
-## Installation
+## Install
 
 ```bash
 npm install @devioarts/capacitor-sqlite
 npx cap sync
 ```
+
+## Platform setup
 
 ### Web
 
@@ -444,11 +448,22 @@ correctness-sensitive code:
 cross-platform behavioral suite is part of the playground app (`playground/`): build and
 launch it on each target platform, then run the **Test Suite** tab.
 
+For the full command-line matrix, stress benchmarks, diagnostics, and manual release-gating
+procedure, see [TESTING.md](TESTING.md).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
 ## API
 
 <docgen-index>
 
-* [`getPlatform()`](#getplatform)
+* [`getPluginPlatform()`](#getpluginplatform)
 * [`isAvailable()`](#isavailable)
 * [`open(...)`](#open)
 * [`close(...)`](#close)
@@ -472,10 +487,10 @@ launch it on each target platform, then run the **Test Suite** tab.
 <docgen-api>
 <!--Update the source file JSDoc comments and rerun docgen to update the docs below-->
 
-### getPlatform()
+### getPluginPlatform()
 
 ```typescript
-getPlatform() => Promise<SqliteResult<{ platform: SqlitePlatform; }>>
+getPluginPlatform() => Promise<SqliteResult<{ platform: SqlitePlatform; }>>
 ```
 
 Returns the platform identifier of the implementation answering calls.

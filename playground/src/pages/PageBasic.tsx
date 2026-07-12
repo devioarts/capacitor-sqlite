@@ -11,10 +11,10 @@ export const PageBasic: React.FC = () => {
   const [dbName, setDbName] = useState('myapp');
   const [readonly, setReadonly] = useState(false);
 
-  const getPlatform = async () => {
-    const r = await CapacitorSqlite.getPlatform();
-    if (r.success) log.info(SCOPE, `getPlatform → ${r.data.platform}`, r.data);
-    else log.error(SCOPE, 'getPlatform failed', r.error);
+  const getPluginPlatform = async () => {
+    const r = await CapacitorSqlite.getPluginPlatform();
+    if (r.success) log.info(SCOPE, `getPluginPlatform → ${r.data.platform}`, r.data);
+    else log.error(SCOPE, 'getPluginPlatform failed', r.error);
   };
 
   const isAvailable = async () => {
@@ -102,7 +102,7 @@ export const PageBasic: React.FC = () => {
       <div className="space-y-2">
         <h3 className="text-sm font-semibold text-slate-700">Platform</h3>
         <div className="flex flex-wrap gap-2">
-          <Button onClick={getPlatform}>getPlatform()</Button>
+          <Button onClick={getPluginPlatform}>getPluginPlatform()</Button>
           <Button onClick={isAvailable}>isAvailable()</Button>
         </div>
       </div>

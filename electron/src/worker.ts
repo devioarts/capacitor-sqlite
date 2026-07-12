@@ -4,7 +4,7 @@ import type { CapacitorSqlitePlugin, SqliteFailure, SqliteResult } from '../../s
 
 import { ElectronSqliteBackend, type ElectronSqliteBackendPaths } from './backend';
 
-type WorkerMethod = Exclude<keyof CapacitorSqlitePlugin, 'getPlatform'> | '__queryCompact' | '__shutdown';
+type WorkerMethod = Exclude<keyof CapacitorSqlitePlugin, 'getPluginPlatform'> | '__queryCompact' | '__shutdown';
 type AnySqliteResult = SqliteResult<Record<string, unknown>>;
 
 interface WorkerRequest {

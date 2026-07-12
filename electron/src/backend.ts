@@ -282,9 +282,9 @@ export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
     };
   }
 
-  // MARK: - getPlatform
+  // MARK: - getPluginPlatform
 
-  async getPlatform(): Promise<SqliteResult<{ platform: SqlitePlatform }>> {
+  async getPluginPlatform(): Promise<SqliteResult<{ platform: SqlitePlatform }>> {
     return this.ok({ platform: 'electron' });
   }
 

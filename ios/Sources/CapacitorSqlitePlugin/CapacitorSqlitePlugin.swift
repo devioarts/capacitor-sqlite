@@ -7,7 +7,7 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
     public let identifier = "CapacitorSqlitePlugin"
     public let jsName = "CapacitorSqlite"
     public let pluginMethods: [CAPPluginMethod] = [
-        CAPPluginMethod(name: "getPlatform", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getPluginPlatform", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "isAvailable", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "open", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "close", returnType: CAPPluginReturnPromise),
@@ -37,9 +37,9 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
-    // MARK: - getPlatform
+    // MARK: - getPluginPlatform
 
-    @objc func getPlatform(_ call: CAPPluginCall) {
+    @objc func getPluginPlatform(_ call: CAPPluginCall) {
         success(call, data: ["platform": "ios"])
     }
 

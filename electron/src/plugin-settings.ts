@@ -1,7 +1,7 @@
 export const pluginSettings = {
   pluginClass: 'CapacitorSqlite',
   pluginMethods: [
-    'getPlatform',
+    'getPluginPlatform',
     'isAvailable',
     'open',
     'close',

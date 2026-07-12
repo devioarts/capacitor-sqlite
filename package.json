@@ -61,11 +61,14 @@
   ],
   "scripts": {
     "verify": "npm run verify:ios && npm run verify:android && npm run verify:web && npm run verify:electron",
-    "verify:ios": "swift build --sdk \"$(xcrun --sdk iphonesimulator --show-sdk-path)\" --triple \"$(uname -m)-apple-ios15.0-simulator\"",
-    "verify:iosOriginal": "xcodebuild -scheme DevioartsCapacitorSqlite -destination generic/platform=iOS",
+    "verify:ios": "xcodebuild -scheme DevioartsCapacitorSqlite -destination generic/platform=iOS",
     "verify:android": "cd android && ./gradlew clean build test && cd ..",
     "verify:web": "npm run build",
     "verify:electron": "npm run build:electron",
+    "test": "npm run test:ts && npm run test:android && npm run test:ios",
+    "test:ts": "npm run test:p0:js && npm run test:p2:js && npm run test:electron:worker",
+    "test:android": "cd android && ./gradlew test && cd ..",
+    "test:ios": "DEVICE_ID=$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/ && /(Shutdown|Booted)/ { print $2; exit }') && xcodebuild test -quiet -scheme DevioartsCapacitorSqlite -destination \"id=$DEVICE_ID\"",
     "test:p0": "npm run test:p0:js && npm run test:p0:ios && npm run test:p0:android",
     "test:p0:js": "tsc --ignoreConfig --target es2017 --module commonjs --outDir build/test-p0 src/sql.ts src/bridge-values.ts && node --test test/sql-guard.test.cjs test/bridge-values.test.cjs",
     "test:p0:ios": "xcodebuild test -quiet -scheme DevioartsCapacitorSqlite -destination 'platform=iOS Simulator,name=iPhone 17'",
@@ -94,11 +97,13 @@
     "test:suite:ios:stress": "npm run test:suite:ios:build && npm run test:suite:ios:deploy && node test/suite/run-ios-cdp.mjs --stress",
     "test:suite:ios:stress-only": "npm run test:suite:ios:build && npm run test:suite:ios:deploy && node test/suite/run-ios-cdp.mjs --stress-only",
     "test:suite:ios:diagnostics": "npm run test:suite:ios:build && npm run test:suite:ios:deploy && node test/suite/run-ios-cdp.mjs --diagnostics-only",
-    "lint": "npm run eslint && npm run prettier -- --check && npm run swiftlint -- lint Package.swift ios/Sources ios/Tests",
-    "fmt": "npm run eslint -- --fix && npm run prettier -- --write && npm run swiftlint -- --fix --format Package.swift ios/Sources ios/Tests",
+    "lint": "npm run eslint && npm run prettier -- --check && npm run swiftlint -- lint Package.swift ios/Sources ios/Tests && npm run ktlint",
+    "fmt": "npm run eslint -- --fix && npm run prettier -- --write && npm run swiftlint -- --fix --format Package.swift ios/Sources ios/Tests && npm run ktlint:format",
     "eslint": "eslint .",
     "prettier": "prettier \"**/*.{css,html,ts,js,java}\" --plugin=prettier-plugin-java",
     "swiftlint": "node-swiftlint",
+    "ktlint": "cd android && ./gradlew ktlintCheck",
+    "ktlint:format": "cd android && ./gradlew ktlintFormat",
     "docgen": "docgen --api CapacitorSqlitePlugin --output-readme README.md --output-json dist/docs.json",
     "build": "npm run clean && npm run docgen && tsc && node scripts/write-esm-package-json.cjs && rollup -c rollup.config.mjs && npm run build:electron",
     "build:electron": "tsc --project electron/tsconfig.json && rollup -c electron/rollup.config.mjs",
@@ -112,24 +117,18 @@
     "@capacitor/core": "^8.0.0",
     "@capacitor/docgen": "^0.3.0",
     "@capacitor/ios": "^8.0.0",
-    "@eslint/eslintrc": "^3.3.5",
-    "@eslint/js": "^10.0.1",
-    "@ionic/eslint-config": "^0.4.0",
     "@ionic/prettier-config": "^4.0.0",
-    "@ionic/swiftlint-config": "^2.0.0",
     "@types/node": "^24.0.0",
     "appium-remote-debugger": "^15.10.0",
     "eslint": "^10.6.0",
+    "eslint-config-prettier": "^10.1.8",
     "prettier": "^3.9.0",
     "prettier-plugin-java": "^2.10.0",
     "rimraf": "^6.1.0",
     "rollup": "^4.62.0",
     "swiftlint": "^2.0.0",
-    "typescript": "^6.0.3"
-  },
-  "overrides": {
-    "@typescript-eslint/eslint-plugin": "^8.61.0",
-    "@typescript-eslint/parser": "^8.61.0"
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.63.0"
   },
   "peerDependencies": {
     "@capacitor/core": ">=8.0.0",
@@ -141,7 +140,6 @@
     }
   },
   "prettier": "@ionic/prettier-config",
-  "swiftlint": "@ionic/swiftlint-config",
   "capacitor": {
     "ios": {
       "src": "ios"

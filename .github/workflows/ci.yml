@@ -1,11 +1,11 @@
 name: CI
 
 on:
+  workflow_dispatch:
   pull_request:
   push:
     branches:
       - main
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,8 +15,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  js-web-electron:
-    name: JS, Web, Electron
+  typescript:
+    name: TypeScript, Web, and Electron
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -24,7 +24,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -38,6 +38,9 @@ jobs:
       - name: Install playground dependencies
         run: npm ci --prefix playground
 
+      - name: Run TypeScript unit tests
+        run: npm run test:ts
+
       - name: Lint TypeScript and formatting
         run: |
           npm run eslint
@@ -46,13 +49,72 @@ jobs:
       - name: Build package
         run: npm run build
 
-      - name: Run JS guard tests
-        run: |
-          npm run test:p0:js
-          npm run test:p2:js
-
       - name: Run Electron suite
         run: npm run test:suite:electron
 
       - name: Run Web/OPFS suite
         run: npm run test:suite:web
+
+  android:
+    name: Android unit tests and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Android verification
+        run: npm run verify:android
+
+  ios:
+    name: iOS build and tests
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build iOS package
+        run: npm run verify:ios
+
+      - name: Select and boot iOS Simulator
+        run: |
+          set -euo pipefail
+          DEVICE_ID="$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/ && /(Shutdown|Booted)/ { print $2; exit }')"
+          if [ -z "$DEVICE_ID" ]; then
+            echo "No available iPhone simulator found"
+            xcrun simctl list devices available
+            exit 1
+          fi
+          echo "IOS_TEST_DEVICE_ID=$DEVICE_ID" >> "$GITHUB_ENV"
+          xcrun simctl boot "$DEVICE_ID" || true
+          xcrun simctl bootstatus "$DEVICE_ID" -b
+
+      - name: Run iOS XCTest
+        run: xcodebuild test -quiet -scheme DevioartsCapacitorSqlite -destination "id=$IOS_TEST_DEVICE_ID"

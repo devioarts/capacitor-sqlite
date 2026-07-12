@@ -6,11 +6,14 @@ package com.devioarts.capacitor.sqlite
  * Do not use Kotlin's `require` here: it produces IllegalArgumentException,
  * which the Capacitor boundary must otherwise misclassify as EXECUTE_FAILED.
  */
-internal fun requireBindValueCount(expected: Int, received: Int) {
+internal fun requireBindValueCount(
+    expected: Int,
+    received: Int,
+) {
     if (received != expected) {
         throw CapacitorSqliteException(
             "INVALID_PARAMS",
-            "Bind value count mismatch: statement expects $expected, received $received"
+            "Bind value count mismatch: statement expects $expected, received $received",
         )
     }
 }

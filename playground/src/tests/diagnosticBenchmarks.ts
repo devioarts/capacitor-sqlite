@@ -169,12 +169,12 @@ export function buildDiagnosticBenchmarks(CapacitorSqlite: CapacitorSqlitePlugin
     },
     {
       id: 'd-02',
-      name: `Platform call — ${SERIAL_CALLS.toLocaleString()} sequential getPlatform()`,
+      name: `Platform call — ${SERIAL_CALLS.toLocaleString()} sequential getPluginPlatform()`,
       description: 'Small request/response through platform dispatch. On native this is a direct plugin method without this plugin\'s SQLite executor.',
       run: async () => {
-        for (let i = 0; i < 10; i++) mustSucceed(await CapacitorSqlite.getPlatform(), 'getPlatform warmup');
+        for (let i = 0; i < 10; i++) mustSucceed(await CapacitorSqlite.getPluginPlatform(), 'getPluginPlatform warmup');
         const stats = await measureSerial(SERIAL_CALLS, async () => {
-          mustSucceed(await CapacitorSqlite.getPlatform(), 'getPlatform');
+          mustSucceed(await CapacitorSqlite.getPluginPlatform(), 'getPluginPlatform');
         });
         return latencyResult(stats, SERIAL_CALLS);
       },
@@ -246,12 +246,12 @@ export function buildDiagnosticBenchmarks(CapacitorSqlite: CapacitorSqlitePlugin
     },
     {
       id: 'd-07',
-      name: `Concurrent platform calls — ${BRIDGE_CONCURRENCY.toLocaleString()} getPlatform()`,
+      name: `Concurrent platform calls — ${BRIDGE_CONCURRENCY.toLocaleString()} getPluginPlatform()`,
       description: 'Pipeline/queue throughput plus individual completion latency distribution. Compare with sequential d-02.',
       run: async () => {
         const wallStart = performance.now();
         const stats = await measureConcurrent(BRIDGE_CONCURRENCY, async () => {
-          mustSucceed(await CapacitorSqlite.getPlatform(), 'concurrent getPlatform');
+          mustSucceed(await CapacitorSqlite.getPluginPlatform(), 'concurrent getPluginPlatform');
         });
         const wallMs = performance.now() - wallStart;
         return {

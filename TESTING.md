@@ -116,12 +116,12 @@ query without a matching index measures SQLite scan/sort work, not plugin transp
 | ID              | Timed path                                          | Primary comparison                                                           |
 | --------------- | --------------------------------------------------- | ---------------------------------------------------------------------------- |
 | `d-01`          | Promise/timer harness only                          | Baseline to subtract from very fast JS-only cases                            |
-| `d-02`          | 200 sequential `getPlatform()` calls                | Small platform request/response without this plugin's SQLite queue           |
+| `d-02`          | 200 sequential `getPluginPlatform()` calls                | Small platform request/response without this plugin's SQLite queue           |
 | `d-03`          | 200 sequential `isOpen()` calls                     | `d-03 − d-02`: plugin dispatch, queue, and registry lookup without SQL       |
 | `d-04`          | 200 sequential `SELECT 1` calls                     | `d-04 − d-03`: minimal prepare/step plus one-row conversion                  |
 | `d-05`          | 200 sequential `run()` calls inside one transaction | Write wrapper and metadata work without a durable commit per row             |
 | `d-06`          | 200 sequential autocommit `run()` calls             | `d-06 − d-05`: framework transaction and storage commit contribution         |
-| `d-07`          | 1,000 concurrent `getPlatform()` calls              | Pipelined bridge throughput and completion-latency distribution              |
+| `d-07`          | 1,000 concurrent `getPluginPlatform()` calls              | Pipelined bridge throughput and completion-latency distribution              |
 | `d-08`          | One recursive SQL statement creates 10,000 rows     | SQLite-heavy single-call reference with almost no per-row JS/bridge work     |
 | `d-09`          | One `runBatch()` carries 10,000 items               | `d-09 − d-08`: payload, validation, binding loop, and batch wrapper cost     |
 | `d-10` / `d-11` | 1 MB TEXT write / read                              | Separates input and output direction; compare platforms                      |
@@ -183,7 +183,7 @@ Platform-specific quirks are documented in [Platform Notes](#platform-notes).
 
 | Group        | IDs         | Tests                                                                                                                                             |
 | ------------ | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Platform     | plat-01..02 | `getPlatform`, `isAvailable`                                                                                                                      |
+| Platform     | plat-01..02 | `getPluginPlatform`, `isAvailable`                                                                                                                      |
 | Lifecycle    | lc-01..08   | open · close · isOpen · idempotence · persistence · re-open cycles                                                                                |
 | Execute      | ex-01..06   | DDL/DML · rollback on error · `transaction:false` · nested transaction guard                                                                      |
 | Run          | run-01..12  | INSERT/UPDATE/DELETE/REPLACE · conservative `lastInsertId` · `changes` · UPSERT paths                                                             |

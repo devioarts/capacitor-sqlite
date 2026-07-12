@@ -12,7 +12,7 @@ import type {
 } from '../../dist/esm/definitions';
 
 export declare class CapacitorSqlite implements CapacitorSqlitePlugin {
-  getPlatform(): Promise<SqliteResult<{ platform: SqlitePlatform }>>;
+  getPluginPlatform(): Promise<SqliteResult<{ platform: SqlitePlatform }>>;
   isAvailable(): Promise<SqliteResult<{ available: boolean }>>;
   /**
    * Terminates the worker thread that runs all SQLite work. Not part of

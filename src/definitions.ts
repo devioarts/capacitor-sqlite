@@ -206,7 +206,7 @@ export type SqliteResult<T extends Record<string, unknown> = Record<string, neve
 
 export interface CapacitorSqlitePlugin {
   /** Returns the platform identifier of the implementation answering calls. */
-  getPlatform(): Promise<SqliteResult<{ platform: SqlitePlatform }>>;
+  getPluginPlatform(): Promise<SqliteResult<{ platform: SqlitePlatform }>>;
 
   /** Returns `true` if SQLite is available on the current platform. */
   isAvailable(): Promise<SqliteResult<{ available: boolean }>>;
