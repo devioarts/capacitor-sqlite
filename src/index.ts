@@ -1,8 +1,18 @@
 import { registerPlugin, Capacitor } from '@capacitor/core';
 
+import {
+  decodeElectronCompactRows,
+  ELECTRON_COMPACT_QUERY_OPTION,
+  encodeNativeBridgeValues,
+  usesJsonValueBridge,
+} from './bridge-values';
+import { assertAnonymousBindParameterCount, assertSingleSqlStatement } from './sql';
 import type {
   CapacitorSqlitePlugin,
   QueryOptions,
+  RunManyItemResult,
+  RunManyOptions,
+  RunManyResult,
   SQLiteValues,
   SqliteErrorCode,
   SqliteFailure,
@@ -13,33 +23,6 @@ import type {
 // Must match BLOB_PREFIX in SQLiteHelpers.swift and SQLiteHelpers.kt.
 const BLOB_PREFIX = 'blob64:';
 const TEXT_PREFIX = 'text64:';
-
-// Encode a single value for the Capacitor native bridge.
-// Uint8Array is not JSON-serialisable — the bridge turns it into a plain object
-// {"0":n,"1":n,...} which native rejects. Convert to a plain number array instead;
-// native detects List<*> / NSArray and binds it as a SQLite BLOB.
-function encodeValue(v: unknown, label: string): unknown {
-  if (v === null || typeof v === 'string' || typeof v === 'boolean') return v;
-  if (typeof v === 'number') {
-    if (!Number.isFinite(v)) {
-      throw new Error(`'${label}' must be a finite number`);
-    }
-    if (Number.isInteger(v) && !Number.isSafeInteger(v)) {
-      throw new Error(`'${label}' must be within Number.MAX_SAFE_INTEGER`);
-    }
-    return v;
-  }
-  if (v instanceof Uint8Array) return Array.from(v);
-  // A plain number[] of bytes is also accepted as a BLOB shorthand on iOS/Android/Electron
-  // (README "Value types"), so it's passed through unchanged here rather than rejected —
-  // reject it here so a malformed byte array fails fast in JS instead of relying on each
-  // native implementation to validate the same thing on its own.
-  if (Array.isArray(v)) {
-    const validBytes = v.every((item) => Number.isInteger(item) && item >= 0 && item <= 255);
-    if (validBytes) return v;
-  }
-  throw new Error(`'${label}' has an unsupported value type`);
-}
 
 // Decode a single value arriving from the native bridge.
 // BLOB columns are returned as "blob64:<base64>" strings; convert back to Uint8Array.
@@ -64,10 +47,6 @@ function decodeValue(v: unknown): unknown {
     }
   }
   return v;
-}
-
-function encodeValues(values?: SQLiteValues): SQLiteValues | undefined {
-  return values?.map((value, index) => encodeValue(value, `values[${index}]`)) as SQLiteValues | undefined;
 }
 
 function decodeRow(row: Record<string, unknown>): Record<string, unknown> {
@@ -128,6 +107,7 @@ function unavailablePlugin(platform: SqlitePlatform, message: string): Capacitor
     execute: () => failure('execute') as Promise<SqliteResult<{ changes: number }>>,
     run: () => failure('run') as Promise<SqliteResult<{ changes: number; lastInsertId: number }>>,
     runBatch: () => failure('runBatch') as Promise<SqliteResult<{ changes: number; lastInsertId: number }>>,
+    runMany: () => failure('runMany') as ReturnType<CapacitorSqlitePlugin['runMany']>,
     query: <T = Record<string, unknown>>() => failure('query') as Promise<SqliteResult<{ rows: T[] }>>,
     beginTransaction: () => failure('beginTransaction'),
     commitTransaction: () => failure('commitTransaction'),
@@ -152,12 +132,100 @@ const _raw = registerPlugin<CapacitorSqlitePlugin>('CapacitorSqlite', {
   electron: () => Promise.resolve(electronPlugin()),
 });
 
-// On web/electron the JS implementation receives Uint8Array directly (no JSON bridge),
-// so no encoding/decoding is needed. On native (iOS/Android) the Capacitor bridge
-// JSON-serialises all call options, so we must transform BLOBs on both sides.
-const isNative = Capacitor.isNativePlatform();
+// Capacitor classifies every custom platform (including Electron) as "native".
+// Only Android/iOS actually use the JSON bridge that needs the tagged base64 BLOB
+// envelope; Electron supports Uint8Array through structured clone and must not pay
+// the million-number Array.from() conversion that used to happen here.
+const platform = Capacitor.getPlatform();
+const encodesBridgeValues = usesJsonValueBridge(platform);
+const normalizesRejectedCalls = Capacitor.isNativePlatform();
 
-export const CapacitorSqlite: CapacitorSqlitePlugin = isNative
+function bridgeValues(values?: SQLiteValues): SQLiteValues | undefined {
+  return (encodesBridgeValues ? encodeNativeBridgeValues(values) : values) as SQLiteValues | undefined;
+}
+
+function isMissingElectronRunMany(result: SqliteResult<RunManyResult>): boolean {
+  return (
+    platform === 'electron' && !result.success && /runmany\(\).*not implemented on electron/i.test(result.error.message)
+  );
+}
+
+/**
+ * Compatibility for Electron applications whose generated preload/main registry
+ * predates runMany(). New registries call the native repeated-statement path. An
+ * old registry can still provide correct behavior through methods it already
+ * exposes, without the plugin modifying application-owned generated files.
+ */
+async function electronRunManyCompatibility(
+  options: RunManyOptions,
+  values: SQLiteValues[],
+): Promise<SqliteResult<RunManyResult>> {
+  if (!options.returnResults) {
+    const batch = await nativeCall(
+      'runMany',
+      () =>
+        _raw.runBatch({
+          database: options.database,
+          transaction: options.transaction,
+          set: values.map((itemValues) => ({ statement: options.statement, values: itemValues })),
+        }),
+      'INVALID_PARAMS',
+    );
+    if (!batch.success) return batch;
+    return { success: true, data: { changes: batch.data.changes, lastInsertId: 0 } };
+  }
+
+  const ownsTransaction = options.transaction !== false;
+  if (ownsTransaction) {
+    const begun = await nativeCall('runMany', () => _raw.beginTransaction({ database: options.database }));
+    if (!begun.success) return begun;
+  }
+
+  const results: RunManyItemResult[] = [];
+  let changes = 0;
+  for (const itemValues of values) {
+    const item = await nativeCall(
+      'runMany',
+      () => _raw.run({ database: options.database, statement: options.statement, values: itemValues }),
+      'INVALID_PARAMS',
+    );
+    if (!item.success) {
+      if (ownsTransaction) {
+        await nativeCall('runMany', () => _raw.rollbackTransaction({ database: options.database }));
+      }
+      return item;
+    }
+    changes += item.data.changes;
+    results.push({ changes: item.data.changes, lastInsertId: item.data.lastInsertId });
+  }
+
+  if (ownsTransaction) {
+    const committed = await nativeCall('runMany', () => _raw.commitTransaction({ database: options.database }));
+    if (!committed.success) return committed;
+  }
+  return { success: true, data: { changes, lastInsertId: 0, results } };
+}
+
+async function callRunMany(options: RunManyOptions): Promise<SqliteResult<RunManyResult>> {
+  let values: SQLiteValues[];
+  try {
+    if (!options.statement.trim()) throw new Error("'statement' is required");
+    if (options.values.length === 0) throw new Error("'values' must be a non-empty array of value arrays");
+    assertSingleSqlStatement(options.statement, 'statement');
+    options.values.forEach((itemValues, index) =>
+      assertAnonymousBindParameterCount(options.statement, itemValues.length, `values[${index}]`),
+    );
+    // Encode and validate every set before the first native call. This preserves
+    // runMany's no-partial-write validation guarantee in the old-Electron fallback.
+    values = options.values.map((itemValues) => bridgeValues(itemValues) as SQLiteValues);
+  } catch (error) {
+    return failureResult('runMany', 'INVALID_PARAMS', error) as SqliteResult<RunManyResult>;
+  }
+  const direct = await nativeCall('runMany', () => _raw.runMany({ ...options, values }), 'INVALID_PARAMS');
+  return isMissingElectronRunMany(direct) ? electronRunManyCompatibility(options, values) : direct;
+}
+
+export const CapacitorSqlite: CapacitorSqlitePlugin = normalizesRejectedCalls
   ? {
       getPlatform: () => nativeCall('getPlatform', () => _raw.getPlatform()),
       isAvailable: () => nativeCall('isAvailable', () => _raw.isAvailable()),
@@ -168,28 +236,39 @@ export const CapacitorSqlite: CapacitorSqlitePlugin = isNative
       getSchemaVersion: (o) => nativeCall('getSchemaVersion', () => _raw.getSchemaVersion(o)),
       vacuum: (o) => nativeCall('vacuum', () => _raw.vacuum(o)),
       execute: (o) => nativeCall('execute', () => _raw.execute(o)),
-      run: (o) => nativeCall('run', () => _raw.run({ ...o, values: encodeValues(o.values) }), 'INVALID_PARAMS'),
+      run: (o) => nativeCall('run', () => _raw.run({ ...o, values: bridgeValues(o.values) }), 'INVALID_PARAMS'),
       runBatch: (o) =>
         nativeCall(
           'runBatch',
           () =>
             _raw.runBatch({
               ...o,
-              set: o.set.map((s) => ({ ...s, values: encodeValues(s.values) })),
+              set: o.set.map((s) => ({ ...s, values: bridgeValues(s.values) })),
             }),
           'INVALID_PARAMS',
         ),
+      runMany: (o: RunManyOptions) => callRunMany(o),
       query: async <T>(o: QueryOptions) => {
-        const r = await nativeCall(
-          'query',
-          () => _raw.query<T>({ ...o, values: encodeValues(o.values) }),
-          'INVALID_PARAMS',
-        );
+        const usesCompactRows = platform === 'electron' || encodesBridgeValues;
+        const queryOptions = usesCompactRows
+          ? ({
+              ...o,
+              values: bridgeValues(o.values),
+              [ELECTRON_COMPACT_QUERY_OPTION]: true,
+            } as QueryOptions)
+          : o;
+        const r = await nativeCall('query', () => _raw.query<T>(queryOptions), 'INVALID_PARAMS');
         if (!r.success) return r;
-        return {
-          success: true as const,
-          data: { rows: (r.data.rows as Record<string, unknown>[]).map(decodeRow) as unknown as T[] },
-        };
+        if (usesCompactRows) {
+          try {
+            const rows = decodeElectronCompactRows(r.data);
+            const decodedRows = encodesBridgeValues ? rows.map(decodeRow) : rows;
+            return { success: true as const, data: { rows: decodedRows as T[] } };
+          } catch (error) {
+            return failureResult('query', 'QUERY_FAILED', error, platform as SqlitePlatform, 'compact-row-decoder');
+          }
+        }
+        return r;
       },
       beginTransaction: (o) => nativeCall('beginTransaction', () => _raw.beginTransaction(o)),
       commitTransaction: (o) => nativeCall('commitTransaction', () => _raw.commitTransaction(o)),

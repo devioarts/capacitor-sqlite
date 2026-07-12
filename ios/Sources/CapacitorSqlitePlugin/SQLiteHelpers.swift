@@ -3,6 +3,7 @@ import Foundation
 import SQLite3
 
 enum SQLiteError: Error {
+    case invalidParams(String)
     case open(String)
     case close(String)
     case execute(String)
@@ -12,6 +13,165 @@ enum SQLiteError: Error {
 }
 
 enum SQLiteHelpers {
+    final class PreparedRunStatement {
+        private let db: OpaquePointer
+        private let insertLike: Bool
+        private let conflictClause: Bool
+        private var statement: OpaquePointer?
+
+        init(db: OpaquePointer, sql: String, values: [Any], bindInitialValues: Bool = true) throws {
+            self.db = db
+            self.insertLike = SQLStatement.isInsertLike(sql)
+            self.conflictClause = SQLStatement.hasConflictClause(sql)
+            if SQLiteHelpers.hasMultipleStatements(sql) {
+                throw SQLiteError.invalidParams("SQL string must contain exactly one statement")
+            }
+            var prepared: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &prepared, nil) == SQLITE_OK else {
+                let message = String(validatingUTF8: sqlite3_errmsg(db)) ?? "prepare failed"
+                throw SQLiteError.prepare(message)
+            }
+            statement = prepared
+            do {
+                if bindInitialValues {
+                    try bind(values: values)
+                } else {
+                    try validate(values: values)
+                }
+            } catch {
+                close()
+                throw error
+            }
+        }
+
+        init(
+            db: OpaquePointer,
+            sql: String,
+            normalizedValues: SQLiteBindValues,
+            bindInitialValues: Bool = true
+        ) throws {
+            self.db = db
+            self.insertLike = SQLStatement.isInsertLike(sql)
+            self.conflictClause = SQLStatement.hasConflictClause(sql)
+            if SQLiteHelpers.hasMultipleStatements(sql) {
+                throw SQLiteError.invalidParams("SQL string must contain exactly one statement")
+            }
+            var prepared: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &prepared, nil) == SQLITE_OK else {
+                let message = String(validatingUTF8: sqlite3_errmsg(db)) ?? "prepare failed"
+                throw SQLiteError.prepare(message)
+            }
+            statement = prepared
+            do {
+                if bindInitialValues {
+                    try bindNormalized(values: normalizedValues)
+                } else {
+                    try validate(normalizedValues: normalizedValues)
+                }
+            } catch {
+                close()
+                throw error
+            }
+        }
+
+        func validate(values: [Any]) throws {
+            guard let statement else { throw SQLiteError.prepare("statement is closed") }
+            try SQLiteHelpers.validateBindValues(stmt: statement, values: values)
+        }
+
+        func validate(normalizedValues: SQLiteBindValues) throws {
+            guard let statement else { throw SQLiteError.prepare("statement is closed") }
+            try SQLiteHelpers.validateNormalizedBindValues(stmt: statement, values: normalizedValues)
+        }
+
+        func bind(values: [Any]) throws {
+            guard let statement else { throw SQLiteError.prepare("statement is closed") }
+            let resetCode = sqlite3_reset(statement)
+            guard resetCode == SQLITE_OK else {
+                let db = sqlite3_db_handle(statement)
+                let message = db.flatMap { String(validatingUTF8: sqlite3_errmsg($0)) } ?? "reset failed"
+                throw SQLiteError.execute(message)
+            }
+            sqlite3_clear_bindings(statement)
+            try SQLiteHelpers.bind(stmt: statement, values: values)
+        }
+
+        func bindNormalized(values: SQLiteBindValues) throws {
+            guard let statement else { throw SQLiteError.prepare("statement is closed") }
+            let resetCode = sqlite3_reset(statement)
+            guard resetCode == SQLITE_OK else {
+                let db = sqlite3_db_handle(statement)
+                let message = db.flatMap { String(validatingUTF8: sqlite3_errmsg($0)) } ?? "reset failed"
+                throw SQLiteError.execute(message)
+            }
+            try SQLiteHelpers.bindNormalized(stmt: statement, values: values)
+        }
+
+        /// Binds values that were already validated during batch preflight.
+        ///
+        /// Transactional `runBatch()` validates every item before the first write so a
+        /// later bind-count/type error cannot leave a partially-applied batch. The hot
+        /// execution loop can therefore skip the duplicate validation work here and only
+        /// do the SQLite reset + bind calls needed for this specific iteration.
+        func bindPrevalidated(values: [Any], diagnostics: BatchDiagnostics? = nil) throws {
+            guard let statement else { throw SQLiteError.prepare("statement is closed") }
+            let resetStart = DispatchTime.now().uptimeNanoseconds
+            let resetCode = sqlite3_reset(statement)
+            diagnostics?.add("dbResetMs", start: resetStart)
+            guard resetCode == SQLITE_OK else {
+                let db = sqlite3_db_handle(statement)
+                let message = db.flatMap { String(validatingUTF8: sqlite3_errmsg($0)) } ?? "reset failed"
+                throw SQLiteError.execute(message)
+            }
+            let bindStart = DispatchTime.now().uptimeNanoseconds
+            try SQLiteHelpers.bindPrevalidated(stmt: statement, values: values)
+            diagnostics?.add("dbBindValuesMs", start: bindStart)
+        }
+
+        func bindNormalizedPrevalidated(values: SQLiteBindValues, diagnostics: BatchDiagnostics? = nil) throws {
+            guard let statement else { throw SQLiteError.prepare("statement is closed") }
+            let resetStart = DispatchTime.now().uptimeNanoseconds
+            let resetCode = sqlite3_reset(statement)
+            diagnostics?.add("dbResetMs", start: resetStart)
+            guard resetCode == SQLITE_OK else {
+                let db = sqlite3_db_handle(statement)
+                let message = db.flatMap { String(validatingUTF8: sqlite3_errmsg($0)) } ?? "reset failed"
+                throw SQLiteError.execute(message)
+            }
+            let bindStart = DispatchTime.now().uptimeNanoseconds
+            try SQLiteHelpers.bindNormalizedPrevalidated(stmt: statement, values: values)
+            diagnostics?.add("dbBindValuesMs", start: bindStart)
+        }
+
+        func execute(diagnostics: BatchDiagnostics? = nil) throws {
+            guard let statement else { throw SQLiteError.prepare("statement is closed") }
+            let stepStart = DispatchTime.now().uptimeNanoseconds
+            let result = sqlite3_step(statement)
+            diagnostics?.add("dbStepMs", start: stepStart)
+            guard result == SQLITE_DONE || result == SQLITE_ROW else {
+                let db = sqlite3_db_handle(statement)
+                let message = db.flatMap { String(validatingUTF8: sqlite3_errmsg($0)) } ?? "step failed"
+                throw SQLiteError.execute(message)
+            }
+        }
+
+        func executeWithMetadata() throws -> (changes: Int, lastInsertId: Int64) {
+            let beforeChanges = SQLiteHelpers.totalChanges(db: db)
+            let beforeId = sqlite3_last_insert_rowid(db)
+            try execute()
+            let changes = SQLiteHelpers.totalChanges(db: db) - beforeChanges
+            let currentId = sqlite3_last_insert_rowid(db)
+            let reliable = insertLike && !conflictClause && changes > 0 && currentId != beforeId
+            return (changes, reliable ? currentId : 0)
+        }
+
+        func close() {
+            if let statement { sqlite3_finalize(statement) }
+            statement = nil
+        }
+
+        deinit { close() }
+    }
 
     // Sentinel prefix for BLOB columns returned from queries.
     // The JS layer detects this prefix and decodes back to Uint8Array.
@@ -48,7 +208,7 @@ enum SQLiteHelpers {
 
     static func exec(db: OpaquePointer, sql: String) throws {
         if hasMultipleStatements(sql) {
-            throw SQLiteError.execute("SQL string must contain exactly one statement")
+            throw SQLiteError.invalidParams("SQL string must contain exactly one statement")
         }
         if sqlite3_exec(db, sql, nil, nil, nil) != SQLITE_OK {
             let msg = String(validatingUTF8: sqlite3_errmsg(db)) ?? "exec failed"
@@ -60,7 +220,7 @@ enum SQLiteHelpers {
 
     static func run(db: OpaquePointer, sql: String, values: [Any]) throws -> (changes: Int, lastInsertId: Int64) {
         if hasMultipleStatements(sql) {
-            throw SQLiteError.prepare("SQL string must contain exactly one statement")
+            throw SQLiteError.invalidParams("SQL string must contain exactly one statement")
         }
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
@@ -72,6 +232,7 @@ enum SQLiteHelpers {
         try bind(stmt: stmt, values: values)
 
         let before = totalChanges(db: db)
+        let beforeInsertId = sqlite3_last_insert_rowid(db)
         let rc = sqlite3_step(stmt)
         guard rc == SQLITE_DONE || rc == SQLITE_ROW else {
             let msg = String(validatingUTF8: sqlite3_errmsg(db)) ?? "step failed"
@@ -79,15 +240,40 @@ enum SQLiteHelpers {
         }
 
         let changes = totalChanges(db: db) - before
-        let inserted = SQLStatement.isInsertLike(sql) && changes > 0
-        return (changes, inserted ? sqlite3_last_insert_rowid(db) : 0)
+        // An UPSERT resolved via its DO UPDATE arm leaves last_insert_rowid() pointing at
+        // the connection's last real insert, not this statement's affected row.
+        let currentInsertId = sqlite3_last_insert_rowid(db)
+        let inserted = SQLStatement.isInsertLike(sql)
+            && changes > 0
+            && !SQLStatement.hasConflictClause(sql)
+            && currentInsertId != beforeInsertId
+        return (changes, inserted ? currentInsertId : 0)
+    }
+
+    /// Prepares and binds without stepping, used to validate an entire batch
+    /// before transaction:false can persist any early item.
+    static func validateRunStatement(db: OpaquePointer, sql: String, values: [Any]) throws {
+        let statement = try PreparedRunStatement(db: db, sql: sql, values: values)
+        statement.close()
     }
 
     // MARK: - SELECT
 
     static func query(db: OpaquePointer, sql: String, values: [Any]) throws -> [[String: Any]] {
+        let stmt = try prepareQuery(db: db, sql: sql, values: values)
+        defer { sqlite3_finalize(stmt) }
+        return try fetchRows(stmt: stmt, db: db)
+    }
+
+    static func queryCompact(db: OpaquePointer, sql: String, values: [Any]) throws -> CompactRows {
+        let stmt = try prepareQuery(db: db, sql: sql, values: values)
+        defer { sqlite3_finalize(stmt) }
+        return try fetchCompactRows(stmt: stmt, db: db)
+    }
+
+    private static func prepareQuery(db: OpaquePointer, sql: String, values: [Any]) throws -> OpaquePointer? {
         if hasMultipleStatements(sql) {
-            throw SQLiteError.prepare("SQL string must contain exactly one statement")
+            throw SQLiteError.invalidParams("SQL string must contain exactly one statement")
         }
         guard SQLStatement.isQueryResultStatement(sql) else {
             throw SQLiteError.prepare("'statement' must be a SELECT, PRAGMA, EXPLAIN, or DML statement with RETURNING")
@@ -97,13 +283,10 @@ enum SQLiteHelpers {
             let msg = String(validatingUTF8: sqlite3_errmsg(db)) ?? "prepare failed"
             throw SQLiteError.prepare(msg)
         }
-        defer { sqlite3_finalize(stmt) }
-
-        if !values.isEmpty {
-            try bind(stmt: stmt, values: values)
-        }
-
-        return try fetchRows(stmt: stmt, db: db)
+        // Always validate the count, including the important "placeholder present,
+        // empty values array" case. Skipping bind() for [] silently treated `?` as NULL.
+        try bind(stmt: stmt, values: values)
+        return stmt
     }
 
     // MARK: - Transactions
@@ -139,6 +322,11 @@ enum SQLiteHelpers {
     }
 
     static func totalChanges(db: OpaquePointer) -> Int {
+        // The 32-bit sqlite3_total_changes() wraps on very long-lived/high-write
+        // connections. The 64-bit API keeps change counts correct past 2^31-1.
+        if #available(iOS 15.4, *) {
+            return Int(sqlite3_total_changes64(db))
+        }
         return Int(sqlite3_total_changes(db))
     }
 

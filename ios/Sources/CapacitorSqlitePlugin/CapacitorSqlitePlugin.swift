@@ -18,6 +18,7 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "execute", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "run", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "runBatch", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "runMany", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "query", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "beginTransaction", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "commitTransaction", returnType: CAPPluginReturnPromise),
@@ -28,7 +29,12 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
     let workQueue = DispatchQueue(label: "com.devioarts.capacitor.sqlite.plugin", qos: .userInitiated)
 
     deinit {
-        impl.closeAll()
+        // Deinitialization may happen on the main thread. Queue cleanup behind any
+        // already-submitted plugin work instead of blocking deinit on SQLite close/WAL I/O.
+        let implementation = impl
+        workQueue.async {
+            implementation.closeAll()
+        }
     }
 
     // MARK: - getPlatform
@@ -223,7 +229,16 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
             failure(call, code: "INVALID_PARAMS", message: "'statement' is required", method: "run")
             return
         }
-        let values = call.getArray("values") ?? []
+        let values: [Any]
+        do {
+            values = try NativeBridgeValues.decode(call.getArray("values") ?? [], label: "values")
+        } catch let error as NativeBridgeValueError {
+            failure(call, code: "INVALID_PARAMS", message: error.message, method: "run")
+            return
+        } catch {
+            failure(call, code: "INVALID_PARAMS", message: "Invalid values", method: "run")
+            return
+        }
         executeSqlite { [weak self] in
             guard let self = self else { return }
             do {
@@ -240,65 +255,46 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
     // MARK: - runBatch
 
     @objc func runBatch(_ call: CAPPluginCall) {
+        let nativeStart = DispatchTime.now().uptimeNanoseconds
         guard let database = call.getString("database") else {
             failure(call, code: "INVALID_PARAMS", message: "'database' is required", method: "runBatch")
             return
         }
+        let getArrayStart = DispatchTime.now().uptimeNanoseconds
         guard let set = call.getArray("set") as? [[String: Any]], !set.isEmpty else {
             failure(call, code: "INVALID_PARAMS", message: "'set' must be a non-empty array of {statement, values?}", method: "runBatch")
             return
         }
-        guard set.allSatisfy({
-            guard let statement = $0["statement"] as? String else { return false }
-            return !statement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }) else {
-            failure(call, code: "INVALID_PARAMS", message: "'set' entries must include a non-empty statement", method: "runBatch")
-            return
-        }
+        let getArrayEnd = DispatchTime.now().uptimeNanoseconds
         let transaction = call.getBool("transaction") ?? true
+        let includeDiagnostics = call.getBool("__diagnostics") == true
+        let diagnostics = includeDiagnostics ? BatchDiagnostics() : nil
+        diagnostics?.set("pluginGetArrayMs", nanos: getArrayEnd - getArrayStart)
+        // runBatch() decodes tagged BLOB envelopes while normalizing values inside
+        // Database.parseBatch(). Avoid a second 10k-item native pass over the same
+        // payload before enqueueing the actual SQLite work.
+        diagnostics?.set("bridgeDecodeMs", nanos: 0)
+        let scheduledAt = DispatchTime.now().uptimeNanoseconds
         executeSqlite { [weak self] in
             guard let self = self else { return }
+            diagnostics?.set("queueWaitMs", start: scheduledAt)
             do {
-                let result = try self.impl.runBatch(database: database, set: set, transaction: transaction)
-                self.success(call, data: ["changes": result.changes, "lastInsertId": result.lastInsertId])
+                let result = try self.impl.runBatch(
+                    database: database,
+                    set: set,
+                    transaction: transaction,
+                    diagnostics: diagnostics
+                )
+                diagnostics?.set("nativeTotalMs", start: nativeStart)
+                var data: [String: Any] = ["changes": result.changes, "lastInsertId": result.lastInsertId]
+                if let diagnostics {
+                    data["timings"] = diagnostics.timings
+                }
+                self.success(call, data: data)
             } catch CapacitorSqliteError.failed(let code, let msg) {
                 self.failure(call, code: code, message: msg, method: "runBatch")
             } catch {
                 self.failure(call, code: "EXECUTE_FAILED", message: "runBatch: \(error.localizedDescription)", method: "runBatch")
-            }
-        }
-    }
-
-    // MARK: - query
-
-    @objc func query(_ call: CAPPluginCall) {
-        guard let database = call.getString("database") else {
-            failure(call, code: "INVALID_PARAMS", message: "'database' is required", method: "query")
-            return
-        }
-        guard let statement = call.getString("statement"), !statement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            failure(call, code: "INVALID_PARAMS", message: "'statement' is required", method: "query")
-            return
-        }
-        guard SQLStatement.isQueryResultStatement(statement) else {
-            failure(
-                call,
-                code: "INVALID_PARAMS",
-                message: "'statement' must be a SELECT, PRAGMA, EXPLAIN, or DML statement with RETURNING",
-                method: "query"
-            )
-            return
-        }
-        let values = call.getArray("values") ?? []
-        executeSqlite { [weak self] in
-            guard let self = self else { return }
-            do {
-                let rows = try self.impl.query(database: database, statement: statement, values: values)
-                self.success(call, data: ["rows": rows])
-            } catch CapacitorSqliteError.failed(let code, let msg) {
-                self.failure(call, code: code, message: msg, method: "query")
-            } catch {
-                self.failure(call, code: "QUERY_FAILED", message: "query: \(error.localizedDescription)", method: "query")
             }
         }
     }
@@ -362,5 +358,6 @@ public class CapacitorSqlitePlugin: CAPPlugin, CAPBridgedPlugin {
             }
         }
     }
+
 }
 // swiftlint:enable type_body_length

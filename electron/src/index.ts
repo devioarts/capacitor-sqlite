@@ -13,6 +13,8 @@ import type {
   OpenOptions,
   QueryOptions,
   RunBatchOptions,
+  RunManyOptions,
+  RunManyResult,
   RunOptions,
   SqliteErrorCode,
   SqliteFailure,
@@ -20,7 +22,8 @@ import type {
   SqliteResult,
 } from '../../src/definitions';
 
-type WorkerMethod = Exclude<keyof CapacitorSqlitePlugin, 'getPlatform'>;
+type PluginWorkerMethod = Exclude<keyof CapacitorSqlitePlugin, 'getPlatform'>;
+type WorkerMethod = PluginWorkerMethod | '__queryCompact' | '__shutdown';
 type AnySqliteResult = SqliteResult<Record<string, unknown>>;
 
 interface WorkerRequest {
@@ -36,6 +39,7 @@ interface WorkerResponse {
 
 interface PendingRequest {
   method: WorkerMethod;
+  worker: Worker;
   resolve: (result: AnySqliteResult) => void;
 }
 
@@ -43,6 +47,7 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
   private nextRequestId = 1;
   private worker: Worker | null = null;
   private pending = new Map<number, PendingRequest>();
+  private disposing: Promise<void> | null = null;
 
   // MARK: - Plugin metadata
 
@@ -52,6 +57,25 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
 
   async isAvailable(): Promise<SqliteResult<{ available: boolean }>> {
     return this.request('isAvailable', undefined) as Promise<SqliteResult<{ available: boolean }>>;
+  }
+
+  /**
+   * Terminates the worker thread that runs all SQLite work, failing any in-flight
+   * requests with `NOT_AVAILABLE`. Not part of `CapacitorSqlitePlugin` — call it
+   * explicitly from your Electron main process, typically from `app.on('before-quit')`,
+   * to release the worker (and let SQLite flush its WAL) before the process exits.
+   * A later call automatically spawns a fresh worker on demand, so this is also safe to
+   * use to recover from a worker stuck in a bad state.
+   */
+  async dispose(): Promise<void> {
+    if (this.disposing) return this.disposing;
+    const operation = this.disposeCurrentWorker();
+    this.disposing = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.disposing === operation) this.disposing = null;
+    }
   }
 
   // MARK: - Database lifecycle
@@ -96,7 +120,16 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
     return this.request('runBatch', options) as Promise<SqliteResult<{ changes: number; lastInsertId: number }>>;
   }
 
+  async runMany(options: RunManyOptions): Promise<SqliteResult<RunManyResult>> {
+    return this.request('runMany', options) as Promise<SqliteResult<RunManyResult>>;
+  }
+
   async query<T = Record<string, unknown>>(options: QueryOptions): Promise<SqliteResult<{ rows: T[] }>> {
+    if ((options as unknown as Record<string, unknown>).__capacitorSqliteCompactRows === true) {
+      // Internal renderer request: keep the columnar representation through both
+      // structured-clone boundaries. src/index.ts restores public row objects.
+      return this.request('__queryCompact', options) as Promise<SqliteResult<{ rows: T[] }>>;
+    }
     return this.request('query', options) as Promise<SqliteResult<{ rows: T[] }>>;
   }
 
@@ -115,6 +148,7 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
   }
 
   private request(method: WorkerMethod, options: unknown): Promise<AnySqliteResult> {
+    if (this.disposing) return this.disposing.then(() => this.request(method, options));
     let worker: Worker;
     try {
       worker = this.getWorker();
@@ -122,10 +156,14 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
       return Promise.resolve(this.failure('NOT_AVAILABLE', method, err));
     }
 
+    return this.requestWithWorker(worker, method, options);
+  }
+
+  private requestWithWorker(worker: Worker, method: WorkerMethod, options: unknown): Promise<AnySqliteResult> {
     const id = this.nextRequestId++;
     const message: WorkerRequest = { id, method, options };
     return new Promise((resolve) => {
-      this.pending.set(id, { method, resolve });
+      this.pending.set(id, { method, worker, resolve });
       try {
         worker.postMessage(message);
       } catch (err) {
@@ -133,6 +171,16 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
         resolve(this.failure('UNKNOWN', method, err));
       }
     });
+  }
+
+  private async disposeCurrentWorker(): Promise<void> {
+    const worker = this.worker;
+    if (!worker) return;
+    // Queue shutdown behind all earlier requests so transactions are rolled back
+    // and handles are closed before the thread is terminated.
+    await this.requestWithWorker(worker, '__shutdown', undefined);
+    if (this.worker === worker) this.worker = null;
+    await worker.terminate();
   }
 
   private resolveWorkerFile(): string {
@@ -175,26 +223,27 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
     });
     worker.on('message', (message: WorkerResponse) => {
       const pending = this.pending.get(message.id);
-      if (!pending) return;
+      if (pending?.worker !== worker) return;
       this.pending.delete(message.id);
       pending.resolve(message.result);
     });
     worker.on('error', (err) => {
-      this.failPending('UNKNOWN', err);
-      this.worker = null;
+      this.failPending('UNKNOWN', err, worker);
+      if (this.worker === worker) this.worker = null;
     });
     worker.on('exit', (code) => {
       if (code !== 0) {
-        this.failPending('UNKNOWN', new Error(`Electron SQLite worker exited with code ${code}`));
+        this.failPending('UNKNOWN', new Error(`Electron SQLite worker exited with code ${code}`), worker);
       }
-      this.worker = null;
+      if (this.worker === worker) this.worker = null;
     });
     this.worker = worker;
     return worker;
   }
 
-  private failPending(code: SqliteErrorCode, err: unknown): void {
+  private failPending(code: SqliteErrorCode, err: unknown, worker?: Worker): void {
     for (const [id, pending] of this.pending) {
+      if (worker && pending.worker !== worker) continue;
       this.pending.delete(id);
       pending.resolve(this.failure(code, pending.method, err));
     }

@@ -1,4 +1,30 @@
+const SQL_CACHE_LIMIT = 256;
+
+function cached<T>(cache: Map<string, T>, sql: string, compute: () => T): T {
+  const hit = cache.get(sql);
+  if (hit !== undefined || cache.has(sql)) {
+    // Refresh insertion order so frequently repeated application statements stay hot.
+    cache.delete(sql);
+    cache.set(sql, hit as T);
+    return hit as T;
+  }
+  const value = compute();
+  cache.set(sql, value);
+  if (cache.size > SQL_CACHE_LIMIT) cache.delete(cache.keys().next().value as string);
+  return value;
+}
+
+const multipleStatementCache = new Map<string, boolean>();
+const statementTypeCache = new Map<string, string>();
+const conflictCache = new Map<string, boolean>();
+const rollbackConflictCache = new Map<string, boolean>();
+const bindParameterCache = new Map<string, { count: number; error?: string }>();
+
 export function hasMultipleSqlStatements(sql: string): boolean {
+  return cached(multipleStatementCache, sql, () => computeHasMultipleSqlStatements(sql));
+}
+
+function computeHasMultipleSqlStatements(sql: string): boolean {
   // Tracks BEGIN/CASE ... END nesting (trigger bodies, CASE expressions) so a
   // semicolon inside one of these blocks isn't mistaken for a statement
   // separator. Only a semicolon seen while this is back at 0 is a real split.
@@ -45,7 +71,7 @@ export function hasMultipleSqlStatements(sql: string): boolean {
             (keyword.keyword === 'CASE' && blockDepth > 0))
         ) {
           blockDepth++;
-        } else if (keyword.keyword === 'END' && blockDepth > 0) {
+        } else if (!isQualifiedRef && keyword.keyword === 'END' && blockDepth > 0) {
           blockDepth--;
         }
         i = keyword.end - 1;
@@ -63,7 +89,50 @@ export function assertSingleSqlStatement(sql: string, label: string): void {
   }
 }
 
+/** Validates the cross-platform positional-bind contract (anonymous `?` only). */
+export function assertAnonymousBindParameterCount(sql: string, valueCount: number, label = 'values'): void {
+  const analysis = cached(bindParameterCache, sql, () => scanAnonymousBindParameters(sql));
+  if (analysis.error) throw new Error(analysis.error);
+  if (analysis.count !== valueCount) {
+    throw new Error(`'${label}' count mismatch: statement expects ${analysis.count}, received ${valueCount}`);
+  }
+}
+
+function scanAnonymousBindParameters(sql: string): { count: number; error?: string } {
+  let placeholders = 0;
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      i = skipQuoted(sql, i, ch);
+    } else if (ch === '[') {
+      i = skipBracketIdentifier(sql, i);
+    } else if (ch === '-' && sql[i + 1] === '-') {
+      i = skipLineComment(sql, i);
+    } else if (ch === '/' && sql[i + 1] === '*') {
+      i = skipBlockComment(sql, i);
+    } else if (ch === '?') {
+      if (/\d/.test(sql[i + 1] ?? '')) {
+        return {
+          count: placeholders,
+          error: "Only anonymous '?' placeholders are supported; numbered placeholders like '?1' are not supported",
+        };
+      }
+      placeholders++;
+    } else if ((ch === ':' || ch === '@' || ch === '$') && /[A-Za-z_]/.test(sql[i + 1] ?? '')) {
+      return {
+        count: placeholders,
+        error: 'Only anonymous ? placeholders are supported; named placeholders are not supported',
+      };
+    }
+  }
+  return { count: placeholders };
+}
+
 export function sqlStatementType(sql: string): string {
+  return cached(statementTypeCache, sql, () => computeSqlStatementType(sql));
+}
+
+function computeSqlStatementType(sql: string): string {
   const first = readKeyword(sql, skipIgnorable(sql, 0));
   if (!first) return '';
   if (first.keyword !== 'WITH') return first.keyword;
@@ -82,6 +151,35 @@ export function isQueryResultStatement(sql: string): boolean {
     return hasKeyword(sql, 'RETURNING');
   }
   return false;
+}
+
+// `INSERT ... ON CONFLICT (...) DO UPDATE ...` (SQLite upsert, 3.24+) can resolve as an
+// UPDATE of an existing row instead of an INSERT. SQLite only updates last_insert_rowid()
+// on an actual row-table INSERT, so when the DO UPDATE arm runs, last_insert_rowid() still
+// reflects whatever the connection's last *real* insert was — a stale, unrelated value.
+// Callers use this to fall back to `lastInsertId: 0` for any statement that could take
+// that arm, rather than surface a rowid that may not correspond to the affected row.
+// `run-11` (UPSERT) regression-tests this; callers that need the affected row's id for an
+// UPSERT should use `query()` with a `RETURNING` clause instead.
+export function hasConflictClause(sql: string): boolean {
+  return cached(conflictCache, sql, () => hasKeyword(sql, 'CONFLICT'));
+}
+
+/**
+ * Returns true for SQLite's statement-level `OR ROLLBACK` conflict policy.
+ *
+ * Unlike ABORT/FAIL, ROLLBACK can end an explicit transaction behind the
+ * plugin's back. Backends which mirror transaction state in a boolean use this
+ * signal to clear that mirror after a failed statement.
+ */
+export function hasRollbackConflictClause(sql: string): boolean {
+  return cached(rollbackConflictCache, sql, () => {
+    const tokens = keywords(sql);
+    for (let i = 0; i + 1 < tokens.length; i++) {
+      if (tokens[i] === 'OR' && tokens[i + 1] === 'ROLLBACK') return true;
+    }
+    return false;
+  });
 }
 
 function hasTailContent(sql: string, start: number): boolean {
@@ -198,6 +296,29 @@ function hasKeyword(sql: string, target: string): boolean {
     }
   }
   return false;
+}
+
+function keywords(sql: string): string[] {
+  const result: string[] = [];
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      i = skipQuoted(sql, i, ch);
+    } else if (ch === '[') {
+      i = skipBracketIdentifier(sql, i);
+    } else if (ch === '-' && sql[i + 1] === '-') {
+      i = skipLineComment(sql, i);
+    } else if (ch === '/' && sql[i + 1] === '*') {
+      i = skipBlockComment(sql, i);
+    } else if (/[A-Za-z_]/.test(ch) && (i === 0 || !/[A-Za-z0-9_]/.test(sql[i - 1]))) {
+      const keyword = readKeyword(sql, i);
+      if (keyword) {
+        result.push(keyword.keyword);
+        i = keyword.end - 1;
+      }
+    }
+  }
+  return result;
 }
 
 function skipIdentifier(sql: string, start: number): number {

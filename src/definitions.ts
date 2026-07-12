@@ -19,7 +19,7 @@ export interface OpenOptions {
   /**
    * When `true`, opens the database in read-only mode.
    * Read operations are allowed, while write operations (`execute`, `run`,
-   * `runBatch`, `vacuum`, write transactions, and migrations) return a failure.
+   * `runBatch`, `runMany`, `vacuum`, write transactions, and migrations) return a failure.
    * Attempting to reopen an already-open database with a different `readonly`
    * value or `directory` returns DB_ALREADY_OPEN.
    */
@@ -81,11 +81,13 @@ export interface RunOptions {
   statement: string;
   /**
    * Positional values bound to anonymous `?` placeholders, in order.
+   * The value count must exactly match the placeholder count; `?` inside SQL
+   * strings, quoted identifiers, and comments is not counted.
    * `number` values must be finite; integer `number` values must be within
    * `Number.MAX_SAFE_INTEGER`.
    *
-   * BLOB values should use `Uint8Array`. Keep BLOB bind values at or below
-   * about 1 MB per value when crossing the Capacitor native bridge.
+   * BLOB values should use `Uint8Array`. Android/iOS transport them through a
+   * private tagged base64 envelope; Web/Electron retain the typed array.
    *
    * Numbered placeholders (`?1`) and named placeholders (`:name`, `@name`,
    * `$name`) are not part of the cross-platform API contract.
@@ -100,17 +102,50 @@ export interface RunBatchOptions {
   transaction?: boolean;
 }
 
+export interface RunManyOptions {
+  database: string;
+  /** Single parameterized SQL statement reused for every values entry. */
+  statement: string;
+  /**
+   * Non-empty list of positional value sets. Every inner array must exactly
+   * match the statement's anonymous `?` placeholders.
+   */
+  values: SQLiteValues[];
+  /** Wrap every execution in one transaction. Default: `true`. */
+  transaction?: boolean;
+  /**
+   * Return `{changes, lastInsertId}` for every execution. Default: `false`.
+   * Leave disabled for maximum throughput and the smallest bridge response.
+   */
+  returnResults?: boolean;
+}
+
+export interface RunManyItemResult {
+  changes: number;
+  lastInsertId: number;
+}
+
+export interface RunManyResult extends Record<string, unknown> {
+  changes: number;
+  /** Aggregate operations do not have one unambiguous inserted row ID. */
+  lastInsertId: 0;
+  /** Present only when `returnResults: true`. */
+  results?: RunManyItemResult[];
+}
+
 export interface QueryOptions {
   database: string;
   /** Result-producing statement using anonymous `?` placeholders for bound values. */
   statement: string;
   /**
    * Positional values bound to anonymous `?` placeholders, in order.
+   * The value count must exactly match the placeholder count; `?` inside SQL
+   * strings, quoted identifiers, and comments is not counted.
    * `number` values must be finite; integer `number` values must be within
    * `Number.MAX_SAFE_INTEGER`.
    *
-   * BLOB values should use `Uint8Array`. Keep BLOB bind values at or below
-   * about 1 MB per value when crossing the Capacitor native bridge.
+   * BLOB values should use `Uint8Array`. Android/iOS transport them through a
+   * private tagged base64 envelope; Web/Electron retain the typed array.
    *
    * On Android, `query()` uses a small SQL scanner before calling
    * `rawQuery(String[])` so numeric, boolean, and BLOB values keep their SQLite
@@ -215,18 +250,52 @@ export interface CapacitorSqlitePlugin {
    * Returns the number of affected rows and the row ID inserted by this statement.
    * `lastInsertId` is `0` for UPDATE, DELETE, statements that insert no row,
    * and other non-INSERT/REPLACE statements.
+   * `lastInsertId` is also `0` for any INSERT/REPLACE statement containing an
+   * `ON CONFLICT` clause, since SQLite does not update the underlying rowid counter
+   * when such a statement resolves via its `DO UPDATE` arm — use `query()` with a
+   * `RETURNING` clause instead to get the affected row's id from an UPSERT.
+   * It is conservatively `0` whenever SQLite's connection-level rowid counter
+   * is unchanged (for example `WITHOUT ROWID`, replacement of the same explicit
+   * rowid, or rowid reuse after deletion). Use `RETURNING` when the exact id is required.
    * Leading SQL comments and common `WITH ... INSERT` CTE forms are detected as inserts.
    * `lastInsertId` is a JavaScript number and is precise up to `Number.MAX_SAFE_INTEGER`.
+   *
+   * For Web/OPFS, each successful autocommit write includes a browser durability
+   * barrier. Use an explicit transaction, `runBatch()`, or `runMany()` for groups of
+   * writes instead of issuing many individual autocommit `run()` calls.
    */
   run(options: RunOptions): Promise<SqliteResult<{ changes: number; lastInsertId: number }>>;
 
   /**
    * Execute multiple parameterized statements in a single native call.
+   * Use this for mixed-SQL bulk writes. For one repeated statement, prefer
+   * `runMany()` because it transports and classifies the SQL text only once.
    * `lastInsertId` is always `0`; use `run()` when you need the inserted row ID.
    * When called inside `beginTransaction()`, pass `transaction: false`;
    * nested transactions return TRANSACTION_FAILED.
    */
   runBatch(options: RunBatchOptions): Promise<SqliteResult<{ changes: number; lastInsertId: number }>>;
+
+  /**
+   * Execute one parameterized statement for many value sets in one plugin call.
+   * Unlike `runBatch()`, the SQL text is transported and classified only once.
+   * Native and Electron backends retain one prepared statement for the loop;
+   * sqlite-wasm Worker1 does not expose persistent statement handles, but still
+   * benefits from the compact request shape. All value sets are validated before
+   * the first write.
+   *
+   * Prefer this over firing hundreds or thousands of concurrent `run()` calls for
+   * bulk inserts. `Promise.all(run(...))` still creates one bridge request, native
+   * queue entry, result object, and JavaScript callback per row; `runMany()` keeps
+   * the same work in one public call. On Web/OPFS it also avoids repeating a durable
+   * autocommit barrier for every row when `transaction` is left at its default.
+   *
+   * The operation is atomic by default. Pass `transaction: false` to preserve
+   * successful earlier executions if a later execution fails. `lastInsertId`
+   * on the aggregate result is always `0`; opt into `returnResults` when each
+   * execution's inserted row ID is required.
+   */
+  runMany(options: RunManyOptions): Promise<SqliteResult<RunManyResult>>;
 
   /**
    * Execute a result-producing statement and return rows as plain objects.

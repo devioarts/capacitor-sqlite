@@ -28,9 +28,10 @@ class SqlStatementGuardTest {
     fun rejectsMultipleStatementsAfterRealSemicolon() {
         assertTrue(SQLiteHelpers.hasMultipleStatements("SELECT 1; SELECT 2"))
         assertTrue(SQLiteHelpers.hasMultipleStatements("CREATE TABLE a(id); CREATE TABLE b(id)"))
-        assertThrows(IllegalArgumentException::class.java) {
+        val error = assertThrows(CapacitorSqliteException::class.java) {
             SQLiteHelpers.requireSingleStatement("INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)")
         }
+        assertTrue(error.code == "INVALID_PARAMS")
     }
 
     @Test
@@ -59,9 +60,10 @@ class SqlStatementGuardTest {
         assertTrue(
             SQLiteHelpers.hasMultipleStatements("CREATE TABLE t(begin TEXT, end TEXT); DROP TABLE users")
         )
-        assertThrows(IllegalArgumentException::class.java) {
+        val error = assertThrows(CapacitorSqliteException::class.java) {
             SQLiteHelpers.requireSingleStatement("CREATE TABLE t(begin TEXT); DROP TABLE users")
         }
+        assertTrue(error.code == "INVALID_PARAMS")
         // Quoting still works as an explicit escape hatch.
         assertTrue(SQLiteHelpers.hasMultipleStatements("CREATE TABLE t(\"begin\" TEXT); DROP TABLE users"))
         // A qualified reference (NEW.begin in a trigger's WHEN clause) must not be mistaken
@@ -101,5 +103,38 @@ class SqlStatementGuardTest {
                 "WITH one AS NOT MATERIALIZED (SELECT 1), two AS (SELECT 2) UPDATE t SET v = 1"
             ) == "UPDATE"
         )
+    }
+
+    @Test
+    fun detectsUpsertConflictClauseSoRunAvoidsStaleLastInsertId() {
+        assertTrue(SQLiteHelpers.hasConflictClause("INSERT INTO t VALUES (1) ON CONFLICT(id) DO UPDATE SET v = 1"))
+        assertTrue(SQLiteHelpers.hasConflictClause("INSERT INTO t VALUES (1) ON CONFLICT(id) DO NOTHING"))
+        assertFalse(SQLiteHelpers.hasConflictClause("INSERT OR REPLACE INTO t VALUES (1)"))
+        assertFalse(SQLiteHelpers.hasConflictClause("INSERT OR IGNORE INTO t VALUES (1)"))
+        assertFalse(SQLiteHelpers.hasConflictClause("INSERT INTO t VALUES (1)"))
+        assertFalse(SQLiteHelpers.hasConflictClause("UPDATE t SET v = 1"))
+        // The word must be a real keyword, not text inside a string/quoted identifier/comment.
+        assertFalse(SQLiteHelpers.hasConflictClause("INSERT INTO t (note) VALUES ('ON CONFLICT nice')"))
+        assertFalse(SQLiteHelpers.hasConflictClause("INSERT INTO t (\"conflict\") VALUES (1)"))
+        assertFalse(SQLiteHelpers.hasConflictClause("INSERT INTO t VALUES (1) /* on conflict */"))
+    }
+
+    @Test
+    fun detectsOrRollbackOnlyAsAdjacentSqlKeywords() {
+        assertTrue(SQLiteHelpers.hasRollbackConflictClause("INSERT OR ROLLBACK INTO t VALUES (1)"))
+        assertTrue(SQLiteHelpers.hasRollbackConflictClause("UPDATE OR /* gap */ ROLLBACK t SET v = 1"))
+        assertFalse(SQLiteHelpers.hasRollbackConflictClause("SELECT 'OR ROLLBACK'"))
+        assertFalse(SQLiteHelpers.hasRollbackConflictClause("SELECT or_rollback FROM t"))
+        assertFalse(SQLiteHelpers.hasRollbackConflictClause("SELECT 1 -- OR ROLLBACK\n"))
+        assertFalse(SQLiteHelpers.hasRollbackConflictClause("INSERT OR IGNORE INTO t VALUES (1)"))
+    }
+
+
+    @Test
+    fun qualifiedNewEndDoesNotCloseTriggerBodyEarly() {
+        val trigger = "CREATE TRIGGER trg AFTER INSERT ON t BEGIN INSERT INTO log VALUES " +
+            "(NEW.end); INSERT INTO log VALUES (2); END"
+        assertFalse(SQLiteHelpers.hasMultipleStatements(trigger))
+        assertTrue(SQLiteHelpers.hasMultipleStatements("$trigger; SELECT 1"))
     }
 }

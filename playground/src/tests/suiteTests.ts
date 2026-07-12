@@ -1,5 +1,5 @@
 import type { CapacitorSqlitePlugin, Migration, SqliteDirectory } from '../../../src/definitions.js';
-import { assert, assertEqual, assertOk, assertFail, type TestCase } from '../helpers/testRunner.js';
+import { assert, assertEqual, assertOk, assertFail, skipTest, type TestCase } from '../helpers/testRunner.js';
 
 // ── Real-world schema helpers ─────────────────────────────────────────────────
 
@@ -702,7 +702,7 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
     id: 'qph-05', group: 'Query Placeholders', name: 'Android rejects unsupported placeholder forms and count mismatch',
     fn: async () => {
       const plat = assertOk(await CapacitorSqlite.getPlatform(), 'platform');
-      if (plat.platform !== 'android') return;
+      if (plat.platform !== 'android') skipTest('Android-specific placeholder scanner test');
 
       const DB = 'suite_qph05';
       await silentClose(DB);
@@ -826,7 +826,7 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
     id: 'qph-12', group: 'Query Placeholders', name: 'Android rejects named placeholders even without values',
     fn: async () => {
       const plat = assertOk(await CapacitorSqlite.getPlatform(), 'platform');
-      if (plat.platform !== 'android') return;
+      if (plat.platform !== 'android') skipTest('Android-specific named-placeholder rejection test');
 
       const DB = 'suite_qph12';
       await silentClose(DB);
@@ -841,7 +841,7 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
     id: 'qph-13', group: 'Query Placeholders', name: 'Android rejects extra string/null values too',
     fn: async () => {
       const plat = assertOk(await CapacitorSqlite.getPlatform(), 'platform');
-      if (plat.platform !== 'android') return;
+      if (plat.platform !== 'android') skipTest('Android-specific extra-value scanner test');
 
       const DB = 'suite_qph13';
       await silentClose(DB);
@@ -949,6 +949,21 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
       await silentClose(DB);
     },
   },
+  {
+    id: 'gv-05', group: 'Metadata', name: 'open() sets a non-zero busy_timeout on every platform',
+    fn: async () => {
+      // Regression: Web previously never set busy_timeout, unlike Android/iOS (5000ms)
+      // and Electron's constructor `timeout` option — a lock conflict returned
+      // SQLITE_BUSY/IOERR immediately instead of retrying briefly like the other 3.
+      const DB = 'suite_gv05';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      const r = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'PRAGMA busy_timeout' }), 'busy_timeout');
+      const value = (r.rows[0] as { timeout: number }).timeout;
+      assert(value > 0, `busy_timeout should be > 0, got ${value}`);
+      await silentClose(DB);
+    },
+  },
 
   // ── Directory ────────────────────────────────────────────────────────────
   {
@@ -978,11 +993,11 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
     },
   },
   {
-    id: 'dir-03', group: 'Directory', name: 'native/Electron same DB open in different directory → DB_ALREADY_OPEN',
+    id: 'dir-03', group: 'Directory', name: 'same DB open in different directory → DB_ALREADY_OPEN (all platforms)',
     fn: async () => {
-      const plat = assertOk(await CapacitorSqlite.getPlatform(), 'platform');
-      if (plat.platform === 'web') return;
-
+      // Web maps every `directory` value to the same OPFS path, but still tracks the
+      // requested directory and enforces this guard for API-contract consistency with
+      // the other 3 platforms, which have genuinely different physical paths per directory.
       const DB = 'suite_dir03';
       await silentClose(DB);
       assertOk(await CapacitorSqlite.open({ database: DB, directory: 'library' }), 'open library');
@@ -1018,7 +1033,7 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
     fn: async () => {
       // Android's SQLiteDatabase connection pool keeps :memory: alive across close() — skip.
       const plat = assertOk(await CapacitorSqlite.getPlatform(), 'getPlatform');
-      if (plat.platform === 'android') return;
+      if (plat.platform === 'android') skipTest('Android framework keeps this :memory: connection pool alive');
 
       const DB = ':memory:';
       await silentClose(DB);
@@ -1418,7 +1433,7 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
 
   // ── Run (additional 2) ────────────────────────────────────────────────────
   {
-    id: 'run-06', group: 'Run', name: 'REPLACE INTO — updates existing row, lastInsertId changes',
+    id: 'run-06', group: 'Run', name: 'REPLACE INTO same rowid — updates row, ambiguous lastInsertId is 0',
     fn: async () => {
       const DB = 'suite_run06';
       await silentClose(DB);
@@ -1427,7 +1442,7 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
       const ins = assertOk(await CapacitorSqlite.run({ database: DB, statement: "INSERT INTO t VALUES (1, 'original')" }), 'insert');
       assertEqual(ins.lastInsertId, 1, 'first insert rowid=1');
       const rep = assertOk(await CapacitorSqlite.run({ database: DB, statement: "REPLACE INTO t VALUES (1, 'replaced')" }), 'replace');
-      assert(rep.lastInsertId > 0, 'REPLACE gives a lastInsertId');
+      assertEqual(rep.lastInsertId, 0, 'unchanged connection rowid is conservatively reported as 0');
       const q = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT v FROM t WHERE id=1' }), 'query');
       assertEqual((q.rows[0] as { v: string }).v, 'replaced', 'value was replaced');
       await silentClose(DB);
@@ -1453,7 +1468,7 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
     fn: async () => {
       // Android uses compileStatement which rejects SELECT statements — skip.
       const plat = assertOk(await CapacitorSqlite.getPlatform(), 'getPlatform');
-      if (plat.platform === 'android') return;
+      if (plat.platform === 'android') skipTest('Android compileStatement does not execute SELECT');
 
       const DB = 'suite_run08';
       await silentClose(DB);
@@ -1755,15 +1770,43 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
       await silentClose(DB);
       assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
       await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (id INTEGER PRIMARY KEY, hits INTEGER DEFAULT 0)'] });
-      await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES (1, 1)' });
+      const seed = await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES (1, 1)' });
       // UPSERT: if id conflicts, increment hits
       const r = await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES (1, 1) ON CONFLICT(id) DO UPDATE SET hits = hits + 1' });
       if (!r.success) {
         // SQLite < 3.24 (some old Android versions) — acceptable skip
-        await silentClose(DB); return;
+        await silentClose(DB);
+        skipTest(`UPSERT requires SQLite 3.24+: ${r.error.message}`);
       }
       const q = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT hits FROM t WHERE id=1' }), 'query');
       assertEqual((q.rows[0] as { hits: number }).hits, 2, 'hits incremented via UPSERT');
+      // Regression: the DO UPDATE arm must never surface a stale/unrelated rowid.
+      // SQLite only updates last_insert_rowid() on a real INSERT, not on the UPDATE
+      // arm of an upsert conflict, so a naive `changes > 0` check would otherwise
+      // return the seed insert's id (1) here, which happens to look plausible but
+      // is not actually derived from this statement.
+      assertEqual(r.data.lastInsertId, 0, 'UPSERT update-path must not surface a stale rowid');
+      assertOk(seed, 'seed insert');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'run-12', group: 'Run', name: 'UPSERT insert-path (no conflict) — conservative lastInsertId=0',
+    fn: async () => {
+      const DB = 'suite_run12';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (id INTEGER PRIMARY KEY, hits INTEGER DEFAULT 0)'] });
+      // Even though the INSERT arm runs, the public contract deliberately returns 0
+      // for every ON CONFLICT statement. Text inspection cannot reliably distinguish
+      // INSERT from DO UPDATE on every backend; callers needing the id use RETURNING.
+      const r = await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES (2, 1) ON CONFLICT(id) DO UPDATE SET hits = hits + 1' });
+      if (!r.success) {
+        // SQLite < 3.24 (some old Android versions) — acceptable skip
+        await silentClose(DB);
+        skipTest(`UPSERT requires SQLite 3.24+: ${r.error.message}`);
+      }
+      assertEqual(r.data.lastInsertId, 0, 'every ON CONFLICT statement has conservative lastInsertId=0');
       await silentClose(DB);
     },
   },
@@ -1787,6 +1830,325 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
         'runBatch on closed',
         'DB_NOT_OPEN',
       );
+    },
+  },
+  {
+    id: 'rb-06', group: 'RunBatch', name: 'runBatch() lastInsertId stays 0 even with an UPSERT in the set',
+    fn: async () => {
+      // runBatch()'s documented contract is "lastInsertId is always 0; use run() when you
+      // need the inserted row ID" — this must hold even for a set containing an UPSERT
+      // (see run-11/run-12), not just for plain multi-row inserts.
+      const DB = 'suite_rb06';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (id INTEGER PRIMARY KEY, hits INTEGER DEFAULT 0)'] });
+      const r = await CapacitorSqlite.runBatch({
+        database: DB,
+        set: [
+          { statement: 'INSERT INTO t VALUES (1, 1)' },
+          { statement: 'INSERT INTO t VALUES (1, 1) ON CONFLICT(id) DO UPDATE SET hits = hits + 1' },
+        ],
+      });
+      if (!r.success) {
+        // SQLite < 3.24 (some old Android versions) — acceptable skip
+        await silentClose(DB);
+        skipTest(`UPSERT requires SQLite 3.24+: ${r.error.message}`);
+      }
+      assertEqual(r.data.lastInsertId, 0, 'runBatch() never reports a row id, UPSERT or not');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'rb-07', group: 'RunBatch', name: 'batch changes include trigger side effects',
+    fn: async () => {
+      const DB = 'suite_rb07';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({
+        database: DB,
+        statements: [
+          'DROP TABLE IF EXISTS main_t',
+          'DROP TABLE IF EXISTS audit_t',
+          'DROP TRIGGER IF EXISTS rb07_trigger',
+          'CREATE TABLE main_t (v INTEGER)',
+          'CREATE TABLE audit_t (v INTEGER)',
+          'CREATE TRIGGER rb07_trigger AFTER INSERT ON main_t BEGIN INSERT INTO audit_t VALUES (NEW.v); END',
+        ],
+      }), 'setup');
+      const result = assertOk(await CapacitorSqlite.runBatch({
+        database: DB,
+        set: [
+          { statement: 'INSERT INTO main_t VALUES (?)', values: [1] },
+          { statement: 'INSERT INTO main_t VALUES (?)', values: [2] },
+        ],
+      }), 'trigger batch');
+      assertEqual(result.changes, 4, '2 direct + 2 trigger changes');
+      const count = assertOk(await CapacitorSqlite.query({
+        database: DB,
+        statement: 'SELECT (SELECT COUNT(*) FROM main_t) AS mainCount, (SELECT COUNT(*) FROM audit_t) AS auditCount',
+      }), 'counts');
+      const row = count.rows[0] as { mainCount: number; auditCount: number };
+      assertEqual(row.mainCount, 2, 'main rows');
+      assertEqual(row.auditCount, 2, 'trigger rows');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'rb-08', group: 'RunBatch', name: 'repeated prepared SQL rebinds every value without leakage',
+    fn: async () => {
+      const DB = 'suite_rb08';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({
+        database: DB,
+        statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (id INTEGER, text_value TEXT, blob_value BLOB)'],
+      }), 'setup');
+      const statement = 'INSERT INTO t VALUES (?, ?, ?)';
+      const result = assertOk(await CapacitorSqlite.runBatch({
+        database: DB,
+        set: [
+          { statement, values: [1, 'first', Uint8Array.from([1, 2])] },
+          { statement, values: [2, null, Uint8Array.from([])] },
+          { statement, values: [3, 'third', Uint8Array.from([255, 0, 128])] },
+        ],
+      }), 'repeated batch');
+      assertEqual(result.changes, 3, 'three direct changes');
+      const query = assertOk(await CapacitorSqlite.query({
+        database: DB,
+        statement: 'SELECT id, text_value, blob_value FROM t ORDER BY id',
+      }), 'rows');
+      assertEqual(query.rows.length, 3, 'three rows');
+      const rows = query.rows as { id: number; text_value: string | null; blob_value: Uint8Array }[];
+      assertEqual(rows[0].text_value, 'first', 'first text');
+      assertEqual(rows[1].text_value, null, 'NULL did not retain previous binding');
+      assertEqual(rows[2].text_value, 'third', 'third text');
+      assert(rows.every((row) => row.blob_value instanceof Uint8Array), 'all BLOBs returned as Uint8Array');
+      assertEqual(rows[0].blob_value[1], 2, 'first BLOB');
+      assertEqual(rows[1].blob_value.length, 0, 'empty BLOB');
+      assertEqual(rows[2].blob_value[2], 128, 'last BLOB');
+      await silentClose(DB);
+    },
+  },
+
+  // ── RunMany ───────────────────────────────────────────────────────────────
+  {
+    id: 'rm-01', group: 'RunMany', name: 'one prepared statement inserts many value sets',
+    fn: async () => {
+      const DB = 'suite_rm01';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (id INTEGER, v TEXT)'] }), 'setup');
+      const result = assertOk(await CapacitorSqlite.runMany({
+        database: DB,
+        statement: 'INSERT INTO t VALUES (?, ?)',
+        values: [[1, 'a'], [2, 'b'], [3, 'c']],
+      }), 'runMany');
+      assertEqual(result.changes, 3, 'aggregate changes');
+      assertEqual(result.lastInsertId, 0, 'aggregate row id');
+      assert(!('results' in result), 'per-item results omitted by default');
+      const count = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT COUNT(*) AS n FROM t' }), 'count');
+      assertEqual((count.rows[0] as { n: number }).n, 3, 'three inserted rows');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'rm-02', group: 'RunMany', name: 'returnResults reports each generated row ID',
+    fn: async () => {
+      const DB = 'suite_rm02';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)'] }), 'setup');
+      const result = assertOk(await CapacitorSqlite.runMany({
+        database: DB,
+        statement: 'INSERT INTO t (v) VALUES (?)',
+        values: [['a'], ['b'], ['c']],
+        returnResults: true,
+      }), 'runMany results');
+      assertEqual(result.results?.length, 3, 'three item results');
+      assertEqual(result.results?.[0].lastInsertId, 1, 'first row id');
+      assertEqual(result.results?.[2].lastInsertId, 3, 'last row id');
+      assert(result.results?.every((item) => item.changes === 1) === true, 'one direct change per item');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'rm-03', group: 'RunMany', name: 'empty values → INVALID_PARAMS',
+    fn: async () => {
+      const DB = 'suite_rm03';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertFail(await CapacitorSqlite.runMany({ database: DB, statement: 'INSERT INTO t VALUES (?)', values: [] }), 'empty runMany', 'INVALID_PARAMS');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'rm-04', group: 'RunMany', name: 'all bind counts validate before the first write',
+    fn: async () => {
+      const DB = 'suite_rm04';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (v INTEGER)'] }), 'setup');
+      assertFail(await CapacitorSqlite.runMany({
+        database: DB,
+        statement: 'INSERT INTO t VALUES (?)',
+        values: [[1], [2, 3], [4]],
+      }), 'mismatched bind set', 'INVALID_PARAMS');
+      const count = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT COUNT(*) AS n FROM t' }), 'count');
+      assertEqual((count.rows[0] as { n: number }).n, 0, 'validation failure wrote nothing');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'rm-05', group: 'RunMany', name: 'default transaction rolls back a runtime constraint failure',
+    fn: async () => {
+      const DB = 'suite_rm05';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (v INTEGER UNIQUE)'] }), 'setup');
+      assertFail(await CapacitorSqlite.runMany({ database: DB, statement: 'INSERT INTO t VALUES (?)', values: [[1], [2], [1]] }), 'constraint');
+      const count = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT COUNT(*) AS n FROM t' }), 'count');
+      assertEqual((count.rows[0] as { n: number }).n, 0, 'atomic rollback');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'rm-06', group: 'RunMany', name: 'transaction:false preserves successful earlier executions',
+    fn: async () => {
+      const DB = 'suite_rm06';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (v INTEGER UNIQUE)'] }), 'setup');
+      assertFail(await CapacitorSqlite.runMany({
+        database: DB,
+        statement: 'INSERT INTO t VALUES (?)',
+        values: [[1], [2], [1], [3]],
+        transaction: false,
+      }), 'partial runMany');
+      const rows = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT v FROM t ORDER BY v' }), 'rows');
+      assertEqual(rows.rows.length, 2, 'two earlier rows persisted');
+      assertEqual((rows.rows[1] as { v: number }).v, 2, 'execution stopped at failure');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'rm-07', group: 'RunMany', name: 'aggregate changes include trigger side effects',
+    fn: async () => {
+      const DB = 'suite_rm07';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({ database: DB, statements: [
+        'DROP TABLE IF EXISTS t', 'DROP TABLE IF EXISTS audit', 'DROP TRIGGER IF EXISTS rm07_trigger',
+        'CREATE TABLE t (v INTEGER)', 'CREATE TABLE audit (v INTEGER)',
+        'CREATE TRIGGER rm07_trigger AFTER INSERT ON t BEGIN INSERT INTO audit VALUES (NEW.v); END',
+      ] }), 'setup');
+      const result = assertOk(await CapacitorSqlite.runMany({
+        database: DB,
+        statement: 'INSERT INTO t VALUES (?)',
+        values: [[1], [2], [3]],
+      }), 'trigger runMany');
+      assertEqual(result.changes, 6, '3 direct + 3 trigger changes');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'rm-08', group: 'RunMany', name: 'rebinds NULL, empty BLOB and non-empty BLOB without leakage',
+    fn: async () => {
+      const DB = 'suite_rm08';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (id INTEGER, v TEXT, b BLOB)'] }), 'setup');
+      assertOk(await CapacitorSqlite.runMany({
+        database: DB,
+        statement: 'INSERT INTO t VALUES (?, ?, ?)',
+        values: [[1, 'first', Uint8Array.from([1, 2])], [2, null, new Uint8Array()], [3, 'third', Uint8Array.from([255])]],
+      }), 'mixed values');
+      const result = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT id, v, b FROM t ORDER BY id' }), 'query');
+      const rows = result.rows as { id: number; v: string | null; b: Uint8Array }[];
+      assertEqual(rows[1].v, null, 'NULL binding');
+      assertEqual(rows[1].b.length, 0, 'empty BLOB');
+      assertEqual(rows[2].b[0], 255, 'last BLOB');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'rm-09', group: 'RunMany', name: 'closed database → DB_NOT_OPEN',
+    fn: async () => {
+      assertFail(await CapacitorSqlite.runMany({
+        database: 'suite_rm09_closed',
+        statement: 'INSERT INTO t VALUES (?)',
+        values: [[1]],
+      }), 'closed runMany', 'DB_NOT_OPEN');
+    },
+  },
+  {
+    id: 'rm-10', group: 'RunMany', name: 'readonly database rejects writes',
+    fn: async () => {
+      const DB = 'suite_rm10';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open writable');
+      assertOk(await CapacitorSqlite.execute({ database: DB, statements: ['CREATE TABLE IF NOT EXISTS t (v INTEGER)'] }), 'setup');
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB, readonly: true }), 'open readonly');
+      assertFail(await CapacitorSqlite.runMany({ database: DB, statement: 'INSERT INTO t VALUES (?)', values: [[1]] }), 'readonly runMany');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'rm-11', group: 'RunMany', name: 'manual transaction requires transaction:false and remains usable',
+    fn: async () => {
+      const DB = 'suite_rm11';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (v INTEGER)'] }), 'setup');
+      assertOk(await CapacitorSqlite.beginTransaction({ database: DB }), 'begin');
+      assertFail(await CapacitorSqlite.runMany({ database: DB, statement: 'INSERT INTO t VALUES (?)', values: [[1]] }), 'nested runMany', 'TRANSACTION_FAILED');
+      assertOk(await CapacitorSqlite.runMany({
+        database: DB,
+        statement: 'INSERT INTO t VALUES (?)',
+        values: [[1], [2]],
+        transaction: false,
+      }), 'participating runMany');
+      assertOk(await CapacitorSqlite.rollbackTransaction({ database: DB }), 'rollback');
+      const count = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT COUNT(*) AS n FROM t' }), 'count');
+      assertEqual((count.rows[0] as { n: number }).n, 0, 'outer rollback removed rows');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'rm-12', group: 'RunMany', name: 'UPSERT per-item results keep conservative lastInsertId=0',
+    fn: async () => {
+      const DB = 'suite_rm12';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (id INTEGER PRIMARY KEY, hits INTEGER)'] }), 'setup');
+      const result = await CapacitorSqlite.runMany({
+        database: DB,
+        statement: 'INSERT INTO t VALUES (?, 1) ON CONFLICT(id) DO UPDATE SET hits = hits + 1',
+        values: [[1], [1]],
+        returnResults: true,
+      });
+      if (!result.success) {
+        await silentClose(DB);
+        skipTest(`UPSERT requires SQLite 3.24+: ${result.error.message}`);
+      }
+      assert(result.data.results?.every((item) => item.lastInsertId === 0) === true, 'all UPSERT row IDs are conservative');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'rm-13', group: 'RunMany', name: 'statements without placeholders accept empty value sets',
+    fn: async () => {
+      const DB = 'suite_rm13';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (v INTEGER DEFAULT 7)'] }), 'setup');
+      const result = assertOk(await CapacitorSqlite.runMany({
+        database: DB,
+        statement: 'INSERT INTO t DEFAULT VALUES',
+        values: [[], [], []],
+      }), 'empty bind sets');
+      assertEqual(result.changes, 3, 'three default rows');
+      await silentClose(DB);
     },
   },
 
@@ -2083,6 +2445,32 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
       await silentClose(DB);
     },
   },
+  {
+    id: 'mig-10', group: 'Migrations', name: 'a multi-version list is not atomic as a whole — earlier versions in the same open() call stay committed',
+    fn: async () => {
+      const DB = 'suite_mig10';
+      await silentClose(DB);
+      const threeVersions: Migration[] = [
+        { version: 1, statements: ['CREATE TABLE t (id INTEGER PRIMARY KEY)'] },
+        { version: 2, statements: ['ALTER TABLE t ADD COLUMN note TEXT'] },
+        { version: 3, statements: ['THIS IS INVALID SQL THAT WILL FAIL'] },
+      ];
+      // A single open() call with all 3 versions — v3 fails, but v1 and v2 already
+      // committed (each migration runs in its own transaction) before v3 ran.
+      assertFail(await CapacitorSqlite.open({ database: DB, migrations: threeVersions }), 'open all 3, v3 fails', 'MIGRATION_FAILED');
+
+      // Re-open with no migrations at all: if v1/v2 hadn't actually committed, this
+      // table wouldn't exist and schema version would be 0.
+      assertOk(await CapacitorSqlite.open({ database: DB }), 're-open without migrations');
+      const sv = assertOk(await CapacitorSqlite.getSchemaVersion({ database: DB }), 'schema version');
+      assertEqual(sv.version, 2, 'v1 and v2 remained committed despite the overall open() call failing');
+      assertOk(
+        await CapacitorSqlite.run({ database: DB, statement: 'INSERT OR IGNORE INTO t (id, note) VALUES (1, ?)', values: ['x'] }),
+        'v2 column usable',
+      );
+      await silentClose(DB);
+    },
+  },
 
   // ── BLOB (extra) ──────────────────────────────────────────────────────────
   {
@@ -2191,6 +2579,28 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
       await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES (?)', values: [text] });
       const q = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT v FROM t' }), 'query');
       assertEqual((q.rows[0] as { v: string }).v, text, 'backslash+percent preserved');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'str-07', group: 'String', name: 'internal BLOB marker-looking text remains TEXT',
+    fn: async () => {
+      const DB = 'suite_str07';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({
+        database: DB,
+        statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (v TEXT)'],
+      }), 'setup');
+      const text = '__capacitorSqliteBlobBase64:literal-user-text';
+      assertOk(await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES (?)', values: [text] }), 'insert');
+      const query = assertOk(await CapacitorSqlite.query({
+        database: DB,
+        statement: 'SELECT v, TYPEOF(v) AS storageType FROM t',
+      }), 'query');
+      const row = query.rows[0] as { v: string; storageType: string };
+      assertEqual(row.v, text, 'marker-looking string is unchanged');
+      assertEqual(row.storageType, 'text', 'marker-looking string remains SQLite TEXT');
       await silentClose(DB);
     },
   },
@@ -3356,7 +3766,8 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
         statement: 'SELECT score, ROW_NUMBER() OVER (ORDER BY score ASC) AS rn FROM t ORDER BY score ASC' });
       if (!r.success) {
         // Window functions require SQLite ≥ 3.25 — skip gracefully on older builds
-        return;
+        await silentClose(DB);
+        skipTest(`window functions require SQLite 3.25+: ${r.error.message}`);
       }
       assertEqual(r.data.rows.length, 3, '3 rows');
       assertEqual((r.data.rows[0] as { rn: number }).rn, 1, 'lowest score gets rn=1');
@@ -3378,7 +3789,10 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
       ]});
       const r = await CapacitorSqlite.query({ database: DB,
         statement: 'SELECT day, amount, SUM(amount) OVER (ORDER BY day ROWS UNBOUNDED PRECEDING) AS running FROM t ORDER BY day' });
-      if (!r.success) return; // SQLite < 3.25 graceful skip
+      if (!r.success) {
+        await silentClose(DB);
+        skipTest(`window functions require SQLite 3.25+: ${r.error.message}`);
+      }
       const rows = r.data.rows as { day: number; amount: number; running: number }[];
       assertEqual(rows[0].running, 10, 'day 1 running = 10');
       assertEqual(rows[1].running, 30, 'day 2 running = 30');
@@ -3400,7 +3814,10 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
       ]});
       const r = await CapacitorSqlite.query({ database: DB,
         statement: 'SELECT name, score, RANK() OVER (ORDER BY score DESC) AS rnk FROM t ORDER BY score DESC, name ASC' });
-      if (!r.success) return; // SQLite < 3.25 graceful skip
+      if (!r.success) {
+        await silentClose(DB);
+        skipTest(`window functions require SQLite 3.25+: ${r.error.message}`);
+      }
       const rows = r.data.rows as { name: string; rnk: number }[];
       assertEqual(rows[0].rnk, 1, 'alice rank=1 (tied)');
       assertEqual(rows[1].rnk, 1, 'carol rank=1 (tied)');
@@ -3420,7 +3837,10 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
       await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES (?)', values: ['{"name":"alice","age":30,"tags":["admin","user"]}'] });
       const r = await CapacitorSqlite.query({ database: DB,
         statement: "SELECT json_extract(data,'$.name') AS name, json_extract(data,'$.age') AS age FROM t" });
-      if (!r.success) return; // json_extract requires SQLite ≥ 3.9 — skip if not supported
+      if (!r.success) {
+        await silentClose(DB);
+        skipTest(`JSON1 is unavailable: ${r.error.message}`);
+      }
       const row = r.data.rows[0] as { name: string; age: number };
       assertEqual(row.name, 'alice', 'json_extract name');
       assertEqual(row.age, 30, 'json_extract age');
@@ -3434,7 +3854,10 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
       await silentClose(DB);
       assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
       const r = await CapacitorSqlite.query({ database: DB, statement: "SELECT json('{\"a\":1,\"b\":2}') AS v" });
-      if (!r.success) return; // graceful skip if json() not available
+      if (!r.success) {
+        await silentClose(DB);
+        skipTest(`JSON1 is unavailable: ${r.error.message}`);
+      }
       const v = (r.data.rows[0] as { v: string }).v;
       assert(typeof v === 'string' && v.length > 0, 'json() returns non-empty string');
       const parsed = JSON.parse(v) as { a: number; b: number };
@@ -3450,7 +3873,10 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
       await silentClose(DB);
       assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
       const r = await CapacitorSqlite.query({ database: DB, statement: "SELECT json_array(1,'two',3.0) AS v" });
-      if (!r.success) return; // graceful skip
+      if (!r.success) {
+        await silentClose(DB);
+        skipTest(`JSON1 is unavailable: ${r.error.message}`);
+      }
       const v = (r.data.rows[0] as { v: string }).v;
       const arr = JSON.parse(v) as unknown[];
       assertEqual(arr.length, 3, 'json_array length');
@@ -4274,12 +4700,15 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
     id: 'wal-01', group: 'WAL Mode', name: 'PRAGMA journal_mode=WAL — graceful on platforms that support it',
     fn: async () => {
       const plat = assertOk(await CapacitorSqlite.getPlatform(), 'platform');
-      if (plat.platform === 'web') return; // OPFS WAL not reliably supported in WASM
+      if (plat.platform === 'web') skipTest('OPFS WAL is not reliably supported in sqlite-wasm');
       const DB = 'suite_wal01';
       await silentClose(DB);
       assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
       const r = await CapacitorSqlite.query({ database: DB, statement: 'PRAGMA journal_mode=WAL' });
-      if (!r.success) { await silentClose(DB); return; } // graceful skip
+      if (!r.success) {
+        await silentClose(DB);
+        skipTest(`WAL unavailable: ${r.error.message}`);
+      }
       const mode = (r.data.rows[0] as { journal_mode: string }).journal_mode;
       assert(['wal', 'delete', 'memory'].includes(mode), `journal_mode "${mode}" is a known mode`);
       await silentClose(DB);
@@ -4289,7 +4718,7 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
     id: 'wal-02', group: 'WAL Mode', name: 'PRAGMA synchronous=NORMAL — read back as 1',
     fn: async () => {
       const plat = assertOk(await CapacitorSqlite.getPlatform(), 'platform');
-      if (plat.platform === 'web') return;
+      if (plat.platform === 'web') skipTest('OPFS synchronous mode differs from native WAL backends');
       const DB = 'suite_wal02';
       await silentClose(DB);
       assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
@@ -4440,7 +4869,10 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
       const r = await CapacitorSqlite.open({ database: DB, migrations: [
         { version: 0, statements: ['CREATE TABLE IF NOT EXISTS marker_me01 (v INTEGER)'] },
       ]});
-      if (!r.success) { await silentClose(DB); return; } // plugin rejects v0 — also acceptable
+      if (!r.success) {
+        await silentClose(DB);
+        skipTest(`version 0 is rejected by the strict migration contract: ${r.error.message}`);
+      }
       // If open succeeded, verify user_version is still 0 (v0 was not applied)
       const gv = assertOk(await CapacitorSqlite.getSchemaVersion({ database: DB }), 'getSchemaVersion');
       assertEqual(gv.version, 0, 'user_version remains 0 — v0 migration not applied');
@@ -4865,6 +5297,49 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
       await silentClose(DB);
     },
   },
+  {
+    id: 'lid-06', group: 'lastInsertId', name: 'Deleted rowid reuse is ambiguous and returns 0',
+    fn: async () => {
+      const DB = 'suite_lid06';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({ database: DB, statements: [
+        'DROP TABLE IF EXISTS t',
+        'CREATE TABLE t (v TEXT)',
+      ] }), 'ddl');
+      const first = assertOk(await CapacitorSqlite.run({ database: DB, statement: "INSERT INTO t VALUES ('first')" }), 'first insert');
+      assertEqual(first.lastInsertId, 1, 'first rowid');
+      assertOk(await CapacitorSqlite.run({ database: DB, statement: 'DELETE FROM t WHERE rowid = 1' }), 'delete');
+      const reused = assertOk(await CapacitorSqlite.run({ database: DB, statement: "INSERT INTO t VALUES ('reused')" }), 'reused insert');
+      assertEqual(reused.lastInsertId, 0, 'reused unchanged rowid is not presented as newly identifiable');
+      const q = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT rowid, v FROM t' }), 'verify row');
+      assertEqual((q.rows[0] as { rowid: number; v: string }).rowid, 1, 'SQLite reused rowid 1');
+      assertEqual((q.rows[0] as { rowid: number; v: string }).v, 'reused', 'insert succeeded');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'lid-07', group: 'lastInsertId', name: 'INSERT RETURNING keeps later run() rowid state synchronized',
+    fn: async () => {
+      const DB = 'suite_lid07';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (v TEXT)'] }), 'setup');
+      const inserted = await CapacitorSqlite.query<{ rowid: number }>({
+        database: DB,
+        statement: "INSERT INTO t VALUES ('first') RETURNING rowid",
+      });
+      if (!inserted.success) {
+        await silentClose(DB);
+        skipTest(`RETURNING requires SQLite 3.35+: ${inserted.error.message}`);
+      }
+      assertEqual(inserted.data.rows[0].rowid, 1, 'RETURNING rowid');
+      assertOk(await CapacitorSqlite.run({ database: DB, statement: 'DELETE FROM t WHERE rowid = 1' }), 'delete');
+      const reused = assertOk(await CapacitorSqlite.run({ database: DB, statement: "INSERT INTO t VALUES ('reused')" }), 'reused insert');
+      assertEqual(reused.lastInsertId, 0, 'query() insert updated connection rowid state');
+      await silentClose(DB);
+    },
+  },
 
   // ── WITHOUT ROWID ──────────────────────────────────────────────────────────
   {
@@ -4928,10 +5403,19 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
       assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
       assertOk(await CapacitorSqlite.execute({ database: DB, statements: [
         'DROP TABLE IF EXISTS t',
+        'DROP TABLE IF EXISTS rowid_seed',
+        'CREATE TABLE rowid_seed (id INTEGER PRIMARY KEY)',
         'CREATE TABLE t (code TEXT PRIMARY KEY, val INTEGER) WITHOUT ROWID',
       ] }), 'ddl');
+      // Seed the connection-level last_insert_rowid(). A weak test on a fresh
+      // connection sees 0 by coincidence and misses the stale-rowid bug.
+      const seed = assertOk(
+        await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO rowid_seed VALUES (73)' }),
+        'seed rowid',
+      );
+      assertEqual(seed.lastInsertId, 73, 'seed establishes a non-zero connection rowid');
       const r = assertOk(await CapacitorSqlite.run({ database: DB, statement: "INSERT INTO t VALUES ('z', 7)" }), 'insert');
-      assertEqual(r.lastInsertId, 0, 'WITHOUT ROWID has no rowid → lastInsertId = 0');
+      assertEqual(r.lastInsertId, 0, 'WITHOUT ROWID must not surface stale rowid 73');
       await silentClose(DB);
     },
   },
@@ -4947,7 +5431,10 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
         'DROP TABLE IF EXISTS docs',
         'CREATE VIRTUAL TABLE docs USING fts5(title, body)',
       ] });
-      if (!ftsCreate.success) return;
+      if (!ftsCreate.success) {
+        await silentClose(DB);
+        skipTest(`FTS5 unavailable: ${ftsCreate.error.message}`);
+      }
       assertOk(await CapacitorSqlite.execute({ database: DB, statements: [
         "INSERT INTO docs VALUES ('Hello World', 'The quick brown fox')",
         "INSERT INTO docs VALUES ('SQLite FTS', 'Full text search is fast')",
@@ -4969,7 +5456,10 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
         'DROP TABLE IF EXISTS docs',
         'CREATE VIRTUAL TABLE docs USING fts5(content)',
       ] });
-      if (!ftsCreate.success) return;
+      if (!ftsCreate.success) {
+        await silentClose(DB);
+        skipTest(`FTS5 unavailable: ${ftsCreate.error.message}`);
+      }
       assertOk(await CapacitorSqlite.execute({ database: DB, statements: [
         "INSERT INTO docs VALUES ('the quick brown fox')",
         "INSERT INTO docs VALUES ('a lazy dog sits')",
@@ -4990,7 +5480,10 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
         'DROP TABLE IF EXISTS docs',
         'CREATE VIRTUAL TABLE docs USING fts5(content)',
       ] });
-      if (!ftsCreate.success) return;
+      if (!ftsCreate.success) {
+        await silentClose(DB);
+        skipTest(`FTS5 unavailable: ${ftsCreate.error.message}`);
+      }
       assertOk(await CapacitorSqlite.execute({ database: DB, statements: [
         "INSERT INTO docs(rowid, content) VALUES (1, 'searchable alpha content')",
         "INSERT INTO docs(rowid, content) VALUES (2, 'unrelated beta')",
@@ -5013,7 +5506,10 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
         'DROP TABLE IF EXISTS t',
         'CREATE TABLE t (price REAL, qty INTEGER, total REAL GENERATED ALWAYS AS (price * qty) VIRTUAL)',
       ] });
-      if (!ddl.success) return;
+      if (!ddl.success) {
+        await silentClose(DB);
+        skipTest(`generated columns unavailable: ${ddl.error.message}`);
+      }
       assertOk(await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t (price, qty) VALUES (2.5, 4)' }), 'insert');
       const q = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT total FROM t' }), 'select');
       assertEqual((q.rows[0] as { total: number }).total, 10.0, 'virtual generated: 2.5 * 4 = 10');
@@ -5030,7 +5526,10 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
         'DROP TABLE IF EXISTS t',
         "CREATE TABLE t (first TEXT, last TEXT, full_name TEXT GENERATED ALWAYS AS (first || ' ' || last) STORED)",
       ] });
-      if (!ddl.success) return;
+      if (!ddl.success) {
+        await silentClose(DB);
+        skipTest(`generated columns unavailable: ${ddl.error.message}`);
+      }
       assertOk(await CapacitorSqlite.run({ database: DB, statement: "INSERT INTO t (first, last) VALUES ('John', 'Doe')" }), 'insert');
       const q = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT full_name FROM t' }), 'select');
       assertEqual((q.rows[0] as { full_name: string }).full_name, 'John Doe', 'stored generated: first || last');
@@ -5048,7 +5547,10 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
         'CREATE TABLE t (data TEXT, upper_data TEXT GENERATED ALWAYS AS (UPPER(data)) STORED)',
         'CREATE INDEX idx_upper ON t (upper_data)',
       ] });
-      if (!ddl.success) return;
+      if (!ddl.success) {
+        await silentClose(DB);
+        skipTest(`generated columns unavailable: ${ddl.error.message}`);
+      }
       assertOk(await CapacitorSqlite.run({ database: DB, statement: "INSERT INTO t (data) VALUES ('hello')" }), 'insert');
       const q = assertOk(await CapacitorSqlite.query({ database: DB, statement: "SELECT data FROM t WHERE upper_data = 'HELLO'" }), 'indexed query');
       assertEqual(q.rows.length, 1, 'indexed generated column query returns 1 row');
@@ -5066,7 +5568,10 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
         'DROP TABLE IF EXISTS t',
         'CREATE TABLE t (x INTEGER, y INTEGER GENERATED ALWAYS AS (x * 2) VIRTUAL)',
       ] });
-      if (!ddl.success) return;
+      if (!ddl.success) {
+        await silentClose(DB);
+        skipTest(`generated columns unavailable: ${ddl.error.message}`);
+      }
       const r = await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t (x, y) VALUES (1, 999)' });
       if (r.success) throw new Error('gen-04: INSERT into generated column must fail');
       assert(typeof r.error.code === 'string', 'error code is string');
@@ -5085,7 +5590,10 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
         'DROP TABLE IF EXISTS t',
         'CREATE TABLE t (id INTEGER, name TEXT, score REAL) STRICT',
       ] });
-      if (!ddl.success) return;
+      if (!ddl.success) {
+        await silentClose(DB);
+        skipTest(`STRICT tables unavailable: ${ddl.error.message}`);
+      }
       assertOk(await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES (1, ?, 9.5)', values: ['Alice'] }), 'insert');
       const q = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT name, score FROM t' }), 'select');
       assertEqual((q.rows[0] as { name: string }).name, 'Alice', 'name correct');
@@ -5103,7 +5611,10 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
         'DROP TABLE IF EXISTS t',
         'CREATE TABLE t (id INTEGER, val INTEGER) STRICT',
       ] });
-      if (!ddl.success) return;
+      if (!ddl.success) {
+        await silentClose(DB);
+        skipTest(`STRICT tables unavailable: ${ddl.error.message}`);
+      }
       const r = await CapacitorSqlite.run({ database: DB, statement: "INSERT INTO t VALUES (1, 'not_an_integer')" });
       if (r.success) throw new Error('strict-02: text into STRICT INTEGER must fail');
       assert(typeof r.error.code === 'string', 'error code is string');
@@ -5120,7 +5631,10 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
         'DROP TABLE IF EXISTS t',
         'CREATE TABLE t (id INTEGER, flex ANY) STRICT',
       ] });
-      if (!ddl.success) return;
+      if (!ddl.success) {
+        await silentClose(DB);
+        skipTest(`STRICT tables unavailable: ${ddl.error.message}`);
+      }
       assertOk(await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES (1, 42)' }), 'integer');
       assertOk(await CapacitorSqlite.run({ database: DB, statement: "INSERT INTO t VALUES (2, 'text')" }), 'text');
       assertOk(await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES (3, 3.14)' }), 'real');
@@ -5142,7 +5656,10 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
         'CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)',
       ] }), 'ddl');
       const q = await CapacitorSqlite.query({ database: DB, statement: "INSERT INTO t (name) VALUES ('Alice') RETURNING id, name" });
-      if (!q.success) return;
+      if (!q.success) {
+        await silentClose(DB);
+        skipTest(`RETURNING unavailable: ${q.error.message}`);
+      }
       const rows = q.data.rows as { id: number; name: string }[];
       assertEqual(rows.length, 1, 'RETURNING yields 1 row');
       assertEqual(rows[0].name, 'Alice', 'RETURNING name correct');
@@ -5162,7 +5679,10 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
         'INSERT INTO t VALUES (1, 10)',
       ] }), 'ddl');
       const q = await CapacitorSqlite.query({ database: DB, statement: 'UPDATE t SET score = score + 5 WHERE id = 1 RETURNING id, score' });
-      if (!q.success) return;
+      if (!q.success) {
+        await silentClose(DB);
+        skipTest(`RETURNING unavailable: ${q.error.message}`);
+      }
       const rows = q.data.rows as { id: number; score: number }[];
       assertEqual(rows.length, 1, 'RETURNING 1 row');
       assertEqual(rows[0].score, 15, 'RETURNING updated score = 10 + 5 = 15');
@@ -5182,7 +5702,10 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
         "INSERT INTO t VALUES (2, 'Carol')",
       ] }), 'ddl');
       const q = await CapacitorSqlite.query({ database: DB, statement: 'DELETE FROM t WHERE id = 1 RETURNING id, name' });
-      if (!q.success) return;
+      if (!q.success) {
+        await silentClose(DB);
+        skipTest(`RETURNING unavailable: ${q.error.message}`);
+      }
       const rows = q.data.rows as { id: number; name: string }[];
       assertEqual(rows.length, 1, 'RETURNING 1 deleted row');
       assertEqual(rows[0].name, 'Bob', 'RETURNING deleted name');
@@ -5202,7 +5725,10 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
         'CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, val INTEGER)',
       ] }), 'ddl');
       const q = await CapacitorSqlite.query({ database: DB, statement: 'INSERT INTO t (val) VALUES (7) RETURNING id, val, val * 2 AS doubled' });
-      if (!q.success) return;
+      if (!q.success) {
+        await silentClose(DB);
+        skipTest(`RETURNING unavailable: ${q.error.message}`);
+      }
       const rows = q.data.rows as { id: number; val: number; doubled: number }[];
       assertEqual(rows[0].doubled, 14, 'RETURNING expression: 7 * 2 = 14');
       await silentClose(DB);
@@ -5331,6 +5857,10 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
       const DB = 'suite_mstmt06';
       await silentClose(DB);
       assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(
+        await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'DROP TABLE IF EXISTS t2'] }),
+        'repeatable setup',
+      );
       // SQLite does not reserve BEGIN/CASE, so both are valid unquoted column names.
       // A two-statement string using one of them as a column name must still be
       // rejected as multiple statements — not silently run as if it were one.
@@ -5688,13 +6218,13 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
       const DB = 'suite_soak03';
       await silentClose(DB);
       assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
-      assertOk(await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (d BLOB)'] }), 'ddl');
+      assertOk(await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (cycle INTEGER, d BLOB)'] }), 'ddl');
       const blob = new Uint8Array(50 * 1024).fill(0xCD);
       for (let i = 1; i <= 20; i++) {
-        const ins = assertOk(await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES (?)', values: [blob] }), `insert ${i}`);
-        const q = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT LENGTH(d) AS len FROM t WHERE rowid = ?', values: [ins.lastInsertId] }), `query ${i}`);
+        assertOk(await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES (?, ?)', values: [i, blob] }), `insert ${i}`);
+        const q = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT LENGTH(d) AS len FROM t WHERE cycle = ?', values: [i] }), `query ${i}`);
         assertEqual((q.rows[0] as { len: number }).len, 50 * 1024, `cycle ${i}: 50 KB BLOB length correct`);
-        assertOk(await CapacitorSqlite.run({ database: DB, statement: 'DELETE FROM t WHERE rowid = ?', values: [ins.lastInsertId] }), `delete ${i}`);
+        assertOk(await CapacitorSqlite.run({ database: DB, statement: 'DELETE FROM t WHERE cycle = ?', values: [i] }), `delete ${i}`);
       }
       const cnt = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT COUNT(*) AS n FROM t' }), 'final count');
       assertEqual((cnt.rows[0] as { n: number }).n, 0, 'table empty after 20 BLOB insert/delete cycles');
@@ -6298,7 +6828,10 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
         "INSERT INTO t VALUES (1, 'hello')",
       ] }), 'ddl');
       const rename = await CapacitorSqlite.execute({ database: DB, statements: ['ALTER TABLE t RENAME COLUMN old_name TO new_name'] });
-      if (!rename.success) return; // SQLite < 3.25 — graceful skip
+      if (!rename.success) {
+        await silentClose(DB);
+        skipTest(`RENAME COLUMN requires SQLite 3.25+: ${rename.error.message}`);
+      }
       const q = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT new_name FROM t WHERE id = 1' }), 'query');
       assertEqual((q.rows[0] as { new_name: string }).new_name, 'hello', 'renamed column returns original value');
       await silentClose(DB);
@@ -6316,7 +6849,10 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
         "INSERT INTO t VALUES (1, 'keep', 'drop')",
       ] }), 'ddl');
       const drop = await CapacitorSqlite.execute({ database: DB, statements: ['ALTER TABLE t DROP COLUMN drop_col'] });
-      if (!drop.success) return; // SQLite < 3.35 — graceful skip
+      if (!drop.success) {
+        await silentClose(DB);
+        skipTest(`DROP COLUMN requires SQLite 3.35+: ${drop.error.message}`);
+      }
       const q = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT keep_col FROM t WHERE id = 1' }), 'query');
       assertEqual((q.rows[0] as { keep_col: string }).keep_col, 'keep', 'remaining column intact after drop');
       await silentClose(DB);
@@ -6351,6 +6887,252 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
       const r = await CapacitorSqlite.commitTransaction({ database: DB });
       if (r.success) throw new Error('txstate-02: expected commitTransaction to fail when no transaction active');
       assert(typeof r.error.code === 'string', 'error code present');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'txstate-03', group: 'Transaction State', name: 'OR ROLLBACK failure clears mirrored transaction state',
+    fn: async () => {
+      const DB = 'suite_txstate_or_rollback';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({
+        database: DB,
+        statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER UNIQUE)', 'INSERT INTO t VALUES (1, 1)'],
+      }), 'ddl');
+      assertOk(await CapacitorSqlite.beginTransaction({ database: DB }), 'begin first');
+      assertOk(await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES (2, 2)' }), 'insert in transaction');
+      assertFail(
+        await CapacitorSqlite.run({ database: DB, statement: 'INSERT OR ROLLBACK INTO t VALUES (3, 1)' }),
+        'OR ROLLBACK conflict',
+      );
+      const after = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT COUNT(*) AS n FROM t' }), 'count');
+      assertEqual((after.rows[0] as { n: number }).n, 1, 'SQLite rolled back row 2');
+      assertOk(await CapacitorSqlite.beginTransaction({ database: DB }), 'begin works after automatic rollback');
+      assertOk(await CapacitorSqlite.rollbackTransaction({ database: DB }), 'rollback second transaction');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'txstate-04', group: 'Transaction State', name: 'execute(transaction:false) OR ROLLBACK also recovers state',
+    fn: async () => {
+      const DB = 'suite_txstate_execute_rollback';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({
+        database: DB,
+        statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (v INTEGER UNIQUE)', 'INSERT INTO t VALUES (1)'],
+      }), 'ddl');
+      assertOk(await CapacitorSqlite.beginTransaction({ database: DB }), 'begin');
+      assertFail(
+        await CapacitorSqlite.execute({
+          database: DB,
+          statements: ['INSERT OR ROLLBACK INTO t VALUES (1)'],
+          transaction: false,
+        }),
+        'execute OR ROLLBACK',
+      );
+      assertOk(await CapacitorSqlite.beginTransaction({ database: DB }), 'new begin after execute rollback');
+      assertOk(await CapacitorSqlite.rollbackTransaction({ database: DB }), 'cleanup transaction');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'txstate-05', group: 'Transaction State', name: 'runBatch(transaction:false) OR ROLLBACK recovers state',
+    fn: async () => {
+      const DB = 'suite_txstate_batch_rollback';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({
+        database: DB,
+        statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (v INTEGER UNIQUE)', 'INSERT INTO t VALUES (1)'],
+      }), 'ddl');
+      assertOk(await CapacitorSqlite.beginTransaction({ database: DB }), 'begin');
+      assertFail(
+        await CapacitorSqlite.runBatch({
+          database: DB,
+          set: [
+            { statement: 'INSERT INTO t VALUES (2)' },
+            { statement: 'INSERT OR ROLLBACK INTO t VALUES (1)' },
+          ],
+          transaction: false,
+        }),
+        'batch OR ROLLBACK',
+      );
+      assertOk(await CapacitorSqlite.beginTransaction({ database: DB }), 'new begin after batch rollback');
+      assertOk(await CapacitorSqlite.rollbackTransaction({ database: DB }), 'cleanup transaction');
+      await silentClose(DB);
+    },
+  },
+
+  // ── Re-open migrations ────────────────────────────────────────────────────
+  {
+    id: 'mig-11', group: 'Migrations', name: 'pending migrations apply on an already-open writable connection',
+    fn: async () => {
+      const DB = 'suite_mig11';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'initial open without migrations');
+      assertOk(await CapacitorSqlite.open({
+        database: DB,
+        migrations: [{ version: 1, statements: ['CREATE TABLE live_migration (v INTEGER)'] }],
+      }), 're-open with v1');
+      const version = assertOk(await CapacitorSqlite.getSchemaVersion({ database: DB }), 'version');
+      assertEqual(version.version, 1, 'v1 applied without closing the connection');
+      assertOk(await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO live_migration VALUES (1)' }), 'table usable');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'mig-12', group: 'Migrations', name: 're-open migration is rejected while a manual transaction is active',
+    fn: async () => {
+      const DB = 'suite_mig12';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.beginTransaction({ database: DB }), 'begin');
+      assertFail(await CapacitorSqlite.open({
+        database: DB,
+        migrations: [{ version: 1, statements: ['CREATE TABLE must_not_exist (v INTEGER)'] }],
+      }), 'migration during transaction', 'MIGRATION_FAILED');
+      assertOk(await CapacitorSqlite.rollbackTransaction({ database: DB }), 'original transaction remains controllable');
+      const tables = assertOk(await CapacitorSqlite.query({
+        database: DB,
+        statement: "SELECT name FROM sqlite_master WHERE name='must_not_exist'",
+      }), 'table check');
+      assertEqual(tables.rows.length, 0, 'rejected migration made no schema change');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'mig-13', group: 'Migrations', name: 'same migration on an open connection remains idempotent',
+    fn: async () => {
+      const DB = 'suite_mig13';
+      const migrations: Migration[] = [{ version: 1, statements: ['CREATE TABLE once_only (v INTEGER)'] }];
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB, migrations }), 'initial migration');
+      assertOk(await CapacitorSqlite.open({ database: DB, migrations }), 'same migration while open');
+      const version = assertOk(await CapacitorSqlite.getSchemaVersion({ database: DB }), 'version');
+      assertEqual(version.version, 1, 'version remains v1');
+      await silentClose(DB);
+    },
+  },
+
+  // ── Readonly hardening ────────────────────────────────────────────────────
+  {
+    id: 'ro-08', group: 'Readonly', name: 'Web query_only cannot be disabled to write via query RETURNING',
+    fn: async () => {
+      const platform = assertOk(await CapacitorSqlite.getPlatform(), 'platform');
+      if (platform.platform !== 'web') skipTest('Web-specific logical-readonly hardening test');
+      const DB = 'suite_ro08';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open rw');
+      assertOk(await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (v INTEGER)'] }), 'ddl');
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB, readonly: true }), 'open readonly');
+      assertOk(await CapacitorSqlite.query({ database: DB, statement: 'PRAGMA query_only = OFF' }), 'attempt to disable query_only');
+      assertFail(
+        await CapacitorSqlite.query({ database: DB, statement: 'INSERT INTO t VALUES (1) RETURNING v' }),
+        'readonly INSERT RETURNING',
+      );
+      const count = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT COUNT(*) AS n FROM t' }), 'count');
+      assertEqual((count.rows[0] as { n: number }).n, 0, 'readonly bypass inserted no row');
+      await silentClose(DB);
+    },
+  },
+
+  // ── Trigger identifier edge cases ────────────────────────────────────────
+  {
+    id: 'mstmt-07', group: 'Multi-Statement Guard', name: 'qualified NEW.end inside trigger does not close trigger body early',
+    fn: async () => {
+      const DB = 'suite_mstmt07';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({ database: DB, statements: [
+        'DROP TABLE IF EXISTS source',
+        'DROP TABLE IF EXISTS audit_log',
+        'CREATE TABLE source ("end" INTEGER)',
+        'CREATE TABLE audit_log (v INTEGER)',
+        'CREATE TRIGGER trg_end AFTER INSERT ON source BEGIN INSERT INTO audit_log VALUES (NEW.end); INSERT INTO audit_log VALUES (NEW.end + 1); END',
+      ] }), 'create trigger using NEW.end');
+      assertOk(await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO source VALUES (9)' }), 'fire trigger');
+      const rows = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT v FROM audit_log ORDER BY v' }), 'audit rows');
+      assertEqual(rows.rows.length, 2, 'both trigger statements executed');
+      assertEqual((rows.rows[0] as { v: number }).v, 9, 'NEW.end value preserved');
+      assertEqual((rows.rows[1] as { v: number }).v, 10, 'trigger body stayed open');
+      await silentClose(DB);
+    },
+  },
+
+  // ── Bind count validation ─────────────────────────────────────────────────
+  {
+    id: 'bindcnt-01', group: 'Bind Count', name: 'run rejects missing positional values without writing NULL',
+    fn: async () => {
+      const DB = 'suite_bindcnt';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (a, b)'] }), 'ddl');
+      assertFail(
+        await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES (?, ?)', values: [1] }),
+        'missing bind',
+        'INVALID_PARAMS',
+      );
+      const count = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT COUNT(*) AS n FROM t' }), 'count');
+      assertEqual((count.rows[0] as { n: number }).n, 0, 'missing bind performed no insert');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'bindcnt-02', group: 'Bind Count', name: 'run rejects extra positional values instead of discarding them',
+    fn: async () => {
+      const DB = 'suite_bindcnt';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (v)'] }), 'ddl');
+      assertFail(
+        await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES (?)', values: [1, 2] }),
+        'extra bind',
+        'INVALID_PARAMS',
+      );
+      const count = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT COUNT(*) AS n FROM t' }), 'count');
+      assertEqual((count.rows[0] as { n: number }).n, 0, 'extra bind performed no insert');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'bindcnt-03', group: 'Bind Count', name: 'query rejects both missing and extra positional values',
+    fn: async () => {
+      const DB = 'suite_bindcnt';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertFail(
+        await CapacitorSqlite.query({ database: DB, statement: 'SELECT ? AS a, ? AS b', values: [1] }),
+        'query missing bind',
+        'INVALID_PARAMS',
+      );
+      assertFail(
+        await CapacitorSqlite.query({ database: DB, statement: 'SELECT ? AS a', values: [1, 2] }),
+        'query extra bind',
+        'INVALID_PARAMS',
+      );
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'bindcnt-04', group: 'Bind Count', name: 'runBatch validates every item before executing the first one',
+    fn: async () => {
+      const DB = 'suite_bindcnt';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (v)'] }), 'ddl');
+      assertFail(await CapacitorSqlite.runBatch({
+        database: DB,
+        set: [
+          { statement: 'INSERT INTO t VALUES (?)', values: [1] },
+          { statement: 'INSERT INTO t VALUES (?)', values: [] },
+        ],
+        transaction: false,
+      }), 'batch bind mismatch', 'INVALID_PARAMS');
+      const count = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT COUNT(*) AS n FROM t' }), 'count');
+      assertEqual((count.rows[0] as { n: number }).n, 0, 'pre-validation prevented a partial batch');
       await silentClose(DB);
     },
   },

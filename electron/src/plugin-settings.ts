@@ -12,6 +12,7 @@ export const pluginSettings = {
     'execute',
     'run',
     'runBatch',
+    'runMany',
     'query',
     'beginTransaction',
     'commitTransaction',

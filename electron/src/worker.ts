@@ -4,7 +4,7 @@ import type { CapacitorSqlitePlugin, SqliteFailure, SqliteResult } from '../../s
 
 import { ElectronSqliteBackend, type ElectronSqliteBackendPaths } from './backend';
 
-type WorkerMethod = Exclude<keyof CapacitorSqlitePlugin, 'getPlatform'>;
+type WorkerMethod = Exclude<keyof CapacitorSqlitePlugin, 'getPlatform'> | '__queryCompact' | '__shutdown';
 type AnySqliteResult = SqliteResult<Record<string, unknown>>;
 
 interface WorkerRequest {
@@ -61,14 +61,20 @@ async function dispatch(method: WorkerMethod, options: unknown): Promise<AnySqli
         return backend.run(options as Parameters<CapacitorSqlitePlugin['run']>[0]);
       case 'runBatch':
         return backend.runBatch(options as Parameters<CapacitorSqlitePlugin['runBatch']>[0]);
+      case 'runMany':
+        return backend.runMany(options as Parameters<CapacitorSqlitePlugin['runMany']>[0]);
       case 'query':
         return backend.query(options as Parameters<CapacitorSqlitePlugin['query']>[0]);
+      case '__queryCompact':
+        return backend.queryCompact(options as Parameters<CapacitorSqlitePlugin['query']>[0]);
       case 'beginTransaction':
         return backend.beginTransaction(options as Parameters<CapacitorSqlitePlugin['beginTransaction']>[0]);
       case 'commitTransaction':
         return backend.commitTransaction(options as Parameters<CapacitorSqlitePlugin['commitTransaction']>[0]);
       case 'rollbackTransaction':
         return backend.rollbackTransaction(options as Parameters<CapacitorSqlitePlugin['rollbackTransaction']>[0]);
+      case '__shutdown':
+        return backend.shutdown();
       default:
         return failure(method, new Error(`Unknown Electron SQLite worker method '${String(method)}'`));
     }

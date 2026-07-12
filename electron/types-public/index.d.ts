@@ -4,6 +4,8 @@ import type {
   OpenOptions,
   QueryOptions,
   RunBatchOptions,
+  RunManyOptions,
+  RunManyResult,
   RunOptions,
   SqlitePlatform,
   SqliteResult,
@@ -12,6 +14,13 @@ import type {
 export declare class CapacitorSqlite implements CapacitorSqlitePlugin {
   getPlatform(): Promise<SqliteResult<{ platform: SqlitePlatform }>>;
   isAvailable(): Promise<SqliteResult<{ available: boolean }>>;
+  /**
+   * Terminates the worker thread that runs all SQLite work. Not part of
+   * `CapacitorSqlitePlugin` — call explicitly (typically from `app.on('before-quit')`)
+   * to release the worker before the process exits. Safe to call again later; a fresh
+   * worker is spawned on demand.
+   */
+  dispose(): Promise<void>;
   open(options: OpenOptions): Promise<SqliteResult>;
   close(options: { database: string }): Promise<SqliteResult>;
   isOpen(options: { database: string }): Promise<SqliteResult<{ open: boolean }>>;
@@ -21,6 +30,7 @@ export declare class CapacitorSqlite implements CapacitorSqlitePlugin {
   execute(options: ExecuteOptions): Promise<SqliteResult<{ changes: number }>>;
   run(options: RunOptions): Promise<SqliteResult<{ changes: number; lastInsertId: number }>>;
   runBatch(options: RunBatchOptions): Promise<SqliteResult<{ changes: number; lastInsertId: number }>>;
+  runMany(options: RunManyOptions): Promise<SqliteResult<RunManyResult>>;
   query<T = Record<string, unknown>>(options: QueryOptions): Promise<SqliteResult<{ rows: T[] }>>;
   beginTransaction(options: { database: string }): Promise<SqliteResult>;
   commitTransaction(options: { database: string }): Promise<SqliteResult>;

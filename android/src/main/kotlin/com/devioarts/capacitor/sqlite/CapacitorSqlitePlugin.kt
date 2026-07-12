@@ -9,12 +9,16 @@ import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.CapacitorPlugin
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.RejectedExecutionException
 import org.json.JSONArray
 import org.json.JSONObject
 
 @CapacitorPlugin(name = "CapacitorSqlite")
 class CapacitorSqlitePlugin : Plugin() {
+
+    private companion object {
+        const val NATIVE_BLOB_BASE64_KEY = "__capacitorSqliteBlobBase64"
+    }
 
     private lateinit var impl: CapacitorSqlite
     private val sqliteExecutor = Executors.newSingleThreadExecutor { runnable ->
@@ -26,11 +30,23 @@ class CapacitorSqlitePlugin : Plugin() {
     }
 
     override fun handleOnDestroy() {
-        sqliteExecutor.shutdownNow()
-        sqliteExecutor.awaitTermination(2, TimeUnit.SECONDS)
         if (::impl.isInitialized) {
-            impl.closeAll()
+            // Enqueue on the SQLite thread instead of calling impl.closeAll() directly:
+            // this runs after any already-queued operations finish (in order, same as
+            // every other method call), and keeps the close()/WAL-checkpoint I/O off the
+            // calling (bridge/UI) thread.
+            try {
+                sqliteExecutor.execute { impl.closeAll() }
+            } catch (_: RejectedExecutionException) {
+                // handleOnDestroy() called more than once — nothing left to flush.
+            }
         }
+        // shutdown() (not shutdownNow()) lets already-queued PluginCalls — including the
+        // closeAll() task just submitted above — run to completion instead of being
+        // silently dropped without ever resolving their JS Promise. Do not wait here:
+        // Capacitor may call handleOnDestroy() on the UI thread, and a large queued batch
+        // or WAL checkpoint must not freeze that thread for up to several seconds.
+        sqliteExecutor.shutdown()
     }
 
     // MARK: - Unified response helpers
@@ -63,6 +79,12 @@ class CapacitorSqlitePlugin : Plugin() {
 
     private fun executeSqlite(block: () -> Unit) {
         sqliteExecutor.execute(block)
+    }
+
+    private fun timingsToJson(timings: Map<String, Double>): JSObject {
+        val out = JSObject()
+        timings.forEach { (key, value) -> out.put(key, value) }
+        return out
     }
 
     // MARK: - getPlatform
@@ -249,24 +271,82 @@ class CapacitorSqlitePlugin : Plugin() {
 
     @PluginMethod
     fun runBatch(call: PluginCall) {
+        val nativeStart = System.nanoTime()
         val database = call.getString("database")
             ?: return failure(call, "INVALID_PARAMS", "'database' is required", "runBatch")
+        val getArrayStart = System.nanoTime()
+        val rawSet = call.getArray("set")
+        val getArrayMs = (System.nanoTime() - getArrayStart) / 1_000_000.0
+        val decodeStart = System.nanoTime()
         val set = try {
-            jsonArrayToListOfMaps(call.getArray("set"), "set")
+            jsonArrayToListOfMaps(rawSet, "set")
         } catch (e: IllegalArgumentException) {
             return failure(call, "INVALID_PARAMS", e.message ?: "Invalid set", "runBatch")
         }
+        val decodeMs = (System.nanoTime() - decodeStart) / 1_000_000.0
         if (set.isEmpty()) {
             return failure(call, "INVALID_PARAMS", "'set' must be a non-empty array", "runBatch")
         }
         val transaction = call.getBoolean("transaction", true) ?: true
+        val includeDiagnostics = call.getBoolean("__diagnostics", false) ?: false
+        val timings = if (includeDiagnostics) linkedMapOf<String, Double>() else null
+        timings?.put("pluginGetArrayMs", getArrayMs)
+        timings?.put("bridgeDecodeMs", decodeMs)
+
+        val scheduledAt = System.nanoTime()
+        executeSqlite {
+            timings?.put("queueWaitMs", (System.nanoTime() - scheduledAt) / 1_000_000.0)
+            try {
+                val result = impl.runBatch(database, set, transaction, timings)
+                timings?.put("nativeTotalMs", (System.nanoTime() - nativeStart) / 1_000_000.0)
+                val data = JSObject().put("changes", result.changes).put("lastInsertId", result.lastInsertId)
+                timings?.let { data.put("timings", timingsToJson(it)) }
+                success(call, data)
+            } catch (e: Exception) {
+                failure(call, errorCode(e, "EXECUTE_FAILED"), e.message ?: "runBatch failed", "runBatch")
+            }
+        }
+    }
+
+    // MARK: - runMany
+
+    @PluginMethod
+    fun runMany(call: PluginCall) {
+        val database = call.getString("database")
+            ?: return failure(call, "INVALID_PARAMS", "'database' is required", "runMany")
+        val statement = call.getString("statement")
+            ?: return failure(call, "INVALID_PARAMS", "'statement' is required", "runMany")
+        if (statement.trim().isEmpty()) {
+            return failure(call, "INVALID_PARAMS", "'statement' is required", "runMany")
+        }
+        val valueSets = try {
+            val decoded = jsonArrayToValueList(call.getArray("values"), "values")
+            if (decoded.isEmpty()) throw IllegalArgumentException("'values' must be a non-empty array of value arrays")
+            decoded.mapIndexed { index, value ->
+                @Suppress("UNCHECKED_CAST")
+                value as? List<Any?>
+                    ?: throw IllegalArgumentException("'values[$index]' must be an array")
+            }
+        } catch (e: IllegalArgumentException) {
+            return failure(call, "INVALID_PARAMS", e.message ?: "Invalid values", "runMany")
+        }
+        val transaction = call.getBoolean("transaction", true) ?: true
+        val returnResults = call.getBoolean("returnResults", false) ?: false
 
         executeSqlite {
             try {
-                val result = impl.runBatch(database, set, transaction)
-                success(call, JSObject().put("changes", result.changes).put("lastInsertId", result.lastInsertId))
+                val result = impl.runMany(database, statement, valueSets, transaction, returnResults)
+                val data = JSObject().put("changes", result.changes).put("lastInsertId", 0)
+                result.results?.let { items ->
+                    val encoded = JSArray()
+                    items.forEach { item ->
+                        encoded.put(JSObject().put("changes", item.changes).put("lastInsertId", item.lastInsertId))
+                    }
+                    data.put("results", encoded)
+                }
+                success(call, data)
             } catch (e: Exception) {
-                failure(call, errorCode(e, "EXECUTE_FAILED"), e.message ?: "runBatch failed", "runBatch")
+                failure(call, errorCode(e, "EXECUTE_FAILED"), e.message ?: "runMany failed", "runMany")
             }
         }
     }
@@ -290,17 +370,29 @@ class CapacitorSqlitePlugin : Plugin() {
 
         executeSqlite {
             try {
+                if (call.getBoolean("__capacitorSqliteCompactRows", false) == true) {
+                    val compact = impl.queryCompact(database, statement, values)
+                    val encodedRows = JSArray()
+                    compact.values.forEach { row ->
+                        val encoded = JSArray()
+                        row.forEach { value -> encoded.put(encodeQueryValue(value)) }
+                        encodedRows.put(encoded)
+                    }
+                    success(
+                        call,
+                        JSObject().put(
+                            "compactRows",
+                            JSObject().put("columns", JSArray(compact.columns)).put("values", encodedRows)
+                        )
+                    )
+                    return@executeSqlite
+                }
                 val rows = impl.query(database, statement, values)
                 val result = JSArray()
                 for (row in rows) {
                     val obj = JSObject()
                     for ((key, value) in row) {
-                        when (value) {
-                            null         -> obj.put(key, JSONObject.NULL)
-                            is ByteArray -> obj.put(key, SQLiteHelpers.BLOB_PREFIX + Base64.encodeToString(value, Base64.NO_WRAP))
-                            is String    -> obj.put(key, encodeText(value))
-                            else         -> obj.put(key, value)
-                        }
+                        obj.put(key, encodeQueryValue(value))
                     }
                     result.put(obj)
                 }
@@ -407,8 +499,22 @@ class CapacitorSqlitePlugin : Plugin() {
             val item = v.get(i)
             unwrapJsonValue(item, "$label[$i]")
         }
-        is JSONObject   -> throw IllegalArgumentException("'$label' must not be an object")
+        is JSONObject   -> decodeTaggedBlob(v, label)
         else -> v
+    }
+
+    /** Decode the compact internal BLOB envelope emitted by src/bridge-values.ts. */
+    private fun decodeTaggedBlob(value: JSONObject, label: String): ByteArray {
+        if (value.length() != 1 || !value.has(NATIVE_BLOB_BASE64_KEY)) {
+            throw IllegalArgumentException("'$label' must not be an object")
+        }
+        val encoded = value.opt(NATIVE_BLOB_BASE64_KEY) as? String
+            ?: throw IllegalArgumentException("'$label.$NATIVE_BLOB_BASE64_KEY' must be a base64 string")
+        return try {
+            Base64.decode(encoded, Base64.DEFAULT)
+        } catch (_: IllegalArgumentException) {
+            throw IllegalArgumentException("'$label.$NATIVE_BLOB_BASE64_KEY' must be valid base64")
+        }
     }
 
     private fun encodeText(value: String): String {
@@ -417,5 +523,12 @@ class CapacitorSqlitePlugin : Plugin() {
         }
         val encoded = Base64.encodeToString(value.toByteArray(StandardCharsets.UTF_8), Base64.NO_WRAP)
         return SQLiteHelpers.TEXT_PREFIX + encoded
+    }
+
+    private fun encodeQueryValue(value: Any?): Any = when (value) {
+        null -> JSONObject.NULL
+        is ByteArray -> SQLiteHelpers.BLOB_PREFIX + Base64.encodeToString(value, Base64.NO_WRAP)
+        is String -> encodeText(value)
+        else -> value
     }
 }

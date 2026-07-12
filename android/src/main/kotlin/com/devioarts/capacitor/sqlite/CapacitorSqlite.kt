@@ -131,14 +131,34 @@ internal class CapacitorSqlite(private val context: Context) {
     // MARK: - runBatch
 
     @Throws(Exception::class)
-    fun runBatch(database: String, set: List<Map<String, Any?>>, transaction: Boolean): RunResult =
-        wrap("EXECUTE_FAILED") { requireOpen(database, "runBatch").runBatch(set, transaction) }
+    fun runBatch(
+        database: String,
+        set: List<Map<String, Any?>>,
+        transaction: Boolean,
+        timings: MutableMap<String, Double>? = null,
+    ): RunResult =
+        wrap("EXECUTE_FAILED") { requireOpen(database, "runBatch").runBatch(set, transaction, timings) }
+
+    @Throws(Exception::class)
+    fun runMany(
+        database: String,
+        statement: String,
+        values: List<List<Any?>>,
+        transaction: Boolean,
+        returnResults: Boolean,
+    ): RunManyResult = wrap("EXECUTE_FAILED") {
+        requireOpen(database, "runMany").runMany(statement, values, transaction, returnResults)
+    }
 
     // MARK: - query
 
     @Throws(Exception::class)
     fun query(database: String, statement: String, values: List<Any?>): List<Map<String, Any?>> =
         wrap("QUERY_FAILED") { requireOpen(database, "query").query(statement, values) }
+
+    @Throws(Exception::class)
+    fun queryCompact(database: String, statement: String, values: List<Any?>): SQLiteHelpers.CompactRows =
+        wrap("QUERY_FAILED") { requireOpen(database, "query").queryCompact(statement, values) }
 
     // MARK: - transactions
 

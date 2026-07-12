@@ -3,6 +3,11 @@ import Foundation
 import SQLite3
 
 extension SQLiteHelpers {
+    struct CompactRows {
+        let columns: [String]
+        let values: [[Any]]
+    }
+
     static func fetchRows(stmt: OpaquePointer?, db: OpaquePointer) throws -> [[String: Any]] {
         var rows: [[String: Any]] = []
         while true {
@@ -15,6 +20,27 @@ extension SQLiteHelpers {
             rows.append(try readRow(stmt: stmt))
         }
         return rows
+    }
+
+    static func fetchCompactRows(stmt: OpaquePointer?, db: OpaquePointer) throws -> CompactRows {
+        let count = sqlite3_column_count(stmt)
+        let columns = try (0..<count).map { index -> String in
+            guard let name = sqlite3_column_name(stmt, index) else {
+                throw SQLiteError.query("column_name failed at index \(index)")
+            }
+            return String(cString: name)
+        }
+        var rows: [[Any]] = []
+        while true {
+            let result = sqlite3_step(stmt)
+            if result == SQLITE_DONE { break }
+            guard result == SQLITE_ROW else {
+                let message = String(validatingUTF8: sqlite3_errmsg(db)) ?? "step failed"
+                throw SQLiteError.query(message)
+            }
+            rows.append(try (0..<count).map { try readColumn(stmt: stmt, index: $0) })
+        }
+        return CompactRows(columns: columns, values: rows)
     }
 
     private static func readRow(stmt: OpaquePointer?) throws -> [String: Any] {

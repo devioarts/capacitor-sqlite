@@ -7,11 +7,92 @@ import android.database.sqlite.SQLiteStatement
 
 internal object SQLiteHelpers {
 
+    internal data class CompactRows(val columns: List<String>, val values: List<List<Any?>>)
+
+    internal class PreparedRunStatement(
+        private val db: SQLiteDatabase,
+        private val statement: SQLiteStatement,
+        private val insertLike: Boolean,
+        private val hasConflictClause: Boolean,
+        private val parameterCount: Int,
+    ) : AutoCloseable {
+        fun bind(values: List<Any?>) {
+            requireBindValueCount(parameterCount, values.size)
+            statement.clearBindings()
+            bindValues(statement, values)
+        }
+
+        fun bind(values: List<Any?>, timings: MutableMap<String, Double>?) {
+            requireBindValueCount(parameterCount, values.size)
+            val clearStart = System.nanoTime()
+            statement.clearBindings()
+            addPreparedTiming(timings, "dbClearBindingsMs", clearStart)
+            val bindStart = System.nanoTime()
+            bindValues(statement, values)
+            addPreparedTiming(timings, "dbBindValuesMs", bindStart)
+        }
+
+        fun execute() {
+            if (insertLike) statement.executeInsert() else statement.executeUpdateDelete()
+        }
+
+        fun execute(timings: MutableMap<String, Double>?) {
+            val stepStart = System.nanoTime()
+            execute()
+            addPreparedTiming(timings, "dbStepMs", stepStart)
+        }
+
+        /** Exact public run() metadata while still reusing the prepared statement. */
+        fun executeWithMetadata(): RunResult {
+            val pinned = !db.inTransaction()
+            if (pinned) db.beginTransactionNonExclusive()
+            try {
+                val before = changeState(db)
+                val insertId = if (insertLike) {
+                    statement.executeInsert()
+                } else {
+                    statement.executeUpdateDelete()
+                    0L
+                }
+                val changes = totalChanges(db) - before.totalChanges
+                val reliable = insertLike && !hasConflictClause && changes > 0L &&
+                    insertId >= 0L && insertId != before.lastInsertRowId
+                if (pinned) db.setTransactionSuccessful()
+                return RunResult(changes, if (reliable) insertId else 0L)
+            } finally {
+                if (pinned) db.endTransaction()
+            }
+        }
+
+        override fun close() = statement.close()
+    }
+
+    private data class ChangeState(val totalChanges: Long, val lastInsertRowId: Long)
+
+    private fun addPreparedTiming(timings: MutableMap<String, Double>?, key: String, startNanos: Long) {
+        timings?.put(key, (timings[key] ?: 0.0) + (System.nanoTime() - startNanos) / 1_000_000.0)
+    }
+
     // Sentinel prefix for BLOB columns returned from queries.
     // Must stay in sync with BLOB_PREFIX in SQLiteHelpers.swift and index.ts.
     const val BLOB_PREFIX = "blob64:"
     const val TEXT_PREFIX = "text64:"
     private const val MAX_SAFE_INTEGER = 9007199254740991.0
+    private const val SQL_CACHE_LIMIT = 256
+    private val multipleStatementCache = sqlCache<Boolean>()
+    private val statementTypeCache = sqlCache<String>()
+    private val conflictCache = sqlCache<Boolean>()
+    private val rollbackConflictCache = sqlCache<Boolean>()
+    private val bindCountCache = sqlCache<Int>()
+
+    private fun <T> sqlCache(): MutableMap<String, T> =
+        object : LinkedHashMap<String, T>(SQL_CACHE_LIMIT, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, T>?): Boolean =
+                size > SQL_CACHE_LIMIT
+        }
+
+    private fun <T> cached(cache: MutableMap<String, T>, sql: String, compute: () -> T): T =
+        synchronized(cache) { cache[sql] ?: compute().also { cache[sql] = it } }
 
     // MARK: - Lifecycle
 
@@ -37,6 +118,7 @@ internal object SQLiteHelpers {
 
     fun run(db: SQLiteDatabase, sql: String, values: List<Any?>): RunResult {
         requireSingleStatement(sql)
+        requireAnonymousBindParameterCount(sql, values.size)
         val stmt = db.compileStatement(sql)
         try {
             bindValues(stmt, values)
@@ -48,14 +130,24 @@ internal object SQLiteHelpers {
             val pinned = !db.inTransaction()
             if (pinned) db.beginTransactionNonExclusive()
             try {
-                val before = totalChanges(db)
+                // Read both connection counters in one Cursor/SQLite session. This keeps
+                // the conservative reused-rowid rule while removing one metadata query
+                // from every public run() call.
+                val before = changeState(db)
                 val stmtType = statementType(sql)
-                val result = if (isInsertLike(stmtType)) {
+                // An UPSERT (`INSERT ... ON CONFLICT ... DO UPDATE`) resolved via its DO
+                // UPDATE arm leaves last_insert_rowid() pointing at the connection's last
+                // real insert, not this statement's affected row, so executeInsert()'s
+                // returned id can't be trusted for statements containing a CONFLICT clause.
+                val result = if (isInsertLike(stmtType) && !hasConflictClause(sql)) {
                     val lastId = stmt.executeInsert()
-                    RunResult(changes = totalChanges(db) - before, lastInsertId = if (lastId >= 0L) lastId else 0L)
+                    RunResult(
+                        changes = totalChanges(db) - before.totalChanges,
+                        lastInsertId = if (lastId >= 0L && lastId != before.lastInsertRowId) lastId else 0L
+                    )
                 } else {
                     stmt.executeUpdateDelete()
-                    RunResult(changes = totalChanges(db) - before, lastInsertId = 0L)
+                    RunResult(changes = totalChanges(db) - before.totalChanges, lastInsertId = 0L)
                 }
                 if (pinned) db.setTransactionSuccessful()
                 return result
@@ -64,6 +156,35 @@ internal object SQLiteHelpers {
             }
         } finally {
             stmt.close()
+        }
+    }
+
+    /** Prepares and binds without stepping, used to make runBatch validation atomic. */
+    fun validateRunStatement(db: SQLiteDatabase, sql: String, values: List<Any?>) {
+        prepareRunStatement(db, sql, values).close()
+    }
+
+    /**
+     * Prepare and bind once so a transactional runBatch can validate the entire set
+     * before its first write and then execute those exact statements without compiling
+     * and binding a second time.
+     */
+    fun prepareRunStatement(db: SQLiteDatabase, sql: String, values: List<Any?>): PreparedRunStatement {
+        requireSingleStatement(sql)
+        requireAnonymousBindParameterCount(sql, values.size)
+        val stmt = db.compileStatement(sql)
+        try {
+            bindValues(stmt, values)
+            return PreparedRunStatement(
+                db,
+                stmt,
+                isInsertLike(statementType(sql)),
+                hasConflictClause(sql),
+                values.size,
+            )
+        } catch (error: Exception) {
+            stmt.close()
+            throw error
         }
     }
 
@@ -89,6 +210,40 @@ internal object SQLiteHelpers {
                 }
             }.toTypedArray()
         return db.rawQuery(finalSql, strArgs).use { extractRows(it) }
+    }
+
+    fun queryCompact(db: SQLiteDatabase, sql: String, values: List<Any?>): CompactRows {
+        requireSingleStatement(sql)
+        requireQueryResultStatement(sql)
+        val (finalSql, finalValues) = injectLiterals(sql, values)
+        val strArgs: Array<String?>? = if (finalValues.isEmpty()) null else finalValues.map { value ->
+            when (value) {
+                null -> null
+                is String -> value
+                else -> throw CapacitorSqliteException(
+                    "INVALID_PARAMS",
+                    "Unsupported query value type: ${value?.javaClass?.name}"
+                )
+            }
+        }.toTypedArray()
+        return db.rawQuery(finalSql, strArgs).use { cursor ->
+            val columns = cursor.columnNames.toList()
+            val rows = ArrayList<List<Any?>>()
+            while (cursor.moveToNext()) {
+                val row = ArrayList<Any?>(cursor.columnCount)
+                for (index in 0 until cursor.columnCount) {
+                    row.add(when (cursor.getType(index)) {
+                        Cursor.FIELD_TYPE_INTEGER -> normalizeInteger(cursor.getLong(index))
+                        Cursor.FIELD_TYPE_FLOAT -> cursor.getDouble(index)
+                        Cursor.FIELD_TYPE_STRING -> cursor.getString(index)
+                        Cursor.FIELD_TYPE_BLOB -> cursor.getBlob(index)
+                        else -> null
+                    })
+                }
+                rows.add(row)
+            }
+            CompactRows(columns, rows)
+        }
     }
 
     // Replace anonymous '?' placeholders with inline SQL literals for all
@@ -302,6 +457,12 @@ internal object SQLiteHelpers {
     fun totalChanges(db: SQLiteDatabase): Long =
         DatabaseUtils.longForQuery(db, "SELECT total_changes()", null)
 
+    private fun changeState(db: SQLiteDatabase): ChangeState =
+        db.rawQuery("SELECT total_changes(), last_insert_rowid()", null).use { cursor ->
+            check(cursor.moveToFirst()) { "SQLite change-state query returned no row" }
+            ChangeState(cursor.getLong(0), cursor.getLong(1))
+        }
+
     fun setUserVersion(db: SQLiteDatabase, version: Int) {
         db.version = version
     }
@@ -313,10 +474,18 @@ internal object SQLiteHelpers {
     }
 
     fun requireSingleStatement(sql: String) {
-        require(!hasMultipleStatements(sql)) { "SQL string must contain exactly one statement" }
+        if (hasMultipleStatements(sql)) {
+            throw CapacitorSqliteException(
+                "INVALID_PARAMS",
+                "SQL string must contain exactly one statement"
+            )
+        }
     }
 
-    fun hasMultipleStatements(sql: String): Boolean {
+    fun hasMultipleStatements(sql: String): Boolean =
+        cached(multipleStatementCache, sql) { computeHasMultipleStatements(sql) }
+
+    private fun computeHasMultipleStatements(sql: String): Boolean {
         var i = 0
         // Tracks BEGIN/CASE ... END nesting (trigger bodies, CASE expressions) so a
         // semicolon inside one of these blocks isn't mistaken for a statement
@@ -357,7 +526,7 @@ internal object SQLiteHelpers {
                             // bare `case` identifier at the top level (SQLite rejects it as
                             // unquoted, but the guard should not depend on that) is otherwise inert.
                             !isQualifiedRef && keyword.keyword == "CASE" && blockDepth > 0 -> blockDepth++
-                            keyword.keyword == "END" && blockDepth > 0 -> blockDepth--
+                            !isQualifiedRef && keyword.keyword == "END" && blockDepth > 0 -> blockDepth--
                         }
                         i = keyword.end - 1
                     }
@@ -434,7 +603,10 @@ internal object SQLiteHelpers {
         return sql.length - 1
     }
 
-    fun statementType(sql: String): String {
+    fun statementType(sql: String): String =
+        cached(statementTypeCache, sql) { computeStatementType(sql) }
+
+    private fun computeStatementType(sql: String): String {
         val first = readKeyword(sql, skipIgnorable(sql, 0)) ?: return ""
         if (first.keyword != "WITH") return first.keyword
         return withMainStatementType(sql, first.end) ?: first.keyword
@@ -456,6 +628,26 @@ internal object SQLiteHelpers {
             )
         }
     }
+
+    // `INSERT ... ON CONFLICT (...) DO UPDATE ...` (SQLite upsert, 3.24+) can resolve as an
+    // UPDATE of an existing row instead of an INSERT. SQLite only updates
+    // last_insert_rowid() on an actual row-table INSERT, so when the DO UPDATE arm runs, it
+    // still reflects whatever the connection's last *real* insert was — a stale, unrelated
+    // value. run() uses this to fall back to lastInsertId 0 for any statement that could
+    // take that arm.
+    fun hasConflictClause(sql: String): Boolean =
+        cached(conflictCache, sql) { hasKeyword(sql, "CONFLICT") }
+
+    /** True only for adjacent real SQL keywords, never text in strings/comments/identifiers. */
+    fun hasRollbackConflictClause(sql: String): Boolean =
+        cached(rollbackConflictCache, sql) {
+            var previous: String? = null
+            for (keyword in keywords(sql)) {
+                if (previous == "OR" && keyword == "ROLLBACK") return@cached true
+                previous = keyword
+            }
+            false
+        }
 
     private fun isInsertLike(stmtType: String): Boolean =
         stmtType == "INSERT" || stmtType == "REPLACE"
@@ -561,6 +753,29 @@ internal object SQLiteHelpers {
         return false
     }
 
+    private fun keywords(sql: String): List<String> {
+        val result = mutableListOf<String>()
+        var i = 0
+        while (i < sql.length) {
+            val ch = sql[i]
+            when {
+                ch == '\'' || ch == '"' || ch == '`' -> i = skipQuoted(sql, i, ch)
+                ch == '[' -> i = skipBracketIdentifier(sql, i)
+                ch == '-' && i + 1 < sql.length && sql[i + 1] == '-' -> i = skipLineComment(sql, i)
+                ch == '/' && i + 1 < sql.length && sql[i + 1] == '*' -> i = skipBlockComment(sql, i)
+                isIdentifierStart(ch) && (i == 0 || !isIdentifierPart(sql[i - 1])) -> {
+                    val keyword = readKeyword(sql, i)
+                    if (keyword != null) {
+                        result.add(keyword.keyword)
+                        i = keyword.end - 1
+                    }
+                }
+            }
+            i++
+        }
+        return result
+    }
+
     private fun skipIdentifier(sql: String, start: Int): Int {
         var i = skipIgnorable(sql, start)
         if (i >= sql.length) return i
@@ -593,6 +808,47 @@ internal object SQLiteHelpers {
     private fun isIdentifierPart(ch: Char): Boolean =
         isIdentifierStart(ch) || ch.isDigit()
 
+    private fun requireAnonymousBindParameterCount(sql: String, valueCount: Int) {
+        val count = cached(bindCountCache, sql) { scanAnonymousBindParameterCount(sql) }
+        if (count != valueCount) {
+            throw CapacitorSqliteException(
+                "INVALID_PARAMS",
+                "Bind value count mismatch: statement expects $count, received $valueCount"
+            )
+        }
+    }
+
+    private fun scanAnonymousBindParameterCount(sql: String): Int {
+        var count = 0
+        var i = 0
+        while (i < sql.length) {
+            val ch = sql[i]
+            when {
+                ch == '\'' || ch == '"' || ch == '`' -> i = skipQuoted(sql, i, ch)
+                ch == '[' -> i = skipBracketIdentifier(sql, i)
+                ch == '-' && i + 1 < sql.length && sql[i + 1] == '-' -> i = skipLineComment(sql, i)
+                ch == '/' && i + 1 < sql.length && sql[i + 1] == '*' -> i = skipBlockComment(sql, i)
+                ch == '?' -> {
+                    if (i + 1 < sql.length && sql[i + 1].isDigit()) {
+                        throw CapacitorSqliteException(
+                            "INVALID_PARAMS",
+                            "Only anonymous '?' placeholders are supported; numbered placeholders are not supported"
+                        )
+                    }
+                    count++
+                }
+                (ch == ':' || ch == '@' || ch == '$') &&
+                    i + 1 < sql.length && isIdentifierStart(sql[i + 1]) ->
+                    throw CapacitorSqliteException(
+                        "INVALID_PARAMS",
+                        "Only anonymous '?' placeholders are supported; named placeholders are not supported"
+                    )
+            }
+            i++
+        }
+        return count
+    }
+
     private fun bindValues(stmt: SQLiteStatement, values: List<Any?>) {
         values.forEachIndexed { i, v ->
             val idx = i + 1
@@ -604,11 +860,13 @@ internal object SQLiteHelpers {
                 }
                 is Int          -> stmt.bindLong(idx, v.toLong())
                 is Double       -> {
+                    requireFinite(v.isFinite(), idx)
                     requireSafeInteger(!isUnsafeInteger(v), idx)
                     stmt.bindDouble(idx, v)
                 }
                 is Float        -> {
                     val d = v.toDouble()
+                    requireFinite(d.isFinite(), idx)
                     requireSafeInteger(!isUnsafeInteger(d), idx)
                     stmt.bindDouble(idx, d)
                 }
