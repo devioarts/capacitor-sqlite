@@ -92,4 +92,36 @@ class SQLStatementGuardTests: XCTestCase {
         XCTAssertFalse(SQLiteHelpers.hasMultipleStatements(trigger))
         XCTAssertTrue(SQLiteHelpers.hasMultipleStatements(trigger + "; SELECT 1"))
     }
+    func testKeywordIdentifiersAndTriggerTerminatorsPreserveBoundaries() {
+        let ordinary = [
+            "SELECT begin FROM t",
+            "SELECT end FROM t",
+            "SELECT t . begin FROM t",
+            "UPDATE t SET begin = 1",
+            "DELETE FROM begin",
+            "DROP TABLE begin",
+            "CREATE TABLE begin(begin INTEGER, end INTEGER)",
+            "SELECT CASE WHEN 1 THEN 2 ELSE 3 END"
+        ]
+        let triggers = [
+            "CREATE TRIGGER begin AFTER INSERT ON t BEGIN SELECT 1; END",
+            "CREATE TEMP TRIGGER tr AFTER INSERT ON t BEGIN SELECT end FROM t; SELECT begin FROM t; END",
+            "CREATE TEMPORARY TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; /* gap */ END",
+            "CREATE TRIGGER tr AFTER UPDATE OF begin,end ON t WHEN NEW.begin > 0 BEGIN SELECT NEW.end; END",
+            "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT CASE WHEN NEW.begin THEN " +
+                "CASE WHEN NEW.end THEN 1 ELSE 2 END ELSE 3 END; END",
+            "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT '; END;', \"begin\", `end`, [case]; END",
+            "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; -- END; hidden\nSELECT 2; END",
+            "EXPLAIN CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END",
+            "EXPLAIN QUERY PLAN CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END"
+        ]
+        for sql in ordinary {
+            XCTAssertFalse(SQLiteHelpers.hasMultipleStatements("/* lead */ \(sql); -- done"), sql)
+            XCTAssertTrue(SQLiteHelpers.hasMultipleStatements("\(sql); /* gap */ DELETE FROM t"), sql)
+        }
+        for sql in triggers {
+            XCTAssertFalse(SQLiteHelpers.hasMultipleStatements("/* lead */ \(sql); /* done */"), sql)
+            XCTAssertTrue(SQLiteHelpers.hasMultipleStatements("\(sql); /* gap */ DELETE FROM t"), sql)
+        }
+    }
 }

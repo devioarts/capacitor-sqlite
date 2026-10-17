@@ -306,7 +306,7 @@ internal object SQLiteHelpers {
     // This is a small SQL lexer, not a full parser. It only needs to know where
     // placeholders are legal, so it skips string literals, quoted identifiers,
     // and SQL comments before counting/replacing '?' markers.
-    private fun injectLiterals(
+    internal fun injectLiterals(
         sql: String,
         values: List<Any?>,
     ): Pair<String, List<Any?>> {
@@ -387,18 +387,18 @@ internal object SQLiteHelpers {
             is Boolean -> out.append(if (value) "1" else "0")
             is Long -> {
                 requireSafeInteger(!isUnsafeInteger(value), idx)
-                out.append(value.toString())
+                out.append('(').append(value.toString()).append(')')
             }
-            is Int, is Short, is Byte -> out.append(value.toString())
+            is Int, is Short, is Byte -> out.append('(').append(value.toString()).append(')')
             is Double -> {
                 requireFinite(value.isFinite(), idx)
                 requireSafeInteger(!isUnsafeInteger(value), idx)
-                out.append(value.toString())
+                out.append('(').append(value.toString()).append(')')
             }
             is Float -> {
                 requireFinite(value.isFinite(), idx)
                 requireSafeInteger(!isUnsafeInteger(value.toDouble()), idx)
-                out.append(value.toString())
+                out.append('(').append(value.toString()).append(')')
             }
             null -> out.append("NULL")
             is String -> {
@@ -576,53 +576,58 @@ internal object SQLiteHelpers {
     fun hasMultipleStatements(sql: String): Boolean = cached(multipleStatementCache, sql) { computeHasMultipleStatements(sql) }
 
     private fun computeHasMultipleStatements(sql: String): Boolean {
+        // A trigger ends at `; END;`. BEGIN/END elsewhere can be ordinary identifiers.
         var i = 0
-        // Tracks BEGIN/CASE ... END nesting (trigger bodies, CASE expressions) so a
-        // semicolon inside one of these blocks isn't mistaken for a statement
-        // separator. Only a semicolon seen while this is back at 0 is a real split.
-        var blockDepth = 0
-        // Tracks '(' / ')' nesting. SQLite does not reserve BEGIN as a keyword, so
-        // `CREATE TABLE t(begin TEXT)` is valid SQL — without this, the bare `begin`
-        // column name below would be misread as a trigger-body opener and swallow the
-        // semicolon after it. A genuine trigger BEGIN always appears outside any
-        // parentheses (after `ON ...`/`WHEN ...`/`FOR EACH ROW`), so gating on
-        // `parenDepth == 0` filters out identifier occurrences without affecting real
-        // trigger bodies.
-        var parenDepth = 0
-        // `BEGIN` as the very first token is a transaction statement (`BEGIN;`,
-        // `BEGIN TRANSACTION;`), not a trigger-body opener — it must not swallow
-        // the semicolon that follows it ("BEGIN; DROP TABLE t" is two statements).
-        val firstTokenStart = skipIgnorable(sql, 0)
+        var header = 0
+        var trigger = false
+        var afterSemicolon = false
+        var triggerEnd = false
         while (i < sql.length) {
             val ch = sql[i]
+            if (ch.isWhitespace()) {
+                i++
+                continue
+            }
+            if (ch == '-' && i + 1 < sql.length && sql[i + 1] == '-') {
+                i = skipLineComment(sql, i) + 1
+                continue
+            }
+            if (ch == '/' && i + 1 < sql.length && sql[i + 1] == '*') {
+                i = skipBlockComment(sql, i) + 1
+                continue
+            }
+            var token = ""
             when {
                 ch == '\'' || ch == '"' || ch == '`' -> i = skipQuoted(sql, i, ch)
                 ch == '[' -> i = skipBracketIdentifier(sql, i)
-                ch == '-' && i + 1 < sql.length && sql[i + 1] == '-' -> i = skipLineComment(sql, i)
-                ch == '/' && i + 1 < sql.length && sql[i + 1] == '*' -> i = skipBlockComment(sql, i)
-                ch == '(' -> parenDepth++
-                ch == ')' -> if (parenDepth > 0) parenDepth--
+                ch == ';' -> {
+                    if (!trigger || triggerEnd) return hasTailContent(sql, i + 1)
+                    afterSemicolon = true
+                    triggerEnd = false
+                    i++
+                    continue
+                }
                 isIdentifierStart(ch) && (i == 0 || !isIdentifierPart(sql[i - 1])) -> {
                     val keyword = readKeyword(sql, i)
                     if (keyword != null) {
-                        // A '.' immediately before rules out a qualified reference like
-                        // `NEW.begin` (used in a trigger's WHEN clause, for example) — real
-                        // BEGIN/CASE keywords are never preceded by a dot.
-                        val isQualifiedRef = i > 0 && sql[i - 1] == '.'
-                        when {
-                            !isQualifiedRef && keyword.keyword == "BEGIN" && i != firstTokenStart && parenDepth == 0 ->
-                                blockDepth++
-                            // CASE only nests inside an already-open trigger BEGIN block — a
-                            // bare `case` identifier at the top level (SQLite rejects it as
-                            // unquoted, but the guard should not depend on that) is otherwise inert.
-                            !isQualifiedRef && keyword.keyword == "CASE" && blockDepth > 0 -> blockDepth++
-                            !isQualifiedRef && keyword.keyword == "END" && blockDepth > 0 -> blockDepth--
-                        }
+                        token = keyword.keyword
                         i = keyword.end - 1
                     }
                 }
-                ch == ';' && blockDepth == 0 -> return hasTailContent(sql, i + 1)
             }
+            when {
+                header == 0 && token == "EXPLAIN" -> header = 3
+                header == 3 && token == "QUERY" -> header = 4
+                header == 4 && token == "PLAN" -> header = 5
+                (header == 0 || header == 3 || header == 5) && token == "CREATE" -> header = 1
+                header == 1 && (token == "TEMP" || token == "TEMPORARY") -> header = 2
+                else -> {
+                    if ((header == 1 || header == 2) && token == "TRIGGER") trigger = true
+                    header = -1
+                }
+            }
+            triggerEnd = afterSemicolon && token == "END"
+            afterSemicolon = false
             i++
         }
         return false

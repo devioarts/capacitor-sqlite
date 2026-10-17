@@ -1,5 +1,36 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Single-statement validation now recognizes trigger boundaries without treating ordinary `begin`/`end` identifiers as SQL blocks. All three scanners preserve TEMP triggers, comments, nested CASE expressions, and EXPLAIN forms while rejecting appended SQL.
+- JS/worker tests now build current bundles through `pretest:ts`, fixing missing `dist` files on clean checkouts and in CI. The duplicate CI build step was removed.
+- iOS `run()`, `runBatch()`, and `runMany()` now drain `RETURNING` rows through `SQLITE_DONE` before reading change counts or committing.
+- Query row conversion preserves `__proto__` as an enumerable own data property without changing the row prototype, including native BLOB/text decoding and duplicate aliases.
+
+- Android `query()` now wraps numeric parameter literals in parentheses, so negative values next to a minus operator cannot turn into SQL comments or change arithmetic results.
+- Web transaction state now comes from `sqlite3_get_autocommit()` in the internal worker, including error replies. Schema-defined rollback policies and statement preparation errors no longer leave the plugin's transaction state out of sync with SQLite.
+- iOS and Electron resynchronize transaction state after both regular and compact queries, including automatic rollback from DML with `RETURNING`.
+- iOS finalizes prepared query statements when parameter binding fails, preventing repeated invalid queries from leaking statements and connection resources.
+- Electron cache databases now use an application-specific directory derived from `userData`, preventing collisions between applications using the same database name and temporary directory.
+- Native `query()` parameter conversion now runs inside the error boundary, returning `INVALID_PARAMS` instead of rejecting the Promise for invalid values.
+
+### Changed
+
+- Electron `dispose()` documentation and the shutdown example now describe waiting for queued work and closing connections. It cannot interrupt running or stuck SQL; the example prevents app exit until disposal completes.
+- Removed seven unused Swift binding methods, retaining the active validated and normalized binding paths.
+
+- Electron cache files now live at `temp/capacitor-sqlite/<app-key>/CapacitorSQLite/<name>.db`. Files in the former shared cache directory are not automatically moved or deleted; applications must rebuild their cache data after upgrading.
+- Web builds include an internal worker and its SQLite WASM/OPFS assets. The public plugin API is unchanged and no runtime dependency was added.
+
+### Added
+
+- Additional scanner regression cases on JS/Android/iOS, end-to-end SQL rejection and trigger tests, special-column round-trips, seven native iOS RETURNING tests, and a main-process Electron disposal test covering queued writes, rollback, repeated disposal, and worker restart.
+
+- Regression coverage for all six fixes, including Electron cache isolation across applications and restarts, both query result paths, Android numeric literal rewriting, and Web transaction recovery across SQL methods.
+- The shared suite now contains 417 tests in 76 groups; native and JS unit tests cover bridge validation and prepared-statement cleanup separately.
+
 ## [0.1.1] - 2026-07-12
 
 ### Added

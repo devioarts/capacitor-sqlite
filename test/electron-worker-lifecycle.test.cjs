@@ -1,13 +1,6 @@
-// Exercises the real worker_threads boundary used by CapacitorSqlite.dispose()
-// (electron/src/index.ts) and worker.ts, independent of Electron itself — index.ts
-// requires the real `electron` module (app.getPath) to build workerData.paths, which
-// is not available in a plain Node test process, so this drives electron/dist/worker.cjs.js
-// directly with fake paths instead of instantiating CapacitorSqlite.
-//
-// Covers: a worker started, used, and terminated (the core of dispose()) leaves no
-// dangling process/handle, and a second worker can be spawned afterwards (the "safe to
-// call again later; a fresh worker is spawned on demand" contract in dispose()'s doc
-// comment). Requires `npm run build:electron` to have produced electron/dist/worker.cjs.js.
+// Exercises the real worker boundary and main-process dispose() implementation.
+// Electron's app.getPath() is stubbed; SQL, worker queues, and shutdown are real.
+// Requires `npm run build` to produce both public and Electron bundles.
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
@@ -15,6 +8,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { Worker } = require('node:worker_threads');
+const vm = require('node:vm');
 
 const workerFile = path.join(__dirname, '..', 'electron', 'dist', 'worker.cjs.js');
 const settingsFile = path.join(__dirname, '..', 'electron', 'dist', 'plugin-settings.js');
@@ -36,6 +30,7 @@ function request(worker, method, options) {
     const onMessage = (message) => {
       if (message.id !== id) return;
       worker.off('message', onMessage);
+      worker.off('error', reject);
       resolve(message.result);
     };
     worker.on('message', onMessage);
@@ -43,6 +38,112 @@ function request(worker, method, options) {
     worker.postMessage({ id, method, options });
   });
 }
+
+test('dispose drains queued writes, is idempotent, rolls back and allows a fresh worker', async () => {
+  const temporary = withTempPaths();
+  const module = { exports: {} };
+  const pluginFile = path.join(__dirname, '..', 'electron', 'dist', 'plugin.cjs.js');
+  vm.runInNewContext(
+    fs.readFileSync(pluginFile, 'utf8'),
+    {
+      module,
+      exports: module.exports,
+      __dirname: path.dirname(pluginFile),
+      process,
+      console,
+      require: (id) => (id === 'electron' ? { app: { getPath: (name) => temporary.paths[name] } } : require(id)),
+    },
+    { filename: pluginFile },
+  );
+  const api = new module.exports.CapacitorSqlite();
+  const database = 'graceful_dispose';
+  try {
+    assert.equal((await api.open({ database })).success, true);
+    assert.equal((await api.execute({ database, statements: ['CREATE TABLE t(v INTEGER)'] })).success, true);
+    const writes = Array.from({ length: 32 }, (_, i) =>
+      api.run({ database, statement: 'INSERT INTO t VALUES (?)', values: [i] }),
+    );
+    const stopping = Promise.all([api.dispose(), api.dispose()]);
+    for (const result of await Promise.all(writes)) assert.equal(result.success, true);
+    await stopping;
+    assert.equal((await api.open({ database })).success, true);
+    assert.equal((await api.query({ database, statement: 'SELECT COUNT(*) AS n FROM t' })).data.rows[0].n, 32);
+    assert.equal((await api.beginTransaction({ database })).success, true);
+    assert.equal((await api.run({ database, statement: 'INSERT INTO t VALUES (999)' })).success, true);
+    await api.dispose();
+    assert.equal((await api.open({ database })).success, true);
+    assert.equal((await api.query({ database, statement: 'SELECT COUNT(*) AS n FROM t' })).data.rows[0].n, 32);
+  } finally {
+    await api.dispose();
+    await api.dispose();
+    fs.rmSync(temporary.root, { recursive: true, force: true });
+  }
+});
+
+test('both worker query paths recover transaction state after RETURNING rolls back', async () => {
+  const temporary = withTempPaths();
+  const worker = spawnWorker(temporary.paths);
+  const database = ':memory:';
+  const call = (method, options = {}) => request(worker, method, { database, ...options });
+  try {
+    assert.equal((await call('open')).success, true);
+    assert.equal(
+      (await call('execute', { statements: ['CREATE TABLE t(v INTEGER UNIQUE)', 'INSERT INTO t VALUES (1)'] })).success,
+      true,
+    );
+    for (const method of ['query', '__queryCompact']) {
+      assert.equal((await call('beginTransaction')).success, true);
+      assert.equal((await call('run', { statement: 'INSERT INTO t VALUES (2)' })).success, true);
+      assert.equal(
+        (await call(method, { statement: 'INSERT OR ROLLBACK INTO t VALUES (1) RETURNING v' })).success,
+        false,
+      );
+      assert.equal((await call('beginTransaction')).success, true);
+      assert.equal((await call('rollbackTransaction')).success, true);
+      assert.deepEqual((await call('query', { statement: 'SELECT v FROM t' })).data.rows, [{ v: 1 }]);
+    }
+  } finally {
+    await request(worker, '__shutdown');
+    await worker.terminate();
+    fs.rmSync(temporary.root, { recursive: true, force: true });
+  }
+});
+
+test('cache databases are isolated by app and keep a stable location across restarts', async () => {
+  const temporary = withTempPaths();
+  const appA = { userData: path.join(temporary.root, 'app-a'), temp: temporary.root };
+  const appB = { userData: path.join(temporary.root, 'app-b'), temp: temporary.root };
+  const workers = [spawnWorker(appA), spawnWorker(appB)];
+  const database = 'same_name';
+  try {
+    for (const [index, worker] of workers.entries()) {
+      assert.equal((await request(worker, 'open', { database, directory: 'cache' })).success, true);
+      assert.equal(
+        (
+          await request(worker, 'execute', {
+            database,
+            statements: ['CREATE TABLE t(v INTEGER)', `INSERT INTO t VALUES (${index})`],
+          })
+        ).success,
+        true,
+      );
+    }
+    await request(workers[0], '__shutdown');
+    await workers[0].terminate();
+    workers[0] = spawnWorker(appA);
+    assert.equal((await request(workers[0], 'open', { database, directory: 'cache' })).success, true);
+    for (const [index, worker] of workers.entries()) {
+      const result = await request(worker, 'query', { database, statement: 'SELECT v FROM t' });
+      assert.deepEqual(result.data.rows, [{ v: index }]);
+    }
+  } finally {
+    for (const worker of workers) {
+      await request(worker, '__shutdown');
+      await worker.terminate();
+    }
+    fs.rmSync(temporary.root, { recursive: true, force: true });
+  }
+});
 
 test(
   'Electron plugin metadata exposes every public SQL method, including runMany',

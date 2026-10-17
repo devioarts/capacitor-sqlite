@@ -48,7 +48,7 @@ export interface OpenOptions {
    * - `cache`: rebuildable data only; the OS may delete it
    *   - iOS: `Library/Caches/CapacitorSQLite/`
    *   - Android: `<cacheDir>/CapacitorSQLite/`
-   *   - Electron: `temp/capacitor-sqlite/CapacitorSQLite/`
+   *   - Electron: `temp/capacitor-sqlite/<app-key>/CapacitorSQLite/`
    *   - Web: OPFS fallback
    *
    * `:memory:` databases ignore this option.

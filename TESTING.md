@@ -4,7 +4,7 @@
 
 |               | Scope                                        | Purpose                                                                                 |
 | ------------- | -------------------------------------------- | --------------------------------------------------------------------------------------- |
-| **Automated** | 401 tests · 75 groups · 12 stress benchmarks · 24 diagnostics | Cross-platform behavioral, compatibility, and performance-regression coverage           |
+| **Automated** | 417 tests · 76 groups · 12 stress benchmarks · 24 diagnostics | Cross-platform behavioral, compatibility, and performance-regression coverage           |
 | **Manual**    | 11 scenarios                                 | OS lifecycle, storage-failure, profiler, and native-environment checks outside JS reach |
 
 Tests are part of the example app (`playground/`).  
@@ -30,7 +30,7 @@ state which matrix entries were actually executed.
 
 ## Running from the command line
 
-The 401 suite tests, 12 full-load benchmarks, and 24 layer diagnostics are defined once, in
+The 417 suite tests, 12 full-load benchmarks, and 24 layer diagnostics are defined once, in
 `playground/src/tests/suiteTests.ts`, `playground/src/tests/stressBenchmarks.ts`, and
 `playground/src/tests/diagnosticBenchmarks.ts`, as functions
 that take a `CapacitorSqlitePlugin` implementation and return test/benchmark definitions. The

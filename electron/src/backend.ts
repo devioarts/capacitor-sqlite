@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import { createHash } from 'node:crypto';
 import type * as SqliteType from 'node:sqlite';
 import * as nodePath from 'path';
 
@@ -247,6 +248,12 @@ function errorCode(err: unknown, fallback: SqliteErrorCode): SqliteErrorCode {
     if (message.includes('no transaction is active')) return 'TRANSACTION_FAILED';
   }
   return err instanceof SqliteRuntimeError ? err.code : fallback;
+}
+
+function indexedExecutionError(err: unknown, label: string): SqliteRuntimeError {
+  const code = err instanceof SqliteRuntimeError ? err.code : 'EXECUTE_FAILED';
+  const message = err instanceof Error ? err.message : String(err);
+  return new SqliteRuntimeError(code, `${label} failed: ${message}`);
 }
 
 export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
@@ -617,16 +624,27 @@ export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
       // Compile each distinct SQL string once. StatementSync resets itself after
       // run(), so repeated batch items only bind and step.
       const prepared = new Map<string, ReturnType<DatabaseSync['prepare']>>();
-      for (const item of set) {
-        if (!prepared.has(item.statement)) prepared.set(item.statement, db.prepare(item.statement));
+      for (let index = 0; index < set.length; index += 1) {
+        const item = set[index];
+        if (!prepared.has(item.statement)) {
+          try {
+            prepared.set(item.statement, db.prepare(item.statement));
+          } catch (err) {
+            throw indexedExecutionError(err, `set[${index}]`);
+          }
+        }
       }
 
       if (transaction) db.exec('BEGIN');
+      let failedIndex: number | null = null;
       try {
         const before = totalChanges(db);
-        for (const item of set) {
+        for (let index = 0; index < set.length; index += 1) {
+          failedIndex = index;
+          const item = set[index];
           prepared.get(item.statement)!.run(...convertValues(item.values));
         }
+        failedIndex = null;
         const changed = totalChanges(db) - before;
         if (transaction) db.exec('COMMIT');
         return this.ok({ changes: changed, lastInsertId: 0 });
@@ -638,6 +656,7 @@ export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
             /* ignore rollback error */
           }
         }
+        if (failedIndex !== null) throw indexedExecutionError(innerErr, `set[${failedIndex}]`);
         throw innerErr;
       }
     } catch (err) {
@@ -678,11 +697,14 @@ export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
       const prepared = db.prepare(statement);
       const results: { changes: number; lastInsertId: number }[] | undefined = returnResults ? [] : undefined;
       if (transaction) db.exec('BEGIN');
+      let failedIndex: number | null = null;
       try {
         const beforeTotal = totalChanges(db);
         if (results) {
           let beforeId = lastInsertRowId(db);
-          for (const values of valueSets) {
+          for (let index = 0; index < valueSets.length; index += 1) {
+            failedIndex = index;
+            const values = valueSets[index];
             const beforeItem = totalChanges(db);
             const runResult = prepared.run(...values);
             const afterItem = totalChanges(db);
@@ -696,8 +718,12 @@ export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
             beforeId = resultId;
           }
         } else {
-          for (const values of valueSets) prepared.run(...values);
+          for (let index = 0; index < valueSets.length; index += 1) {
+            failedIndex = index;
+            prepared.run(...valueSets[index]);
+          }
         }
+        failedIndex = null;
         const changes = totalChanges(db) - beforeTotal;
         if (transaction) db.exec('COMMIT');
         return this.ok({ changes, lastInsertId: 0 as const, ...(results ? { results } : {}) });
@@ -709,6 +735,7 @@ export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
             /* preserve original error */
           }
         }
+        if (failedIndex !== null) throw indexedExecutionError(innerErr, `values[${failedIndex}]`);
         throw innerErr;
       }
     } catch (err) {
@@ -738,13 +765,17 @@ export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
       }
       const values = convertValues(validateValues(opts.values, 'values'));
       validateBindParameterCount(statement, values.length);
-      const db = this.requireOpen(database, 'query');
-      const stmt = db.prepare(statement);
-      if (typeof stmt.setReadBigInts === 'function') {
-        stmt.setReadBigInts(true);
+      const entry = this.requireOpenEntry(database, 'query');
+      try {
+        const stmt = entry.db.prepare(statement);
+        if (typeof stmt.setReadBigInts === 'function') {
+          stmt.setReadBigInts(true);
+        }
+        const rows = stmt.all(...values).map((row) => normalizeRow(row as Record<string, unknown>)) as T[];
+        return this.ok({ rows });
+      } finally {
+        entry.inTransaction = entry.db.isTransaction;
       }
-      const rows = stmt.all(...values).map((row) => normalizeRow(row as Record<string, unknown>)) as T[];
-      return this.ok({ rows });
     } catch (err) {
       return this.err(errorCode(err, 'QUERY_FAILED'), 'query', err);
     }
@@ -768,13 +799,17 @@ export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
       }
       const values = convertValues(validateValues(opts.values, 'values'));
       validateBindParameterCount(statement, values.length);
-      const db = this.requireOpen(database, 'query');
-      const stmt = db.prepare(statement);
-      if (typeof stmt.setReadBigInts === 'function') stmt.setReadBigInts(true);
-      const rawRows = stmt.all(...values) as Record<string, unknown>[];
-      const columns = rawRows.length > 0 ? Object.keys(rawRows[0]) : [];
-      const compactValues = rawRows.map((row) => columns.map((column) => normalizeValue(row[column])));
-      return this.ok({ compactRows: { columns, values: compactValues } });
+      const entry = this.requireOpenEntry(database, 'query');
+      try {
+        const stmt = entry.db.prepare(statement);
+        if (typeof stmt.setReadBigInts === 'function') stmt.setReadBigInts(true);
+        const rawRows = stmt.all(...values) as Record<string, unknown>[];
+        const columns = rawRows.length > 0 ? Object.keys(rawRows[0]) : [];
+        const compactValues = rawRows.map((row) => columns.map((column) => normalizeValue(row[column])));
+        return this.ok({ compactRows: { columns, values: compactValues } });
+      } finally {
+        entry.inTransaction = entry.db.isTransaction;
+      }
     } catch (err) {
       return this.err(errorCode(err, 'QUERY_FAILED'), 'query', err);
     }
@@ -898,7 +933,8 @@ export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
 
   private directoryPath(directory: SqliteDirectory): string {
     if (directory === 'cache') {
-      return nodePath.join(this.paths.temp, 'capacitor-sqlite', 'CapacitorSQLite');
+      const appKey = createHash('sha256').update(nodePath.resolve(this.paths.userData)).digest('hex');
+      return nodePath.join(this.paths.temp, 'capacitor-sqlite', appKey, 'CapacitorSQLite');
     }
     // `default`, `library`, and `documents` all use userData on Electron. The
     // `documents` fallback keeps app databases out of the user's visible
@@ -964,7 +1000,12 @@ function lastInsertRowId(db: DatabaseSync): number {
 function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const key of Object.keys(row)) {
-    out[key] = normalizeValue(row[key]);
+    const value = normalizeValue(row[key]);
+    if (key === '__proto__') {
+      Object.defineProperty(out, key, { value, enumerable: true, writable: true, configurable: true });
+    } else {
+      out[key] = value;
+    }
   }
   return out;
 }

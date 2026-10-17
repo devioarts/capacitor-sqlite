@@ -68,6 +68,22 @@ final class RunManyTests: XCTestCase {
         XCTAssertEqual(rows[0]["n"] as? Int64, 0)
     }
 
+    func testRejectsOutOfRangeArrayBlobBeforeFirstWrite() throws {
+        try impl.open(database: ":memory:", readonly: false, migrations: [])
+        try impl.execute(database: ":memory:", statements: ["CREATE TABLE t (v BLOB)"])
+
+        XCTAssertThrowsError(try impl.runMany(
+            database: ":memory:",
+            statement: "INSERT INTO t VALUES (?)",
+            valueSets: [[[0, 1, 2]], [[256]]],
+            transaction: true,
+            returnResults: false
+        ))
+
+        let rows = try impl.query(database: ":memory:", statement: "SELECT COUNT(*) AS n FROM t", values: [])
+        XCTAssertEqual(rows[0]["n"] as? Int64, 0)
+    }
+
     func testCompactRowsKeepColumnsForEmptyAndPopulatedResults() throws {
         try impl.open(database: ":memory:", readonly: false, migrations: [])
         try impl.execute(database: ":memory:", statements: ["CREATE TABLE t (id INTEGER, v TEXT)"])

@@ -136,6 +136,7 @@ final class Database {
     func queryCompact(statement: String, values: [Any] = []) throws -> SQLiteHelpers.CompactRows {
         try queue.sync {
             let handle = try requireOpen("query")
+            defer { inTransaction = sqlite3_get_autocommit(handle) == 0 }
             return try SQLiteHelpers.queryCompact(db: handle, sql: statement, values: values)
         }
     }
@@ -244,6 +245,7 @@ final class Database {
 
     private func queryUnsafe(statement: String, values: [Any]) throws -> [[String: Any]] {
         let handle = try requireOpen("query")
+        defer { inTransaction = sqlite3_get_autocommit(handle) == 0 }
         do {
             return try SQLiteHelpers.query(db: handle, sql: statement, values: values)
         } catch SQLiteError.invalidParams(let msg) {

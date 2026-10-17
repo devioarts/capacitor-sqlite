@@ -29,11 +29,16 @@ changes.
 ### `npm run build`
 
 Builds the plugin, regenerates API docs with `@capacitor/docgen`, compiles TypeScript, bundles
-the Web plugin, and builds the Electron entry points.
+the Web plugin and its internal worker/WASM assets, and builds the Electron entry points.
 
 ### `npm run lint`
 
-Runs ESLint, Prettier, and SwiftLint. SwiftLint should report 0 violations before review.
+Runs ESLint, Prettier, SwiftLint, and ktlint. SwiftLint should report 0 violations before review.
+
+### `npm run test:ts`
+
+Builds the package through `pretest:ts` before running JS and worker tests, so tests
+exercise current bundles and work on a clean checkout. `npm test` uses the same hook.
 
 ### `npm run test:p2`
 
@@ -42,8 +47,8 @@ Web/Electron builds, and migration validation tests.
 
 ### Full Suite
 
-The shared behavioral suite currently has 367 tests and 11 stress benchmarks. The same test
-definitions are used by the playground UI and the CLI runners.
+The shared behavioral suite currently has 417 tests in 76 groups, 12 stress benchmarks,
+and 24 layer diagnostics. The same test definitions are used by the playground UI and the CLI runners.
 
 ```shell
 npm run test:suite:electron

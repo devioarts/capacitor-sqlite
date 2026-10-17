@@ -107,27 +107,6 @@ enum SQLiteHelpers {
             try SQLiteHelpers.bindNormalized(stmt: statement, values: values)
         }
 
-        /// Binds values that were already validated during batch preflight.
-        ///
-        /// Transactional `runBatch()` validates every item before the first write so a
-        /// later bind-count/type error cannot leave a partially-applied batch. The hot
-        /// execution loop can therefore skip the duplicate validation work here and only
-        /// do the SQLite reset + bind calls needed for this specific iteration.
-        func bindPrevalidated(values: [Any], diagnostics: BatchDiagnostics? = nil) throws {
-            guard let statement else { throw SQLiteError.prepare("statement is closed") }
-            let resetStart = DispatchTime.now().uptimeNanoseconds
-            let resetCode = sqlite3_reset(statement)
-            diagnostics?.add("dbResetMs", start: resetStart)
-            guard resetCode == SQLITE_OK else {
-                let db = sqlite3_db_handle(statement)
-                let message = db.flatMap { String(validatingUTF8: sqlite3_errmsg($0)) } ?? "reset failed"
-                throw SQLiteError.execute(message)
-            }
-            let bindStart = DispatchTime.now().uptimeNanoseconds
-            try SQLiteHelpers.bindPrevalidated(stmt: statement, values: values)
-            diagnostics?.add("dbBindValuesMs", start: bindStart)
-        }
-
         func bindNormalizedPrevalidated(values: SQLiteBindValues, diagnostics: BatchDiagnostics? = nil) throws {
             guard let statement else { throw SQLiteError.prepare("statement is closed") }
             let resetStart = DispatchTime.now().uptimeNanoseconds
@@ -146,9 +125,10 @@ enum SQLiteHelpers {
         func execute(diagnostics: BatchDiagnostics? = nil) throws {
             guard let statement else { throw SQLiteError.prepare("statement is closed") }
             let stepStart = DispatchTime.now().uptimeNanoseconds
-            let result = sqlite3_step(statement)
+            var result = sqlite3_step(statement)
+            while result == SQLITE_ROW { result = sqlite3_step(statement) }
             diagnostics?.add("dbStepMs", start: stepStart)
-            guard result == SQLITE_DONE || result == SQLITE_ROW else {
+            guard result == SQLITE_DONE else {
                 let db = sqlite3_db_handle(statement)
                 let message = db.flatMap { String(validatingUTF8: sqlite3_errmsg($0)) } ?? "step failed"
                 throw SQLiteError.execute(message)
@@ -233,8 +213,9 @@ enum SQLiteHelpers {
 
         let before = totalChanges(db: db)
         let beforeInsertId = sqlite3_last_insert_rowid(db)
-        let rc = sqlite3_step(stmt)
-        guard rc == SQLITE_DONE || rc == SQLITE_ROW else {
+        var rc = sqlite3_step(stmt)
+        while rc == SQLITE_ROW { rc = sqlite3_step(stmt) }
+        guard rc == SQLITE_DONE else {
             let msg = String(validatingUTF8: sqlite3_errmsg(db)) ?? "step failed"
             throw SQLiteError.execute(msg)
         }
@@ -285,7 +266,12 @@ enum SQLiteHelpers {
         }
         // Always validate the count, including the important "placeholder present,
         // empty values array" case. Skipping bind() for [] silently treated `?` as NULL.
-        try bind(stmt: stmt, values: values)
+        do {
+            try bind(stmt: stmt, values: values)
+        } catch {
+            sqlite3_finalize(stmt)
+            throw error
+        }
         return stmt
     }
 

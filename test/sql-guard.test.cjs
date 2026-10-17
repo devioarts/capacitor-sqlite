@@ -49,7 +49,9 @@ test('treats a trigger BEGIN...END body as a single statement', () => {
     false,
   );
   assert.equal(
-    hasMultipleSqlStatements("CREATE TRIGGER trg_case BEFORE UPDATE ON t BEGIN SELECT CASE WHEN NEW.x > 0 THEN 1 ELSE 0 END; END"),
+    hasMultipleSqlStatements(
+      'CREATE TRIGGER trg_case BEFORE UPDATE ON t BEGIN SELECT CASE WHEN NEW.x > 0 THEN 1 ELSE 0 END; END',
+    ),
     false,
   );
   // Must not throw — this is exactly one SQL statement despite the internal semicolons.
@@ -75,10 +77,7 @@ test('does not mistake identifiers containing BEGIN/END/CASE as keywords', () =>
     hasMultipleSqlStatements('CREATE TABLE t (begin_date TEXT, end_date TEXT, usecase TEXT, casefile TEXT)'),
     false,
   );
-  assert.equal(
-    hasMultipleSqlStatements("INSERT INTO t (begin_date, end_date, usecase) VALUES ('a', 'b', 'c')"),
-    false,
-  );
+  assert.equal(hasMultipleSqlStatements("INSERT INTO t (begin_date, end_date, usecase) VALUES ('a', 'b', 'c')"), false);
   assert.equal(
     hasMultipleSqlStatements(
       'CREATE TRIGGER trg AFTER INSERT ON t BEGIN INSERT INTO log (usecase_note) VALUES (NEW.usecase); END',
@@ -86,10 +85,7 @@ test('does not mistake identifiers containing BEGIN/END/CASE as keywords', () =>
     false,
   );
   // A real trailing statement after such identifiers must still be detected.
-  assert.equal(
-    hasMultipleSqlStatements('CREATE TABLE t (begin_date TEXT, end_date TEXT); SELECT 1'),
-    true,
-  );
+  assert.equal(hasMultipleSqlStatements('CREATE TABLE t (begin_date TEXT, end_date TEXT); SELECT 1'), true);
 });
 
 test('a leading BEGIN (transaction) does not mask a following statement', () => {
@@ -136,7 +132,7 @@ test('does not mistake a bare begin/case identifier for a trigger-body opener', 
   );
   assert.equal(
     hasMultipleSqlStatements(
-      "CREATE TRIGGER trg_nested AFTER INSERT ON t BEGIN INSERT INTO log VALUES (CASE WHEN NEW.a THEN (CASE WHEN NEW.b THEN 1 ELSE 2 END) ELSE 3 END); END",
+      'CREATE TRIGGER trg_nested AFTER INSERT ON t BEGIN INSERT INTO log VALUES (CASE WHEN NEW.a THEN (CASE WHEN NEW.b THEN 1 ELSE 2 END) ELSE 3 END); END',
     ),
     false,
   );
@@ -159,7 +155,7 @@ test('handles a trigger with a WHEN clause and nested CASE expressions', () => {
   );
   assert.equal(
     hasMultipleSqlStatements(
-      "CREATE TRIGGER trg_nested AFTER INSERT ON t BEGIN INSERT INTO log VALUES (CASE WHEN NEW.a THEN (CASE WHEN NEW.b THEN 1 ELSE 2 END) ELSE 3 END); END",
+      'CREATE TRIGGER trg_nested AFTER INSERT ON t BEGIN INSERT INTO log VALUES (CASE WHEN NEW.a THEN (CASE WHEN NEW.b THEN 1 ELSE 2 END) ELSE 3 END); END',
     ),
     false,
   );
@@ -221,3 +217,38 @@ test('detects OR ROLLBACK only as real adjacent SQL tokens', () => {
   assert.equal(hasRollbackConflictClause('INSERT OR\n-- gap\nROLLBACK INTO t VALUES (1)'), true);
   assert.equal(hasRollbackConflictClause('INSERT OR FAIL INTO t VALUES (1)'), false);
 });
+
+const ordinaryIdentifierSql = [
+  'SELECT begin FROM t',
+  'SELECT end FROM t',
+  'SELECT t . begin FROM t',
+  'UPDATE t SET begin = 1',
+  'DELETE FROM begin',
+  'DROP TABLE begin',
+  'CREATE TABLE begin(begin INTEGER, end INTEGER)',
+  'SELECT CASE WHEN 1 THEN 2 ELSE 3 END',
+];
+const triggerBoundarySql = [
+  'CREATE TRIGGER begin AFTER INSERT ON t BEGIN SELECT 1; END',
+  'CREATE TEMP TRIGGER tr AFTER INSERT ON t BEGIN SELECT end FROM t; SELECT begin FROM t; END',
+  'CREATE TEMPORARY TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; /* gap */ END',
+  'CREATE TRIGGER tr AFTER UPDATE OF begin,end ON t WHEN NEW.begin > 0 BEGIN SELECT NEW.end; END',
+  'CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT CASE WHEN NEW.begin THEN CASE WHEN NEW.end THEN 1 ELSE 2 END ELSE 3 END; END',
+  'CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT \'; END;\', "begin", `end`, [case]; END',
+  'CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; -- END; hidden\nSELECT 2; END',
+  'EXPLAIN CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END',
+  'EXPLAIN QUERY PLAN CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END',
+];
+
+for (const sql of ordinaryIdentifierSql) {
+  test(`ordinary identifiers preserve the statement boundary: ${sql}`, () => {
+    assert.equal(hasMultipleSqlStatements(`${sql}; /* gap */ DELETE FROM t`), true);
+    assert.equal(hasMultipleSqlStatements(`/* lead */ ${sql}; -- done`), false);
+  });
+}
+for (const sql of triggerBoundarySql) {
+  test(`trigger boundaries survive keyword identifiers: ${sql}`, () => {
+    assert.equal(hasMultipleSqlStatements(`/* lead */ ${sql}; /* done */`), false);
+    assert.equal(hasMultipleSqlStatements(`${sql}; /* gap */ DELETE FROM t`), true);
+  });
+}

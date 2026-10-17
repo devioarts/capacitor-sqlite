@@ -46,9 +46,6 @@ jobs:
           npm run eslint
           npm run prettier -- --check
 
-      - name: Build package
-        run: npm run build
-
       - name: Run Electron suite
         run: npm run test:suite:electron
 

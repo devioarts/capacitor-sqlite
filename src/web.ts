@@ -23,7 +23,6 @@ import {
   assertSingleSqlStatement,
   assertAnonymousBindParameterCount,
   hasConflictClause,
-  hasRollbackConflictClause,
   isInsertStatement,
   isQueryResultStatement,
 } from './sql.js';
@@ -189,6 +188,11 @@ function errorCode(err: unknown, fallback: SqliteErrorCode): SqliteErrorCode {
   if (message.includes('cannot start a transaction within a transaction')) return 'TRANSACTION_FAILED';
   if (message.includes('no transaction is active')) return 'TRANSACTION_FAILED';
   return err instanceof SqliteRuntimeError ? err.code : fallback;
+}
+
+function indexedExecutionError(err: unknown, label: string): SqliteRuntimeError {
+  const code = err instanceof SqliteRuntimeError ? err.code : 'EXECUTE_FAILED';
+  return new SqliteRuntimeError(code, `${label} failed: ${extractMessage(err)}`);
 }
 
 export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlugin {
@@ -561,10 +565,6 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
           throw innerErr;
         }
       } catch (err) {
-        const entry = this.openDbs.get(database);
-        if (entry?.inTransaction && statements.some((sql) => hasRollbackConflictClause(sql))) {
-          entry.inTransaction = false;
-        }
         return this.err(errorCode(err, 'EXECUTE_FAILED'), 'execute', err);
       }
     });
@@ -617,7 +617,6 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
             /* keep the last known mirror; the original SQL error is authoritative */
           }
         }
-        if (entry?.inTransaction && hasRollbackConflictClause(statement)) entry.inTransaction = false;
         return this.err(errorCode(err, 'EXECUTE_FAILED'), 'run', err);
       }
     });
@@ -650,11 +649,15 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
         const { dbId } = entry;
         const sp = transaction ? `sp_${++this.spCounter}` : null;
         if (sp) await execSql(promiser, dbId, `SAVEPOINT "${sp}"`);
+        let failedIndex: number | null = null;
         try {
           const before = await getTotalChanges(promiser, dbId);
-          for (const item of set) {
+          for (let index = 0; index < set.length; index += 1) {
+            failedIndex = index;
+            const item = set[index];
             await execSql(promiser, dbId, item.statement, item.values ?? []);
           }
+          failedIndex = null;
           const totalChanges = (await getTotalChanges(promiser, dbId)) - before;
           entry.lastInsertRowId = await getLastInsertRowId(promiser, dbId);
           if (sp) await execSql(promiser, dbId, `RELEASE "${sp}"`);
@@ -668,6 +671,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
               /* ignore */
             }
           }
+          if (failedIndex !== null) throw indexedExecutionError(innerErr, `set[${failedIndex}]`);
           throw innerErr;
         }
       } catch (err) {
@@ -679,9 +683,6 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
           } catch {
             /* preserve original batch error */
           }
-        }
-        if (entry?.inTransaction && set.some((item) => hasRollbackConflictClause(item.statement))) {
-          entry.inTransaction = false;
         }
         return this.err(errorCode(err, 'EXECUTE_FAILED'), 'runBatch', err);
       }
@@ -728,8 +729,11 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
         if (sp) await execSql(promiser, entry.dbId, `SAVEPOINT "${sp}"`);
         const before = await getTotalChanges(promiser, entry.dbId);
         const results: { changes: number; lastInsertId: number }[] | undefined = returnResults ? [] : undefined;
+        let failedIndex: number | null = null;
         try {
-          for (const values of valueSets) {
+          for (let index = 0; index < valueSets.length; index += 1) {
+            failedIndex = index;
+            const values = valueSets[index];
             if (results) {
               const beforeId = entry.lastInsertRowId;
               const outcome = await execRunSql(promiser, entry.dbId, statement, values);
@@ -744,6 +748,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
               await execSql(promiser, entry.dbId, statement, values);
             }
           }
+          failedIndex = null;
           const changes = (await getTotalChanges(promiser, entry.dbId)) - before;
           if (!results) entry.lastInsertRowId = await getLastInsertRowId(promiser, entry.dbId);
           if (sp) await execSql(promiser, entry.dbId, `RELEASE "${sp}"`);
@@ -757,6 +762,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
               /* preserve original error */
             }
           }
+          if (failedIndex !== null) throw indexedExecutionError(innerErr, `values[${failedIndex}]`);
           throw innerErr;
         }
       } catch (err) {
@@ -768,7 +774,6 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
           } catch {
             /* preserve original error */
           }
-          if (entry.inTransaction && hasRollbackConflictClause(statement)) entry.inTransaction = false;
         }
         return this.err(errorCode(err, 'EXECUTE_FAILED'), 'runMany', err);
       }
@@ -819,8 +824,6 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
         }
         return this.ok({ rows });
       } catch (err) {
-        const entry = this.openDbs.get(database);
-        if (entry?.inTransaction && hasRollbackConflictClause(statement)) entry.inTransaction = false;
         return this.err(errorCode(err, 'QUERY_FAILED'), 'query', err);
       }
     });
@@ -989,8 +992,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
           reject(new Error(`sqlite worker did not become ready within ${WORKER_READY_TIMEOUT_MS}ms`));
         }, WORKER_READY_TIMEOUT_MS);
         try {
-          const configuredWorker = sqlite3Worker1Promiser.defaultConfig.worker;
-          worker = typeof configuredWorker === 'function' ? configuredWorker() : configuredWorker;
+          worker = new Worker(new URL('./web-worker.js', import.meta.url), { type: 'module' });
           holder.ref = sqlite3Worker1Promiser({
             worker,
             onready: () => {
@@ -1010,8 +1012,26 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
         }
       })
         .then((p) => {
-          this.promiser = p;
-          return p;
+          const syncTransaction = (message: any) => {
+            if (typeof message?.inTransaction !== 'boolean') return;
+            for (const entry of this.openDbs.values()) {
+              if (entry.dbId === message.dbId) {
+                entry.inTransaction = message.inTransaction;
+                break;
+              }
+            }
+          };
+          this.promiser = async (type, args) => {
+            try {
+              const response = await p(type, args);
+              syncTransaction(response);
+              return response;
+            } catch (error) {
+              syncTransaction(error);
+              throw error;
+            }
+          };
+          return this.promiser;
         })
         .catch((err) => {
           this.initPromise = null;
@@ -1106,7 +1126,12 @@ function integerResult(value: unknown): number {
 function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const key of Object.keys(row)) {
-    out[key] = normalizeValue(row[key]);
+    const value = normalizeValue(row[key]);
+    if (key === '__proto__') {
+      Object.defineProperty(out, key, { value, enumerable: true, writable: true, configurable: true });
+    } else {
+      out[key] = value;
+    }
   }
   return out;
 }

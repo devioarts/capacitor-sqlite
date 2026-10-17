@@ -41,6 +41,156 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
     );
 
   return [
+  {
+    id: 'audit-01', group: 'Regression', name: 'Negative query parameters preserve arithmetic operators',
+    fn: async () => {
+      const DB = 'suite_audit01';
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      try {
+        const q = assertOk(await CapacitorSqlite.query<{ a: number; b: number; c: number }>({
+          database: DB, statement: 'SELECT 1-? AS a, -? AS b, 1-? AS c', values: [-1, -1, -1.5],
+        }), 'query');
+        assertEqual(q.rows[0].a, 2, 'subtract negative integer');
+        assertEqual(q.rows[0].b, 1, 'negate negative integer');
+        assertEqual(q.rows[0].c, 2.5, 'subtract negative real');
+      } finally { await silentClose(DB); }
+    },
+  },
+  {
+    id: 'audit-02', group: 'Regression', name: 'Invalid query values return a failure instead of rejecting',
+    fn: async () => {
+      const DB = 'suite_audit02';
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      try {
+        for (const value of [NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+          assertFail(await CapacitorSqlite.query({ database: DB, statement: 'SELECT ?', values: [value] }), 'invalid query', 'INVALID_PARAMS');
+        }
+      } finally { await silentClose(DB); }
+    },
+  },
+  {
+    id: 'audit-03', group: 'Regression', name: 'Query RETURNING auto-rollback permits a new transaction',
+    fn: async () => {
+      const DB = 'suite_audit03';
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      try {
+        const version = assertOk(await CapacitorSqlite.getVersion({ database: DB }), 'version').version.split('.').map(Number);
+        if (version[0] < 3 || (version[0] === 3 && version[1] < 35)) skipTest('RETURNING requires SQLite 3.35');
+        assertOk(await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t(v INTEGER UNIQUE)', 'INSERT INTO t VALUES (1)'] }), 'setup');
+        assertOk(await CapacitorSqlite.beginTransaction({ database: DB }), 'begin');
+        assertOk(await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES (2)' }), 'pending insert');
+        assertFail(await CapacitorSqlite.query({ database: DB, statement: 'INSERT OR ROLLBACK INTO t VALUES (1) RETURNING v' }), 'duplicate');
+        const q = assertOk(await CapacitorSqlite.query<{ n: number }>({ database: DB, statement: 'SELECT COUNT(*) AS n FROM t' }), 'count');
+        assertEqual(q.rows[0].n, 1, 'pending insert rolled back');
+        assertOk(await CapacitorSqlite.beginTransaction({ database: DB }), 'begin after rollback');
+        assertOk(await CapacitorSqlite.rollbackTransaction({ database: DB }), 'rollback new transaction');
+      } finally { await silentClose(DB); }
+    },
+  },
+  ...['schema rollback', 'prepare error'].map((scenario, scenarioIndex): TestCase => ({
+    id: `audit-web-${scenarioIndex + 1}`, group: 'Regression', name: `Web transaction state after ${scenario}`,
+    fn: async () => {
+      if (assertOk(await CapacitorSqlite.getPluginPlatform(), 'platform').platform !== 'web') skipTest('Web worker state regression');
+      const DB = `suite_auditweb${scenarioIndex}`;
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      try {
+        assertOk(await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t(v INTEGER UNIQUE ON CONFLICT ROLLBACK)', 'INSERT INTO t VALUES (1)'] }), 'setup');
+        const sql = scenarioIndex === 0 ? 'INSERT INTO t VALUES (1)' : 'INSERT OR ROLLBACK INTO missing_table VALUES (1)';
+        const operations = [
+          () => CapacitorSqlite.run({ database: DB, statement: sql }),
+          () => CapacitorSqlite.execute({ database: DB, statements: [sql], transaction: false }),
+          () => CapacitorSqlite.runBatch({ database: DB, set: [{ statement: sql }], transaction: false }),
+          () => CapacitorSqlite.runMany({ database: DB, statement: sql, values: [[]], transaction: false }),
+          () => CapacitorSqlite.query({ database: DB, statement: `${sql} RETURNING v` }),
+        ];
+        for (const operation of operations) {
+          assertOk(await CapacitorSqlite.beginTransaction({ database: DB }), 'begin');
+          assertOk(await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES (2)' }), 'pending insert');
+          assertFail(await operation(), scenario);
+          const q = assertOk(await CapacitorSqlite.query<{ n: number }>({ database: DB, statement: 'SELECT COUNT(*) AS n FROM t' }), 'count');
+          assertEqual(q.rows[0].n, scenarioIndex === 0 ? 1 : 2, 'actual transaction contents');
+          if (scenarioIndex === 0) assertOk(await CapacitorSqlite.beginTransaction({ database: DB }), 'begin after auto rollback');
+          assertOk(await CapacitorSqlite.rollbackTransaction({ database: DB }), 'rollback active transaction');
+        }
+      } finally { await silentClose(DB); }
+    },
+  })),
+  ...['execute', 'run', 'query', 'runBatch', 'runMany', 'migration'].map((method): TestCase => ({
+    id: `audit2-boundary-${method}`, group: 'Regression', name: `${method} rejects hidden SQL after a begin column`,
+    fn: async () => {
+      const DB = `suite_audit2_${method}`;
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      try {
+        assertOk(await CapacitorSqlite.execute({ database: DB, statements: [
+          'DROP TABLE IF EXISTS t', 'CREATE TABLE t(begin INTEGER)', 'INSERT INTO t VALUES (1), (2)',
+        ] }), 'setup');
+        const statement = 'SELECT begin FROM t; DELETE FROM t';
+        const result = method === 'execute' ? await CapacitorSqlite.execute({ database: DB, statements: [statement] })
+          : method === 'run' ? await CapacitorSqlite.run({ database: DB, statement })
+          : method === 'query' ? await CapacitorSqlite.query({ database: DB, statement })
+          : method === 'runBatch' ? await CapacitorSqlite.runBatch({ database: DB, set: [{ statement }] })
+          : method === 'runMany' ? await CapacitorSqlite.runMany({ database: DB, statement, values: [[]] })
+          : await CapacitorSqlite.open({ database: DB, migrations: [{ version: 1, statements: [statement] }] });
+        assertFail(result, 'multiple statements', method === 'migration' ? 'MIGRATION_FAILED' : 'INVALID_PARAMS');
+        const q = assertOk(await CapacitorSqlite.query<{ begin: number }>({ database: DB, statement: 'SELECT begin FROM t ORDER BY begin' }), 'unchanged data');
+        assertEqual(JSON.stringify(q.rows), JSON.stringify([{ begin: 1 }, { begin: 2 }]), 'no hidden DELETE ran');
+      } finally { await silentClose(DB); }
+    },
+  })),
+  ...['', 'TEMP '].map((temporary, index): TestCase => ({
+    id: `audit2-trigger-${index}`, group: 'Regression', name: `${temporary}trigger keeps keyword names and nested CASE working`,
+    fn: async () => {
+      const DB = `suite_audit2tr${index}`;
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      try {
+        assertOk(await CapacitorSqlite.execute({ database: DB, statements: [
+          'DROP TABLE IF EXISTS t', 'DROP TABLE IF EXISTS log',
+          'CREATE TABLE t(begin INTEGER, end INTEGER)', 'CREATE TABLE log(v INTEGER)',
+          `CREATE ${temporary}TRIGGER begin AFTER INSERT ON t WHEN NEW.begin > 0 BEGIN
+             INSERT INTO log SELECT end FROM t;
+             INSERT INTO log VALUES (CASE WHEN NEW.begin THEN CASE WHEN NEW.end > 0 THEN 2 ELSE 3 END ELSE 4 END);
+           END`,
+        ] }), 'setup trigger');
+        assertOk(await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES (?, ?)', values: [1, 7] }), 'fire trigger');
+        const q = assertOk(await CapacitorSqlite.query<{ v: number }>({ database: DB, statement: 'SELECT v FROM log ORDER BY rowid' }), 'trigger output');
+        assertEqual(JSON.stringify(q.rows), JSON.stringify([{ v: 7 }, { v: 2 }]), 'both trigger statements executed');
+      } finally { await silentClose(DB); }
+    },
+  })),
+  {
+    id: 'audit2-prototype-columns', group: 'Regression', name: 'Query preserves special column names and native values',
+    fn: async () => {
+      const DB = 'suite_audit2proto';
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      try {
+        const blob = Uint8Array.from([0, 128, 255]);
+        for (const value of [7, null, 'blob64:literal', 'text64:literal', blob]) {
+          const q = assertOk(await CapacitorSqlite.query<Record<string, unknown>>({
+            database: DB,
+            statement: 'SELECT ? AS "__proto__", 2 AS "constructor", 3 AS "toString", 4 AS "hasOwnProperty"',
+            values: [value],
+          }), 'special columns');
+          const row = q.rows[0];
+          assert(Object.getPrototypeOf(row) === Object.prototype, 'ordinary row prototype preserved');
+          assert(Object.prototype.hasOwnProperty.call(row, '__proto__'), '__proto__ is an own data property');
+          assertEqual(Object.keys(row).length, 4, 'all columns preserved');
+          if (value instanceof Uint8Array) {
+            assert(row.__proto__ instanceof Uint8Array, 'BLOB decoded');
+            assertEqual(Array.from(row.__proto__ as Uint8Array).join(','), '0,128,255', 'BLOB bytes preserved');
+          } else {
+            assertEqual(row.__proto__, value, 'special-column value preserved');
+          }
+          assertEqual<unknown>(row.constructor, 2, 'constructor column');
+          assertEqual<unknown>(row.toString, 3, 'toString column');
+        }
+        const duplicate = assertOk(await CapacitorSqlite.query<Record<string, unknown>>({
+          database: DB, statement: 'SELECT 1 AS "__proto__", 2 AS "__proto__"',
+        }), 'duplicate aliases').rows[0];
+        assertEqual(duplicate.__proto__, 2, 'last duplicate column wins');
+        assertEqual(JSON.stringify(duplicate), '{"__proto__":2}', 'special property is enumerable');
+      } finally { await silentClose(DB); }
+    },
+  },
   // ── Platform ──────────────────────────────────────────────────────────────
   {
     id: 'plat-01', group: 'Platform', name: 'getPluginPlatform returns known value',
@@ -4371,6 +4521,63 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
       assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
       const r = await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO ghost_table_xyz VALUES (1)' });
       assert(!r.success, 'insert into missing table must fail');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'err-06', group: 'Error Handling', name: 'Web/Electron runBatch runtime error includes set index',
+    fn: async () => {
+      const platform = assertOk(await CapacitorSqlite.getPluginPlatform(), 'platform').platform;
+      if (platform !== 'web' && platform !== 'electron') skipTest('set index diagnostics are Web/Electron-only');
+      const DB = 'suite_err06';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(
+        await CapacitorSqlite.execute({
+          database: DB,
+          statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (v INTEGER UNIQUE)'],
+        }),
+        'ddl',
+      );
+      const r = await CapacitorSqlite.runBatch({
+        database: DB,
+        set: [
+          { statement: 'INSERT INTO t VALUES (?)', values: [1] },
+          { statement: 'INSERT INTO t VALUES (?)', values: [2] },
+          { statement: 'INSERT INTO t VALUES (?)', values: [1] },
+        ],
+      });
+      if (r.success) throw new Error('duplicate batch item must fail');
+      assert(r.error.message.includes('set[2]'), `expected set[2] in message, got: ${r.error.message}`);
+      const count = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT COUNT(*) AS n FROM t' }), 'count');
+      assertEqual((count.rows[0] as { n: number }).n, 0, 'transactional batch rolled back');
+      await silentClose(DB);
+    },
+  },
+  {
+    id: 'err-07', group: 'Error Handling', name: 'Web/Electron runMany runtime error includes values index',
+    fn: async () => {
+      const platform = assertOk(await CapacitorSqlite.getPluginPlatform(), 'platform').platform;
+      if (platform !== 'web' && platform !== 'electron') skipTest('values index diagnostics are Web/Electron-only');
+      const DB = 'suite_err07';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
+      assertOk(
+        await CapacitorSqlite.execute({
+          database: DB,
+          statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (v INTEGER UNIQUE)'],
+        }),
+        'ddl',
+      );
+      const r = await CapacitorSqlite.runMany({
+        database: DB,
+        statement: 'INSERT INTO t VALUES (?)',
+        values: [[1], [2], [1]],
+      });
+      if (r.success) throw new Error('duplicate runMany item must fail');
+      assert(r.error.message.includes('values[2]'), `expected values[2] in message, got: ${r.error.message}`);
+      const count = assertOk(await CapacitorSqlite.query({ database: DB, statement: 'SELECT COUNT(*) AS n FROM t' }), 'count');
+      assertEqual((count.rows[0] as { n: number }).n, 0, 'transactional runMany rolled back');
       await silentClose(DB);
     },
   },

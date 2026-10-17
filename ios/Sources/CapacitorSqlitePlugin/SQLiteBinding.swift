@@ -64,12 +64,6 @@ extension SQLiteHelpers {
         }
     }
 
-    static func bindPrevalidated(stmt: OpaquePointer?, values: [Any]) throws {
-        for (i, value) in values.enumerated() {
-            try bindPrevalidatedValue(stmt: stmt, value: value, idx: Int32(i + 1))
-        }
-    }
-
     static func validateNormalizedBindValues(stmt: OpaquePointer?, values: SQLiteBindValues) throws {
         let expected = Int(sqlite3_bind_parameter_count(stmt))
         guard values.count == expected else {
@@ -151,26 +145,6 @@ extension SQLiteHelpers {
         }
     }
 
-    private static func bindPrevalidatedValue(stmt: OpaquePointer?, value: Any, idx: Int32) throws {
-        switch value {
-        case is NSNull:
-            try checkBind(sqlite3_bind_null(stmt, idx), stmt: stmt, idx: idx)
-        case let v as NSArray:
-            try bindPrevalidatedArrayBlob(stmt: stmt, value: v, idx: idx)
-        case let v as NSNumber:
-            try bindPrevalidatedNumber(stmt: stmt, value: v, idx: idx)
-        case let v as String:
-            let byteCount = Int32(v.lengthOfBytes(using: .utf8))
-            try checkBind(sqlite3_bind_text(stmt, idx, v, byteCount, SQLITE_TRANSIENT), stmt: stmt, idx: idx)
-        case let v as Data:
-            try bindBlob(stmt: stmt, data: v, idx: idx)
-        case let v as [UInt8]:
-            try bindBlob(stmt: stmt, data: Data(v), idx: idx)
-        default:
-            throw SQLiteError.execute("Unsupported bind value type at index \(idx)")
-        }
-    }
-
     private static func bindNormalizedValue(stmt: OpaquePointer?, value: SQLiteBindValue, idx: Int32) throws {
         switch value {
         case .null:
@@ -191,39 +165,8 @@ extension SQLiteHelpers {
         try bindBlob(stmt: stmt, data: dataFromArrayBlob(value: value, idx: idx), idx: idx)
     }
 
-    private static func bindPrevalidatedArrayBlob(stmt: OpaquePointer?, value: NSArray, idx: Int32) throws {
-        var bytes = [UInt8]()
-        bytes.reserveCapacity(value.count)
-        for item in value {
-            guard let number = item as? NSNumber else {
-                throw SQLiteError.execute("BLOB value at index \(idx) contains a non-number")
-            }
-            bytes.append(UInt8(number.intValue))
-        }
-        try bindBlob(stmt: stmt, data: Data(bytes), idx: idx)
-    }
-
     private static func bindNumber(stmt: OpaquePointer?, value: NSNumber, idx: Int32) throws {
         try bindNormalizedValue(stmt: stmt, value: normalizeNumber(value: value, idx: idx), idx: idx)
-    }
-
-    private static func bindPrevalidatedNumber(stmt: OpaquePointer?, value: NSNumber, idx: Int32) throws {
-        if CFGetTypeID(value) == CFBooleanGetTypeID() {
-            try checkBind(sqlite3_bind_int(stmt, idx, value.boolValue ? 1 : 0), stmt: stmt, idx: idx)
-            return
-        }
-
-        let type = value.objCType.pointee
-        if type == 100 || type == 102 { // "d" / "f"
-            let doubleValue = value.doubleValue
-            if let integer = Int64(exactly: doubleValue) {
-                try checkBind(sqlite3_bind_int64(stmt, idx, integer), stmt: stmt, idx: idx)
-            } else {
-                try checkBind(sqlite3_bind_double(stmt, idx, doubleValue), stmt: stmt, idx: idx)
-            }
-        } else {
-            try checkBind(sqlite3_bind_int64(stmt, idx, value.int64Value), stmt: stmt, idx: idx)
-        }
     }
 
     private static func normalizeNumber(value: NSNumber, idx: Int32) throws -> SQLiteBindValue {
@@ -244,19 +187,6 @@ extension SQLiteHelpers {
         let integerValue = value.int64Value
         try validateInteger(integerValue, idx: idx)
         return .integer(integerValue)
-    }
-
-    private static func bindFloatingNumber(stmt: OpaquePointer?, value: Double, idx: Int32) throws {
-        if let integer = Int64(exactly: value) {
-            try checkBind(sqlite3_bind_int64(stmt, idx, integer), stmt: stmt, idx: idx)
-        } else {
-            try checkBind(sqlite3_bind_double(stmt, idx, value), stmt: stmt, idx: idx)
-        }
-    }
-
-    private static func bindInteger(stmt: OpaquePointer?, value: Int64, idx: Int32) throws {
-        try validateInteger(value, idx: idx)
-        try checkBind(sqlite3_bind_int64(stmt, idx, value), stmt: stmt, idx: idx)
     }
 
     private static func validateArrayBlob(value: NSArray, idx: Int32) throws {

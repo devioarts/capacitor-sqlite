@@ -1,7 +1,7 @@
 import Foundation
 import SQLite3
 
-private typealias BatchItem = (sql: String, rawValues: [Any], values: SQLiteBindValues)
+private typealias BatchItem = (sql: String, values: SQLiteBindValues)
 private typealias PreparedBatchItem = (statement: SQLiteHelpers.PreparedRunStatement, values: SQLiteBindValues)
 
 final class BatchDiagnostics {
@@ -41,9 +41,6 @@ extension Database {
         if transaction {
             try executeTransactionalBatch(parsed, handle: handle, diagnostics: diagnostics)
         } else {
-            let validateStart = DispatchTime.now().uptimeNanoseconds
-            try validateBatch(parsed, handle: handle)
-            diagnostics?.set("dbValidatePrepareMs", start: validateStart)
             try executeAutocommitBatch(parsed, handle: handle, diagnostics: diagnostics)
         }
         diagnostics?.set("dbTotalMs", start: totalStart)
@@ -82,11 +79,20 @@ extension Database {
         }
     }
 
-    private func executeAutocommitBatch(_ items: [BatchItem], handle: OpaquePointer, diagnostics: BatchDiagnostics?) throws {
+    private func executeAutocommitBatch(
+        _ items: [BatchItem],
+        handle: OpaquePointer,
+        diagnostics: BatchDiagnostics?
+    ) throws {
+        let prepareStart = DispatchTime.now().uptimeNanoseconds
+        let prepared = try prepareBatch(items, handle: handle, diagnostics: diagnostics)
+        diagnostics?.set("dbValidatePrepareMs", start: prepareStart)
+        defer { prepared.statements.values.forEach { $0.close() } }
         do {
             let loopStart = DispatchTime.now().uptimeNanoseconds
-            for item in items {
-                _ = try SQLiteHelpers.run(db: handle, sql: item.sql, values: item.rawValues)
+            for item in prepared.items {
+                try item.statement.bindNormalizedPrevalidated(values: item.values, diagnostics: diagnostics)
+                try item.statement.execute(diagnostics: diagnostics)
             }
             diagnostics?.set("dbExecuteLoopMs", start: loopStart)
             diagnostics?.set("dbCommitMs", nanos: 0)
@@ -158,22 +164,11 @@ extension Database {
                 throw DatabaseError.invalidParams("runBatch: each item must have a non-empty 'statement' key")
             }
             let rawValues = item["values"] as? [Any] ?? []
-            parsed.append((sql, rawValues, try SQLiteHelpers.normalizeBindValues(rawValues)))
+            parsed.append((sql, try SQLiteHelpers.normalizeBindValues(rawValues)))
         }
         return parsed
     }
 
-    private func validateBatch(_ items: [BatchItem], handle: OpaquePointer) throws {
-        do {
-            for item in items {
-                try SQLiteHelpers.validateRunStatement(db: handle, sql: item.sql, values: item.rawValues)
-            }
-        } catch SQLiteError.invalidParams(let message) {
-            throw DatabaseError.invalidParams(message)
-        } catch {
-            throw DatabaseError.run("runBatch validation failed: \(error)")
-        }
-    }
 }
 
 private extension String {

@@ -25,60 +25,53 @@ export function hasMultipleSqlStatements(sql: string): boolean {
 }
 
 function computeHasMultipleSqlStatements(sql: string): boolean {
-  // Tracks BEGIN/CASE ... END nesting (trigger bodies, CASE expressions) so a
-  // semicolon inside one of these blocks isn't mistaken for a statement
-  // separator. Only a semicolon seen while this is back at 0 is a real split.
-  let blockDepth = 0;
-  // Tracks '(' / ')' nesting. SQLite does not reserve BEGIN as a keyword, so
-  // `CREATE TABLE t(begin TEXT)` is valid SQL — without this, the bare `begin`
-  // column name below would be misread as a trigger-body opener and swallow the
-  // semicolon after it. A genuine trigger BEGIN always appears outside any
-  // parentheses (after `ON ...`/`WHEN ...`/`FOR EACH ROW`), so gating on
-  // `parenDepth === 0` filters out identifier occurrences without affecting
-  // real trigger bodies.
-  let parenDepth = 0;
-  // `BEGIN` as the very first token is a transaction statement (`BEGIN;`,
-  // `BEGIN TRANSACTION;`), not a trigger-body opener — it must not swallow the
-  // semicolon that follows it ("BEGIN; DROP TABLE t" is two statements).
-  const firstTokenStart = skipIgnorable(sql, 0);
+  // A trigger ends at `; END;`. BEGIN/END elsewhere can be ordinary identifiers.
+  let header = 0;
+  let trigger = false;
+  let afterSemicolon = false;
+  let triggerEnd = false;
   for (let i = 0; i < sql.length; i++) {
     const ch = sql[i];
+    let token = '';
+    if (/\s/.test(ch)) continue;
+    if (ch === '-' && sql[i + 1] === '-') {
+      i = skipLineComment(sql, i);
+      continue;
+    }
+    if (ch === '/' && sql[i + 1] === '*') {
+      i = skipBlockComment(sql, i);
+      continue;
+    }
     if (ch === "'" || ch === '"' || ch === '`') {
       i = skipQuoted(sql, i, ch);
     } else if (ch === '[') {
       i = skipBracketIdentifier(sql, i);
-    } else if (ch === '-' && sql[i + 1] === '-') {
-      i = skipLineComment(sql, i);
-    } else if (ch === '/' && sql[i + 1] === '*') {
-      i = skipBlockComment(sql, i);
-    } else if (ch === '(') {
-      parenDepth++;
-    } else if (ch === ')') {
-      if (parenDepth > 0) parenDepth--;
+    } else if (ch === ';') {
+      if (!trigger || triggerEnd) return hasTailContent(sql, i + 1);
+      afterSemicolon = true;
+      triggerEnd = false;
+      continue;
     } else if (/[A-Za-z_]/.test(ch) && (i === 0 || !/[A-Za-z0-9_]/.test(sql[i - 1]))) {
-      const keyword = readKeyword(sql, i);
-      if (keyword) {
-        // A '.' immediately before rules out a qualified reference like `NEW.begin`
-        // (used in a trigger's WHEN clause, for example) — real BEGIN/CASE keywords
-        // are never preceded by a dot.
-        const isQualifiedRef = i > 0 && sql[i - 1] === '.';
-        if (
-          !isQualifiedRef &&
-          ((keyword.keyword === 'BEGIN' && i !== firstTokenStart && parenDepth === 0) ||
-            // CASE only nests inside an already-open trigger BEGIN block — a bare
-            // `case` identifier at the top level (SQLite rejects it as unquoted, but
-            // the guard should not depend on that) is otherwise inert.
-            (keyword.keyword === 'CASE' && blockDepth > 0))
-        ) {
-          blockDepth++;
-        } else if (!isQualifiedRef && keyword.keyword === 'END' && blockDepth > 0) {
-          blockDepth--;
-        }
-        i = keyword.end - 1;
-      }
-    } else if (ch === ';' && blockDepth === 0) {
-      return hasTailContent(sql, i + 1);
+      const keyword = readKeyword(sql, i)!;
+      token = keyword.keyword;
+      i = keyword.end - 1;
     }
+    if (header === 0 && token === 'EXPLAIN') {
+      header = 3;
+    } else if (header === 3 && token === 'QUERY') {
+      header = 4;
+    } else if (header === 4 && token === 'PLAN') {
+      header = 5;
+    } else if ((header === 0 || header === 3 || header === 5) && token === 'CREATE') {
+      header = 1;
+    } else if (header === 1 && (token === 'TEMP' || token === 'TEMPORARY')) {
+      header = 2;
+    } else {
+      if ((header === 1 || header === 2) && token === 'TRIGGER') trigger = true;
+      header = -1;
+    }
+    triggerEnd = afterSemicolon && token === 'END';
+    afterSemicolon = false;
   }
   return false;
 }

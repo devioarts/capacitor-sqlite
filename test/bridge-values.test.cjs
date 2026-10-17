@@ -87,3 +87,23 @@ test('Electron compact row decoder rejects malformed internal payloads', () => {
     /invalid compact column names/,
   );
 });
+
+test('compact rows preserve prototype-looking column names without changing row prototypes', () => {
+  const blob = Uint8Array.from([0, 255]);
+  for (const value of [7, null, 'blob64:text', blob, { polluted: true }]) {
+    const [row] = decodeElectronCompactRows({
+      compactRows: { columns: ['__proto__', 'constructor', 'toString', 'hasOwnProperty'], values: [[value, 2, 3, 4]] },
+    });
+    assert.equal(Object.getPrototypeOf(row), Object.prototype);
+    assert.equal(Object.hasOwn(row, '__proto__'), true);
+    assert.equal(row.__proto__, value);
+    assert.deepEqual(Object.keys(row), ['__proto__', 'constructor', 'toString', 'hasOwnProperty']);
+    assert.equal(JSON.parse(JSON.stringify(row)).constructor, 2);
+  }
+  const [duplicate] = decodeElectronCompactRows({
+    compactRows: { columns: ['__proto__', '__proto__'], values: [[1, 2]] },
+  });
+  assert.equal(duplicate.__proto__, 2);
+  assert.equal(Object.getPrototypeOf(duplicate), Object.prototype);
+  assert.equal({}.polluted, undefined);
+});

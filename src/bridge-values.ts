@@ -63,7 +63,12 @@ export function decodeElectronCompactRows(value: unknown): Record<string, unknow
     }
     const row: Record<string, unknown> = {};
     columns.forEach((column, index) => {
-      row[column] = values[index];
+      const value = values[index];
+      if (column === '__proto__') {
+        Object.defineProperty(row, column, { value, enumerable: true, writable: true, configurable: true });
+      } else {
+        row[column] = value;
+      }
     });
     return row;
   });

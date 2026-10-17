@@ -15,10 +15,10 @@ export declare class CapacitorSqlite implements CapacitorSqlitePlugin {
   getPluginPlatform(): Promise<SqliteResult<{ platform: SqlitePlatform }>>;
   isAvailable(): Promise<SqliteResult<{ available: boolean }>>;
   /**
-   * Terminates the worker thread that runs all SQLite work. Not part of
-   * `CapacitorSqlitePlugin` — call explicitly (typically from `app.on('before-quit')`)
-   * to release the worker before the process exits. Safe to call again later; a fresh
-   * worker is spawned on demand.
+   * Waits for queued SQLite work, closes all connections, and terminates the worker.
+   * Not part of `CapacitorSqlitePlugin`; await it from your Electron main process
+   * before allowing the app to quit. A later call spawns a fresh worker on demand.
+   * This is graceful shutdown: it cannot interrupt a running or stuck SQL statement.
    */
   dispose(): Promise<void>;
   open(options: OpenOptions): Promise<SqliteResult>;

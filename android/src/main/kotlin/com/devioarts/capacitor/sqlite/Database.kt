@@ -134,7 +134,7 @@ internal class Database(
                 }
                 if (transaction) SQLiteHelpers.commitTransaction(handle)
             } catch (e: Exception) {
-                if (transaction && handle.inTransaction()) SQLiteHelpers.rollbackTransaction(handle)
+                if (transaction) recoverAutomaticRollback(handle)
                 if (!transaction && statements.any(SQLiteHelpers::hasRollbackConflictClause)) {
                     recoverAutomaticRollback(handle)
                 }
@@ -195,8 +195,16 @@ internal class Database(
                 set.map { item ->
                     val sql =
                         item["statement"] as? String
-                            ?: throw IllegalArgumentException("runBatch: each item must have a 'statement' key")
-                    require(sql.trim().isNotEmpty()) { "runBatch: each item must have a non-empty 'statement' key" }
+                            ?: throw CapacitorSqliteException(
+                                "INVALID_PARAMS",
+                                "runBatch: each item must have a 'statement' key",
+                            )
+                    if (sql.trim().isEmpty()) {
+                        throw CapacitorSqliteException(
+                            "INVALID_PARAMS",
+                            "runBatch: each item must have a non-empty 'statement' key",
+                        )
+                    }
                     @Suppress("UNCHECKED_CAST")
                     val vals = item["values"] as? List<Any?> ?: emptyList()
                     sql to vals
@@ -262,7 +270,7 @@ internal class Database(
                         timings?.put("dbTotalMs", elapsedMs(totalStart))
                         RunResult(changes = changes, lastInsertId = 0)
                     } catch (error: Exception) {
-                        if (handle.inTransaction()) SQLiteHelpers.rollbackTransaction(handle)
+                        recoverAutomaticRollback(handle)
                         throw error
                     }
                 } else {
@@ -333,7 +341,7 @@ internal class Database(
                     if (transaction) SQLiteHelpers.commitTransaction(handle)
                     RunManyResult(changes, perItem)
                 } catch (error: Exception) {
-                    if (transaction && handle.inTransaction()) SQLiteHelpers.rollbackTransaction(handle)
+                    if (transaction) recoverAutomaticRollback(handle)
                     if (SQLiteHelpers.hasRollbackConflictClause(statement)) recoverAutomaticRollback(handle)
                     throw error
                 }
