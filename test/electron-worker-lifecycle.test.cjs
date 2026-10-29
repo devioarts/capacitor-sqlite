@@ -394,3 +394,203 @@ test(
     }
   },
 );
+
+test('large rowids do not turn committed writes into failures or poison later writes', async () => {
+  const temporary = withTempPaths();
+  const worker = spawnWorker(temporary.paths);
+  const database = ':memory:';
+  const call = (method, options = {}) => request(worker, method, { database, ...options });
+  const ok = (result) => {
+    assert.equal(result.success, true, JSON.stringify(result));
+    return result.data;
+  };
+  try {
+    ok(await call('open'));
+    ok(await call('execute', { statements: ['CREATE TABLE t(id INTEGER PRIMARY KEY, v INTEGER DEFAULT 0)'] }));
+    for (const id of ['9007199254740992', '9007199254740993']) {
+      const result = ok(await call('run', { statement: 'INSERT INTO t(id) VALUES (?)', values: [id] }));
+      assert.equal(result.changes, 1);
+      // Consecutive 64-bit ids can round to the same Number but must still count as distinct inserts.
+      assert.equal(result.lastInsertId, Number(id));
+    }
+    ok(await call('execute', { statements: ['INSERT INTO t(id) VALUES (9007199254740994)'] }));
+    ok(await call('runBatch', { set: [{ statement: 'INSERT INTO t(id) VALUES (?)', values: ['9007199254740995'] }] }));
+    ok(await call('runMany', { statement: 'INSERT INTO t(id) VALUES (?)', values: [['9007199254740996']] }));
+    const many = ok(
+      await call('runMany', {
+        statement: 'INSERT INTO t(id) VALUES (?)',
+        values: [['9007199254740997'], ['9007199254740998']],
+        returnResults: true,
+      }),
+    );
+    assert.deepEqual(
+      many.results.map((item) => item.lastInsertId),
+      [Number('9007199254740997'), Number('9007199254740998')],
+    );
+    const update = ok(await call('run', { statement: 'UPDATE t SET v = 1' }));
+    assert.equal(update.changes, 7);
+    assert.equal(update.lastInsertId, 0);
+    const rows = ok(await call('query', { statement: 'SELECT id, v FROM t ORDER BY id' })).rows;
+    assert.deepEqual(
+      rows.map((row) => row.id),
+      [
+        '9007199254740992',
+        '9007199254740993',
+        '9007199254740994',
+        '9007199254740995',
+        '9007199254740996',
+        '9007199254740997',
+        '9007199254740998',
+      ],
+    );
+    assert.equal(
+      rows.every((row) => row.v === 1),
+      true,
+    );
+  } finally {
+    await request(worker, '__shutdown');
+    await worker.terminate();
+    fs.rmSync(temporary.root, { recursive: true, force: true });
+  }
+});
+
+test('batch preparation follows schema changes and preserves atomic and autocommit behavior', async () => {
+  const temporary = withTempPaths();
+  const worker = spawnWorker(temporary.paths);
+  const database = ':memory:';
+  const call = (method, options = {}) => request(worker, method, { database, ...options });
+  try {
+    assert.equal((await call('open')).success, true);
+    const batch = await call('runBatch', {
+      set: [
+        { statement: 'CREATE TABLE t(v INTEGER)' },
+        { statement: 'INSERT INTO t(v) VALUES (?)', values: [1] },
+        { statement: 'ALTER TABLE t ADD COLUMN label TEXT' },
+        { statement: 'INSERT INTO t(v, label) VALUES (?, ?)', values: [2, 'new column'] },
+        { statement: 'INSERT INTO t(v) VALUES (?)', values: [3] },
+      ],
+    });
+    assert.equal(batch.success, true, JSON.stringify(batch));
+    assert.equal(batch.data.changes, 3);
+    assert.deepEqual((await call('query', { statement: 'SELECT * FROM t ORDER BY v' })).data.rows, [
+      { v: 1, label: null },
+      { v: 2, label: 'new column' },
+      { v: 3, label: null },
+    ]);
+    const invalidValues = await call('runBatch', {
+      transaction: false,
+      set: [
+        { statement: 'INSERT INTO t(v) VALUES (?)', values: [99] },
+        { statement: 'INSERT INTO t(v) VALUES (?)', values: [100, 101] },
+      ],
+    });
+    assert.equal(invalidValues.success, false);
+    assert.equal(invalidValues.error.code, 'INVALID_PARAMS');
+    assert.equal((await call('query', { statement: 'SELECT count(*) AS n FROM t' })).data.rows[0].n, 3);
+    for (const transaction of [true, false]) {
+      const result = await call('runBatch', {
+        transaction,
+        set: [
+          { statement: 'CREATE TABLE dependent(v INTEGER)' },
+          { statement: 'INSERT INTO dependent VALUES (?)', values: [7] },
+          { statement: 'INSERT INTO missing_table VALUES (1)' },
+        ],
+      });
+      assert.equal(result.success, false);
+      assert.match(result.error.message, /set\[2\]/);
+      const table = await call('query', {
+        statement: "SELECT count(*) AS n FROM sqlite_master WHERE name = 'dependent'",
+      });
+      assert.equal(table.data.rows[0].n, transaction ? 0 : 1);
+      if (!transaction)
+        assert.deepEqual((await call('query', { statement: 'SELECT * FROM dependent' })).data.rows, [{ v: 7 }]);
+    }
+  } finally {
+    await request(worker, '__shutdown');
+    await worker.terminate();
+    fs.rmSync(temporary.root, { recursive: true, force: true });
+  }
+});
+
+test('batch PRAGMA preparation respects transaction boundaries and repeated execution order', async () => {
+  const temporary = withTempPaths();
+  const worker = spawnWorker(temporary.paths);
+  const database = ':memory:';
+  const call = (method, options = {}) => request(worker, method, { database, ...options });
+  const foreignKeys = async () => (await call('query', { statement: 'PRAGMA foreign_keys' })).data.rows[0].foreign_keys;
+  try {
+    assert.equal((await call('open')).success, true);
+    assert.equal(await foreignKeys(), 1);
+    const failed = await call('runBatch', {
+      set: [{ statement: 'PRAGMA foreign_keys = OFF' }, { statement: 'INSERT INTO missing_table VALUES (1)' }],
+    });
+    assert.equal(failed.success, false);
+    assert.equal(await foreignKeys(), 1, 'prepare must not disable foreign keys before BEGIN');
+    const ordered = await call('runBatch', {
+      transaction: false,
+      set: [
+        { statement: 'PRAGMA foreign_keys = OFF' },
+        { statement: 'PRAGMA foreign_keys = ON' },
+        { statement: 'PRAGMA foreign_keys = OFF' },
+      ],
+    });
+    assert.equal(ordered.success, true, JSON.stringify(ordered));
+    assert.equal(await foreignKeys(), 0, 'a repeated PRAGMA must take effect at its own execution position');
+  } finally {
+    await request(worker, '__shutdown');
+    await worker.terminate();
+    fs.rmSync(temporary.root, { recursive: true, force: true });
+  }
+});
+
+test('transaction methods follow actual SQLite state after raw SQL boundaries', async () => {
+  const temporary = withTempPaths();
+  const worker = spawnWorker(temporary.paths);
+  const database = ':memory:';
+  const call = (method, options = {}) => request(worker, method, { database, ...options });
+  try {
+    assert.equal((await call('open')).success, true);
+    assert.equal((await call('execute', { statements: ['CREATE TABLE t(v)'] })).success, true);
+    assert.equal((await call('execute', { statements: ['BEGIN'], transaction: false })).success, true);
+    assert.equal((await call('run', { statement: 'INSERT INTO t VALUES (1)' })).success, true);
+    assert.equal((await call('rollbackTransaction')).success, true, 'rollback sees BEGIN without an intervening query');
+    assert.deepEqual((await call('query', { statement: 'SELECT * FROM t' })).data.rows, []);
+    assert.equal((await call('beginTransaction')).success, true);
+    assert.equal((await call('run', { statement: 'COMMIT' })).success, true);
+    assert.equal((await call('beginTransaction')).success, true, 'raw COMMIT does not leave a stale active flag');
+    assert.equal((await call('rollbackTransaction')).success, true);
+  } finally {
+    await request(worker, '__shutdown');
+    await worker.terminate();
+    fs.rmSync(temporary.root, { recursive: true, force: true });
+  }
+});
+
+test('main-process query returns INVALID_PARAMS for null or missing options without rejecting', async () => {
+  const temporary = withTempPaths();
+  const module = { exports: {} };
+  const pluginFile = path.join(__dirname, '..', 'electron', 'dist', 'plugin.cjs.js');
+  vm.runInNewContext(
+    fs.readFileSync(pluginFile, 'utf8'),
+    {
+      module,
+      exports: module.exports,
+      __dirname: path.dirname(pluginFile),
+      process,
+      console,
+      require: (id) => (id === 'electron' ? { app: { getPath: (name) => temporary.paths[name] } } : require(id)),
+    },
+    { filename: pluginFile },
+  );
+  const api = new module.exports.CapacitorSqlite();
+  try {
+    for (const options of [null, undefined]) {
+      const result = await api.query(options);
+      assert.equal(result.success, false);
+      assert.equal(result.error.code, 'INVALID_PARAMS');
+    }
+  } finally {
+    await api.dispose();
+    fs.rmSync(temporary.root, { recursive: true, force: true });
+  }
+});

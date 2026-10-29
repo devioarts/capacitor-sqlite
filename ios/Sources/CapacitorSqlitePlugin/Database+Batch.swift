@@ -1,8 +1,6 @@
 import Foundation
-import SQLite3
 
 private typealias BatchItem = (sql: String, values: SQLiteBindValues)
-private typealias PreparedBatchItem = (statement: SQLiteHelpers.PreparedRunStatement, values: SQLiteBindValues)
 
 final class BatchDiagnostics {
     private(set) var timings: [String: Double] = [:]
@@ -37,8 +35,10 @@ extension Database {
         let parseStart = DispatchTime.now().uptimeNanoseconds
         let parsed = try parseBatch(set: set)
         diagnostics?.set("dbParseMs", start: parseStart)
+        diagnostics?.set("dbValidatePrepareMs", nanos: 0)
 
         if transaction {
+            for item in parsed { try requireManagedTransactionStatement(item.sql) }
             try executeTransactionalBatch(parsed, handle: handle, diagnostics: diagnostics)
         } else {
             try executeAutocommitBatch(parsed, handle: handle, diagnostics: diagnostics)
@@ -52,30 +52,17 @@ extension Database {
         handle: OpaquePointer,
         diagnostics: BatchDiagnostics?
     ) throws {
-        let prepareStart = DispatchTime.now().uptimeNanoseconds
-        let prepared = try prepareBatch(items, handle: handle, diagnostics: diagnostics)
-        diagnostics?.set("dbValidatePrepareMs", start: prepareStart)
-        defer { prepared.statements.values.forEach { $0.close() } }
         let beginStart = DispatchTime.now().uptimeNanoseconds
         try beginTransactionUnsafe()
         diagnostics?.set("dbBeginMs", start: beginStart)
         do {
-            let loopStart = DispatchTime.now().uptimeNanoseconds
-            for item in prepared.items {
-                try item.statement.bindNormalizedPrevalidated(values: item.values, diagnostics: diagnostics)
-                try item.statement.execute(diagnostics: diagnostics)
-            }
-            diagnostics?.set("dbExecuteLoopMs", start: loopStart)
+            try executeBatchItems(items, handle: handle, diagnostics: diagnostics)
             let commitStart = DispatchTime.now().uptimeNanoseconds
             try commitTransactionUnsafe()
             diagnostics?.set("dbCommitMs", start: commitStart)
-        } catch SQLiteError.invalidParams(let message) {
-            try? rollbackTransactionUnsafe()
-            throw DatabaseError.invalidParams(message)
         } catch {
-            inTransaction = sqlite3_get_autocommit(handle) == 0
             try? rollbackTransactionUnsafe()
-            throw DatabaseError.run("\(error)")
+            throw error
         }
     }
 
@@ -84,75 +71,46 @@ extension Database {
         handle: OpaquePointer,
         diagnostics: BatchDiagnostics?
     ) throws {
-        let prepareStart = DispatchTime.now().uptimeNanoseconds
-        let prepared = try prepareBatch(items, handle: handle, diagnostics: diagnostics)
-        diagnostics?.set("dbValidatePrepareMs", start: prepareStart)
-        defer { prepared.statements.values.forEach { $0.close() } }
-        do {
-            let loopStart = DispatchTime.now().uptimeNanoseconds
-            for item in prepared.items {
-                try item.statement.bindNormalizedPrevalidated(values: item.values, diagnostics: diagnostics)
-                try item.statement.execute(diagnostics: diagnostics)
-            }
-            diagnostics?.set("dbExecuteLoopMs", start: loopStart)
-            diagnostics?.set("dbCommitMs", nanos: 0)
-        } catch SQLiteError.invalidParams(let message) {
-            throw DatabaseError.invalidParams(message)
-        } catch {
-            inTransaction = sqlite3_get_autocommit(handle) == 0
-            throw DatabaseError.run("\(error)")
-        }
+        try executeBatchItems(items, handle: handle, diagnostics: diagnostics)
+        diagnostics?.set("dbCommitMs", nanos: 0)
     }
 
-    private func prepareBatch(
+    private func executeBatchItems(
         _ items: [BatchItem],
         handle: OpaquePointer,
         diagnostics: BatchDiagnostics?
-    ) throws -> (statements: [String: SQLiteHelpers.PreparedRunStatement], items: [PreparedBatchItem]) {
-        var statements: [String: SQLiteHelpers.PreparedRunStatement] = [:]
-        var preparedItems: [PreparedBatchItem] = []
+    ) throws {
+        var statements: [Data: SQLiteHelpers.PreparedRunStatement] = [:]
+        defer { statements.values.forEach { $0.close() } }
         do {
+            let loopStart = DispatchTime.now().uptimeNanoseconds
             for item in items {
-                let statement = try preparedStatement(
-                    for: item,
-                    handle: handle,
-                    cache: &statements,
-                    diagnostics: diagnostics
-                )
-                preparedItems.append((statement, item.values))
+                let cacheable = ["INSERT", "UPDATE", "DELETE", "REPLACE"].contains(SQLStatement.type(item.sql))
+                // SQLite distinguishes Unicode normalizations that Swift String equality merges.
+                let cacheKey = Data(item.sql.utf8)
+                let statement: SQLiteHelpers.PreparedRunStatement
+                if let cached = statements[cacheKey] {
+                    statement = cached
+                } else {
+                    let prepareStart = DispatchTime.now().uptimeNanoseconds
+                    // Prepare in order: earlier DDL may create the schema, and PRAGMA can act during prepare.
+                    statement = try SQLiteHelpers.PreparedRunStatement(
+                        db: handle, sql: item.sql, normalizedValues: item.values, bindInitialValues: false
+                    )
+                    diagnostics?.add("dbPrepareUniqueMs", start: prepareStart)
+                    if cacheable { statements[cacheKey] = statement }
+                }
+                // Re-preparing PRAGMA preserves effects on every occurrence (OFF, ON, OFF).
+                defer { if !cacheable { statement.close() } }
+                try statement.bindNormalizedPrevalidated(values: item.values, diagnostics: diagnostics)
+                try statement.execute(diagnostics: diagnostics)
             }
-            return (statements, preparedItems)
+            diagnostics?.set("dbExecuteLoopMs", start: loopStart)
         } catch SQLiteError.invalidParams(let message) {
-            statements.values.forEach { $0.close() }
             throw DatabaseError.invalidParams(message)
         } catch {
-            statements.values.forEach { $0.close() }
-            throw DatabaseError.run("runBatch validation failed: \(error)")
+            throw DatabaseError.run("\(error)")
         }
-    }
-
-    private func preparedStatement(
-        for item: BatchItem,
-        handle: OpaquePointer,
-        cache: inout [String: SQLiteHelpers.PreparedRunStatement],
-        diagnostics: BatchDiagnostics? = nil
-    ) throws -> SQLiteHelpers.PreparedRunStatement {
-        if let existing = cache[item.sql] {
-            let validateStart = DispatchTime.now().uptimeNanoseconds
-            try existing.validate(normalizedValues: item.values)
-            diagnostics?.add("dbPrevalidateMs", start: validateStart)
-            return existing
-        }
-        let prepareStart = DispatchTime.now().uptimeNanoseconds
-        let statement = try SQLiteHelpers.PreparedRunStatement(
-            db: handle,
-            sql: item.sql,
-            normalizedValues: item.values,
-            bindInitialValues: false
-        )
-        diagnostics?.add("dbPrepareUniqueMs", start: prepareStart)
-        cache[item.sql] = statement
-        return statement
     }
 
     private func parseBatch(set: [[String: Any]]) throws -> [BatchItem] {
@@ -163,8 +121,18 @@ extension Database {
                   sql.containsNonWhitespace else {
                 throw DatabaseError.invalidParams("runBatch: each item must have a non-empty 'statement' key")
             }
+            if let values = item["values"], !(values is [Any]) {
+                throw DatabaseError.invalidParams("runBatch: 'values' must be an array")
+            }
             let rawValues = item["values"] as? [Any] ?? []
-            parsed.append((sql, try SQLiteHelpers.normalizeBindValues(rawValues)))
+            do {
+                let values = try SQLiteHelpers.normalizeBindValues(rawValues)
+                // Validate every input without preparing SQL or changing connection state.
+                try SQLiteHelpers.validateRunInput(sql: sql, valueCount: values.count)
+                parsed.append((sql, values))
+            } catch SQLiteError.invalidParams(let message) {
+                throw DatabaseError.invalidParams(message)
+            }
         }
         return parsed
     }

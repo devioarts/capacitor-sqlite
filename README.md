@@ -212,11 +212,13 @@ On web, persistent OPFS writes are especially sensitive to autocommit overhead. 
 `runBatch()` or an explicit transaction for groups of writes instead of many sequential
 single-row `run()` calls.
 
-With its default `transaction: true`, `runBatch()` validates the complete set before
-the first write. Android and iOS reuse one prepared statement for repeated identical SQL
-and read the connection change counter once around the complete batch; this avoids
-per-row prepare and metadata queries without changing atomicity or the returned
-`changes`. `transaction: false` deliberately retains per-statement autocommit semantics.
+With its default `transaction: true`, `runBatch()` validates every item's shape, value
+types and placeholder count before the first write. SQL is prepared in execution order
+inside the transaction, so a later statement can use a table or column created earlier
+in the same batch. Native and Electron backends reuse prepared DML statements; PRAGMA
+statements are prepared on each occurrence because preparation itself can change
+connection settings. `transaction: false` deliberately retains per-statement autocommit
+semantics, including earlier successful SQL when a later SQL preparation/execution fails.
 
 When every operation uses the same SQL, `runMany()` avoids repeating that SQL in every
 item. Android, iOS, and Electron prepare one reusable statement for the loop; Web's
@@ -305,6 +307,21 @@ Manual transactions are connection-scoped. Calling `beginTransaction()` again, o
 is active, returns `TRANSACTION_FAILED`.
 
 `close()` automatically rolls back any open transaction.
+
+On Android, a failed COMMIT rolls back that transaction because the framework can
+release its connection bookkeeping while SQLite still holds the transaction. If
+recovery also fails, the connection is closed and must be reopened with `open()`;
+that exceptional close discards in-memory databases and TEMP state. Previously
+committed persistent data remains intact. Check the returned `success` before
+continuing after any transaction error.
+
+Automatic transactions own their boundaries. `execute()`, `runBatch()` and `runMany()`
+reject explicit `BEGIN`, `COMMIT`, `END`, `ROLLBACK`, `SAVEPOINT` and `RELEASE` when
+`transaction: true`; migrations always reject them. Validation happens before the first
+write so an inner `COMMIT` cannot leave a failed atomic operation partially committed.
+Use `transaction: false` when intentionally managing transaction SQL yourself, or use
+the dedicated transaction methods. Raw transaction statements and these methods share
+the same actual SQLite transaction state.
 
 ## In-memory databases
 
@@ -412,6 +429,13 @@ correctness-sensitive code:
   statements such as `journal_mode` that report a value, use `query()` instead; PRAGMA
   statements that do not return rows, such as `PRAGMA foreign_keys = ON`, can still be
   run through `execute()`.
+- **Android DML with `RETURNING`.** Android 15/API 35+ reads these results through
+  `SQLiteRawStatement`, executing the write once. On older Android releases with
+  SQLite `RETURNING` support, the result must fit in one system `CursorWindow` (its
+  capacity is device-dependent). An oversized result returns `QUERY_FAILED` and rolls
+  back that statement's changes instead of executing the write again for another
+  window. Split large writes into smaller statements on those releases; plain SELECT
+  queries can still span multiple windows.
 - **Call ordering and multi-database scheduling.** Calls against a database are serialized
   for safety. Always `await` transaction boundaries (`beginTransaction` / `commitTransaction` /
   `rollbackTransaction`) before issuing dependent work. On **both** Android and iOS, every
@@ -640,6 +664,8 @@ Statements run in a single transaction by default; pass
 `transaction: false` to keep prior successful statements if a later one fails.
 When called inside `beginTransaction()`, pass `transaction: false`;
 nested transactions return TRANSACTION_FAILED.
+Explicit transaction-control SQL requires `transaction: false`; automatic
+transaction boundaries cannot be committed or released by an item in the list.
 
 | Param         | Type                                                      |
 | ------------- | --------------------------------------------------------- |
@@ -695,6 +721,9 @@ Use this for mixed-SQL bulk writes. For one repeated statement, prefer
 `lastInsertId` is always `0`; use `run()` when you need the inserted row ID.
 When called inside `beginTransaction()`, pass `transaction: false`;
 nested transactions return TRANSACTION_FAILED.
+Shape, value types and placeholder counts are validated before the first write;
+SQL is prepared in execution order so earlier DDL can create later dependencies.
+Explicit transaction-control SQL requires `transaction: false`.
 
 | Param         | Type                                                        |
 | ------------- | ----------------------------------------------------------- |
@@ -728,6 +757,7 @@ The operation is atomic by default. Pass `transaction: false` to preserve
 successful earlier executions if a later execution fails. `lastInsertId`
 on the aggregate result is always `0`; opt into `returnResults` when each
 execution's inserted row ID is required.
+Explicit transaction-control SQL requires `transaction: false`.
 
 | Param         | Type                                                      |
 | ------------- | --------------------------------------------------------- |
@@ -753,6 +783,9 @@ Numbered and named placeholders are not guaranteed across platforms.
 INTEGER result values outside JavaScript's safe integer range are returned
 as strings rather than imprecise numbers.
 Column names become object keys. Results are in `data.rows`.
+Android before API 35 requires DML RETURNING results to fit in one system
+CursorWindow; oversized results return QUERY_FAILED and roll back that statement.
+API 35+ streams DML results without replaying the write.
 
 | Param         | Type                                                  |
 | ------------- | ----------------------------------------------------- |
@@ -852,10 +885,10 @@ rollbackTransaction(options: { database: string; }) => Promise<SqliteResult>
 
 #### Migration
 
-| Prop             | Type                  | Description                                                                                             |
-| ---------------- | --------------------- | ------------------------------------------------------------------------------------------------------- |
-| **`version`**    | <code>number</code>   | Target schema version. Must be unique within an `open()` call. Migrations run in ascending order.       |
-| **`statements`** | <code>string[]</code> | SQL statements executed when upgrading to this version. Each string must contain exactly one statement. |
+| Prop             | Type                  | Description                                                                                                                                                   |
+| ---------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`version`**    | <code>number</code>   | Target schema version. Must be unique within an `open()` call. Migrations run in ascending order.                                                             |
+| **`statements`** | <code>string[]</code> | SQL statements executed when upgrading to this version. Each string must contain exactly one statement; explicit transaction-control statements are rejected. |
 
 
 #### ExecuteOptions

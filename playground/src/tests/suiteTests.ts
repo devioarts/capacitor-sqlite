@@ -1,5 +1,6 @@
 import type { CapacitorSqlitePlugin, Migration, SqliteDirectory } from '../../../src/definitions.js';
 import { assert, assertEqual, assertOk, assertFail, skipTest, type TestCase } from '../helpers/testRunner.js';
+import { buildAuditRegressionTests } from './auditRegressionTests.js';
 
 // ── Real-world schema helpers ─────────────────────────────────────────────────
 
@@ -41,6 +42,7 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
     );
 
   return [
+  ...buildAuditRegressionTests(CapacitorSqlite),
   {
     id: 'audit-01', group: 'Regression', name: 'Negative query parameters preserve arithmetic operators',
     fn: async () => {
@@ -88,21 +90,23 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
     },
   },
   ...['schema rollback', 'prepare error'].map((scenario, scenarioIndex): TestCase => ({
-    id: `audit-web-${scenarioIndex + 1}`, group: 'Regression', name: `Web transaction state after ${scenario}`,
+    id: `audit-web-${scenarioIndex + 1}`, group: 'Regression', name: `Transaction state after ${scenario}`,
     fn: async () => {
-      if (assertOk(await CapacitorSqlite.getPluginPlatform(), 'platform').platform !== 'web') skipTest('Web worker state regression');
       const DB = `suite_auditweb${scenarioIndex}`;
       assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
       try {
         assertOk(await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t(v INTEGER UNIQUE ON CONFLICT ROLLBACK)', 'INSERT INTO t VALUES (1)'] }), 'setup');
         const sql = scenarioIndex === 0 ? 'INSERT INTO t VALUES (1)' : 'INSERT OR ROLLBACK INTO missing_table VALUES (1)';
-        const operations = [
+        const operations: Array<() => Promise<{ success: boolean; error?: { code?: string; message?: string } }>> = [
           () => CapacitorSqlite.run({ database: DB, statement: sql }),
           () => CapacitorSqlite.execute({ database: DB, statements: [sql], transaction: false }),
           () => CapacitorSqlite.runBatch({ database: DB, set: [{ statement: sql }], transaction: false }),
           () => CapacitorSqlite.runMany({ database: DB, statement: sql, values: [[]], transaction: false }),
-          () => CapacitorSqlite.query({ database: DB, statement: `${sql} RETURNING v` }),
         ];
+        const version = assertOk(await CapacitorSqlite.getVersion({ database: DB }), 'version').version.split('.').map(Number);
+        if (version[0] > 3 || (version[0] === 3 && version[1] >= 35)) {
+          operations.push(() => CapacitorSqlite.query({ database: DB, statement: `${sql} RETURNING v` }));
+        }
         for (const operation of operations) {
           assertOk(await CapacitorSqlite.beginTransaction({ database: DB }), 'begin');
           assertOk(await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES (2)' }), 'pending insert');

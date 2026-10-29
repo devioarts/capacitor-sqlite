@@ -1,7 +1,4 @@
 import Foundation
-import SQLite3
-
-private typealias PreparedRunMany = (statement: SQLiteHelpers.PreparedRunStatement, values: [SQLiteBindValues])
 
 extension Database {
     // Validation, transaction state, optional per-item metadata, and two error
@@ -22,10 +19,8 @@ extension Database {
             throw DatabaseError.invalidParams("runMany: 'values' must be a non-empty array of value arrays")
         }
 
-        let preparedRun = try prepareRunManyStatement(handle: handle, sql: sql, valueSets: valueSets)
-        let prepared = preparedRun.statement
-        let normalizedValueSets = preparedRun.values
-        defer { prepared.close() }
+        if transaction { try requireManagedTransactionStatement(sql) }
+        let normalizedValueSets = try validateRunManyValues(sql: sql, valueSets: valueSets)
 
         if transaction && inTransaction {
             throw DatabaseError.transaction("runMany: a transaction is already active on '\(name)'")
@@ -34,6 +29,11 @@ extension Database {
         var results: [(changes: Int, lastInsertId: Int64)]? = returnResults ? [] : nil
         if transaction { try beginTransactionUnsafe() }
         do {
+            // Even preparation of PRAGMA must happen inside the transaction we own.
+            let prepared = try SQLiteHelpers.PreparedRunStatement(
+                db: handle, sql: sql, normalizedValues: normalizedValueSets[0], bindInitialValues: false
+            )
+            defer { prepared.close() }
             for values in normalizedValueSets {
                 try prepared.bindNormalizedPrevalidated(values: values)
                 if returnResults {
@@ -49,35 +49,19 @@ extension Database {
             if transaction { try? rollbackTransactionUnsafe() }
             throw DatabaseError.invalidParams(message)
         } catch {
-            inTransaction = sqlite3_get_autocommit(handle) == 0
             if transaction { try? rollbackTransactionUnsafe() }
             throw DatabaseError.run("\(error)")
         }
     }
 
-    private func prepareRunManyStatement(
-        handle: OpaquePointer,
-        sql: String,
-        valueSets: [[Any]]
-    ) throws -> PreparedRunMany {
-        var preparedStatement: SQLiteHelpers.PreparedRunStatement?
+    private func validateRunManyValues(sql: String, valueSets: [[Any]]) throws -> [SQLiteBindValues] {
         do {
-            let normalizedValueSets = try valueSets.map(SQLiteHelpers.normalizeBindValues)
-            let prepared = try SQLiteHelpers.PreparedRunStatement(
-                db: handle,
-                sql: sql,
-                normalizedValues: normalizedValueSets[0],
-                bindInitialValues: false
-            )
-            preparedStatement = prepared
-            // Validate every bind before the first write.
-            for values in normalizedValueSets { try prepared.validate(normalizedValues: values) }
-            return (prepared, normalizedValueSets)
+            let normalized = try valueSets.map(SQLiteHelpers.normalizeBindValues)
+            for values in normalized { try SQLiteHelpers.validateRunInput(sql: sql, valueCount: values.count) }
+            return normalized
         } catch SQLiteError.invalidParams(let message) {
-            preparedStatement?.close()
             throw DatabaseError.invalidParams(message)
         } catch {
-            preparedStatement?.close()
             throw DatabaseError.run("runMany validation failed: \(error)")
         }
     }

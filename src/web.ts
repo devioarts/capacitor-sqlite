@@ -21,6 +21,7 @@ import type {
 import { findDuplicateMigrationVersion, isValidMigrationVersion, MAX_MIGRATION_VERSION } from './migrations.js';
 import {
   assertSingleSqlStatement,
+  assertManagedTransactionStatement,
   assertAnonymousBindParameterCount,
   hasConflictClause,
   isInsertStatement,
@@ -80,12 +81,18 @@ function validateDirectory(value: unknown): SqliteDirectory {
   throw new SqliteRuntimeError('INVALID_PARAMS', "'directory' must be one of: default, documents, library or cache");
 }
 
-function validateSql(value: unknown, label: string, code: SqliteErrorCode = 'INVALID_PARAMS'): string {
+function validateSql(
+  value: unknown,
+  label: string,
+  code: SqliteErrorCode = 'INVALID_PARAMS',
+  managedTransaction = false,
+): string {
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new SqliteRuntimeError(code, `'${label}' is required`);
   }
   try {
     assertSingleSqlStatement(value, `'${label}'`);
+    if (managedTransaction) assertManagedTransactionStatement(value, label);
   } catch (err) {
     throw new SqliteRuntimeError(code, err instanceof Error ? err.message : String(err));
   }
@@ -114,11 +121,11 @@ function validateValues(value: unknown, label: string): unknown[] {
   return value;
 }
 
-function validateStatements(value: unknown): string[] {
+function validateStatements(value: unknown, transaction: boolean): string[] {
   if (!Array.isArray(value) || value.length === 0) {
     throw new SqliteRuntimeError('INVALID_PARAMS', "'statements' must be a non-empty array");
   }
-  return value.map((item, index) => validateSql(item, `statements[${index}]`));
+  return value.map((item, index) => validateSql(item, `statements[${index}]`, 'INVALID_PARAMS', transaction));
 }
 
 function validateBindParameterCount(sql: string, count: number, label = 'values'): void {
@@ -152,7 +159,7 @@ function validateMigrations(value: unknown): Migration[] {
       );
     }
     const statements = migration.statements.map((sql, statementIndex) =>
-      validateSql(sql, `migrations[${index}].statements[${statementIndex}]`, 'MIGRATION_FAILED'),
+      validateSql(sql, `migrations[${index}].statements[${statementIndex}]`, 'MIGRATION_FAILED', true),
     );
     return { version: migration.version as number, statements };
   });
@@ -166,7 +173,7 @@ function validateMigrations(value: unknown): Migration[] {
   return migrations;
 }
 
-function validateRunBatchSet(value: unknown): { statement: string; values?: unknown[] }[] {
+function validateRunBatchSet(value: unknown, transaction: boolean): { statement: string; values?: unknown[] }[] {
   if (!Array.isArray(value) || value.length === 0) {
     throw new SqliteRuntimeError('INVALID_PARAMS', "'set' must be a non-empty array");
   }
@@ -175,7 +182,7 @@ function validateRunBatchSet(value: unknown): { statement: string; values?: unkn
       throw new SqliteRuntimeError('INVALID_PARAMS', `set[${index}] must be an object`);
     }
     const batchItem = item as Record<string, unknown>;
-    const statement = validateSql(batchItem.statement, `set[${index}].statement`);
+    const statement = validateSql(batchItem.statement, `set[${index}].statement`, 'INVALID_PARAMS', transaction);
     const values = validateValues(batchItem.values, `set[${index}].values`);
     validateBindParameterCount(statement, values.length, `set[${index}].values`);
     return { statement, values };
@@ -525,8 +532,8 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
     try {
       const opts = assertPlainObject(options, 'execute');
       database = validateName(opts.database);
-      statements = validateStatements(opts.statements);
       transaction = opts.transaction !== false;
+      statements = validateStatements(opts.statements, transaction);
     } catch (err) {
       return this.err(errorCode(err, 'INVALID_PARAMS'), 'execute', err);
     }
@@ -631,8 +638,8 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
     try {
       const opts = assertPlainObject(options, 'runBatch');
       database = validateName(opts.database);
-      set = validateRunBatchSet(opts.set);
       transaction = opts.transaction !== false;
+      set = validateRunBatchSet(opts.set, transaction);
     } catch (err) {
       return this.err(errorCode(err, 'INVALID_PARAMS'), 'runBatch', err);
     }
@@ -700,7 +707,8 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
     try {
       const opts = assertPlainObject(options, 'runMany');
       database = validateName(opts.database);
-      statement = validateSql(opts.statement, 'statement');
+      transaction = opts.transaction !== false;
+      statement = validateSql(opts.statement, 'statement', 'INVALID_PARAMS', transaction);
       if (!Array.isArray(opts.values) || opts.values.length === 0) {
         throw new SqliteRuntimeError('INVALID_PARAMS', "'values' must be a non-empty array of value arrays");
       }
@@ -709,7 +717,6 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
         validateBindParameterCount(statement, decoded.length);
         return decoded;
       });
-      transaction = opts.transaction !== false;
       returnResults = opts.returnResults === true;
     } catch (err) {
       return this.err(errorCode(err, 'INVALID_PARAMS'), 'runMany', err);
@@ -1012,11 +1019,13 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
         }
       })
         .then((p) => {
-          const syncTransaction = (message: any) => {
+          const syncConnectionState = (message: any) => {
             if (typeof message?.inTransaction !== 'boolean') return;
             for (const entry of this.openDbs.values()) {
               if (entry.dbId === message.dbId) {
                 entry.inTransaction = message.inTransaction;
+                // Rowid survives rollback; failed execute/query/migrations must not leave an unrelated ID cached.
+                entry.lastInsertRowId = integerResult(message.lastInsertRowId);
                 break;
               }
             }
@@ -1024,10 +1033,10 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
           this.promiser = async (type, args) => {
             try {
               const response = await p(type, args);
-              syncTransaction(response);
+              syncConnectionState(response);
               return response;
             } catch (error) {
-              syncTransaction(error);
+              syncConnectionState(error);
               throw error;
             }
           };

@@ -124,4 +124,34 @@ class SQLStatementGuardTests: XCTestCase {
             XCTAssertTrue(SQLiteHelpers.hasMultipleStatements("\(sql); /* gap */ DELETE FROM t"), sql)
         }
     }
+
+    func testMalformedWithClauseDoesNotReadPastEnd() {
+        for sql in ["WITH x ", "WITH x -- trailing", "WITH x /* trailing */", "WITH x() "] {
+            XCTAssertEqual(SQLStatement.type(sql), "WITH", sql)
+        }
+    }
+
+    func testScalarBoundariesPreserveQuotesCommentsAndDelimiters() {
+        XCTAssertTrue(SQLiteHelpers.hasMultipleStatements("SELECT 'a'\u{0301}; DROP TABLE victim"))
+        XCTAssertTrue(SQLiteHelpers.hasMultipleStatements("SELECT 1;\u{0301} SELECT 2"))
+        XCTAssertFalse(SQLiteHelpers.hasMultipleStatements("SELECT '\u{0301}; still quoted'"))
+        XCTAssertFalse(SQLiteHelpers.hasMultipleStatements("SELECT 1 -- comment\r; SELECT 2"))
+        let trigger = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 'a'\u{0301}; END"
+        XCTAssertFalse(SQLiteHelpers.hasMultipleStatements(trigger))
+        XCTAssertTrue(SQLiteHelpers.hasMultipleStatements(trigger + "; SELECT 2"))
+        XCTAssertEqual(SQLStatement.type("WITH český AS (SELECT 1) SELECT * FROM český"), "SELECT")
+        XCTAssertEqual(SQLStatement.type("WITH a$b AS (SELECT 1) SELECT * FROM a$b"), "SELECT")
+        XCTAssertFalse(SQLStatement.isQueryResultStatement("UPDATE t SET a = RETURNING\u{0301}"))
+        XCTAssertTrue(SQLStatement.isQueryResultStatement("UPDATE t SET a = 1 \u{FEFF}RETURNING a"))
+        XCTAssertTrue(SQLStatement.isTransactionControl("\u{FEFF}COMMIT"))
+    }
+
+    func testLexicalBindValidationRespectsSQLiteTokens() throws {
+        let valid = ["SELECT a$b, ? FROM t", "SELECT '?', \":name\", [@name], `$name`, ? /* ? */ -- ?"]
+        for sql in valid { XCTAssertNoThrow(try SQLiteHelpers.validateRunInput(sql: sql, valueCount: 1)) }
+        for placeholder in ["?1", ":1", "@1", "$1", ":český", "@\u{0301}", "$$", "\u{FEFF}$name"] {
+            XCTAssertThrowsError(try SQLiteHelpers.validateRunInput(sql: "SELECT \(placeholder)", valueCount: 1))
+        }
+    }
+
 }

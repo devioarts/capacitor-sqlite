@@ -2,7 +2,9 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 
 const {
+  assertAnonymousBindParameterCount,
   assertSingleSqlStatement,
+  assertManagedTransactionStatement,
   hasConflictClause,
   hasRollbackConflictClause,
   hasMultipleSqlStatements,
@@ -10,6 +12,29 @@ const {
   isQueryResultStatement,
   sqlStatementType,
 } = require('../build/test-p0/sql.js');
+
+test('managed transactions reject only actual transaction boundaries, not trigger bodies', () => {
+  for (const sql of ['BEGIN', '/* comment */ COMMIT', '\uFEFFCOMMIT', 'COMMIT\u00a0', 'END', 'ROLLBACK TO x', 'SAVEPOINT x', 'RELEASE x']) {
+    assert.throws(() => assertManagedTransactionStatement(sql), /transaction: false/);
+  }
+  assert.doesNotThrow(() => assertManagedTransactionStatement('CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END'));
+  assert.doesNotThrow(() => assertManagedTransactionStatement('SELECT "COMMIT"'));
+});
+
+test('SQLite Unicode and dollar identifiers are not bind parameters or keyword fragments', () => {
+  for (const name of ['český', '資料', 'a$b', 'end$tag']) {
+    const sql = `WITH ${name} AS (SELECT ? AS n) SELECT n FROM ${name}`;
+    assert.equal(sqlStatementType(sql), 'SELECT');
+    assert.doesNotThrow(() => assertAnonymousBindParameterCount(sql, 1));
+  }
+  assert.equal(hasConflictClause('INSERT INTO t(conflict$flag) VALUES (?)'), false);
+  for (const placeholder of [':name', '@name', '$name', ':1', '$český', '@資料']) {
+    assert.throws(() => assertAnonymousBindParameterCount(`SELECT ${placeholder}`, 0), /named placeholders/);
+  }
+  const trigger = 'CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT end$tag FROM t; SELECT 1; END';
+  assert.equal(hasMultipleSqlStatements(trigger), false);
+  assert.equal(hasMultipleSqlStatements(`${trigger}; SELECT 2`), true);
+});
 
 test('allows a single statement with optional trailing semicolons and comments', () => {
   assert.equal(hasMultipleSqlStatements('SELECT 1'), false);

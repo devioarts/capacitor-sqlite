@@ -84,9 +84,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # file:.. resolves the published dist entry; a clean checkout has no generated output.
+      - name: Build plugin
+        run: npm run build
+
       - name: Install playground dependencies
         if: matrix.platform != 'electron'
         run: npm ci --prefix playground
+
+      # Native playground projects are intentionally ignored and must exist before cap sync.
+      - name: Create native playground project
+        if: matrix.platform == 'android' || matrix.platform == 'ios'
+        working-directory: playground
+        run: npx cap add ${{ matrix.platform }}
 
       - name: Select and boot iOS Simulator
         if: matrix.platform == 'ios'

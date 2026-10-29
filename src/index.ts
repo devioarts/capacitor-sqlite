@@ -5,8 +5,9 @@ import {
   ELECTRON_COMPACT_QUERY_OPTION,
   encodeNativeBridgeValues,
   usesJsonValueBridge,
-} from './bridge-values';
-import { assertAnonymousBindParameterCount, assertSingleSqlStatement } from './sql';
+} from './bridge-values.js';
+// Explicit extensions keep the published ESM entry loadable without a bundler.
+import { assertAnonymousBindParameterCount, assertSingleSqlStatement } from './sql.js';
 import type {
   CapacitorSqlitePlugin,
   QueryOptions,

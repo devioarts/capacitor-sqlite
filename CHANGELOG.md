@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- Audit 2026-10-29: iOS SQL scanners use Unicode scalars and check CTE bounds, preventing malformed SQL from crashing and combining marks from hiding a second statement. Shared scanners accept SQLite Unicode/dollar identifiers without mistaking them for bind parameters.
+- Electron write metadata stays in BigInt until the public result conversion, preventing a committed large-rowid INSERT from reporting failure and blocking later writes. Direct Electron `query(null/undefined)` now resolves to `INVALID_PARAMS`.
+- Batches validate inputs without preparing SQL early, then prepare statements in execution order inside their transaction. This preserves dependent DDL and prevents failed preflight from changing connection PRAGMAs; only DML is cached. iOS batch cache keys compare UTF-8 bytes so distinct Unicode SQL literals cannot reuse the wrong statement.
+- iOS/Electron transaction methods use SQLite's actual transaction state. Android distinguishes preparation errors from native automatic rollback, and reads WAL change counters on the writer connection. Web refreshes connection metadata after successful and failed worker replies, including `execute()`, `query()` and migrations.
+- Managed transactions and migrations reject explicit transaction-control statements before writes, preventing an inner COMMIT from making later failures partially permanent.
+- Android DML RETURNING executes once: API 35+ uses SQLiteRawStatement; older platforms reject oversized CursorWindow results and roll back the statement rather than replaying it.
+- Android recovers the writer connection after a failed deferred-constraint COMMIT, rolling back that transaction. If recovery also fails, it closes the connection and requires `open()` before further writes.
+- Plain Node ESM imports now resolve emitted `.js` paths. The release matrix builds the plugin, creates native playground projects and uses the configured iOS bundle ID.
+- Updated vulnerable development/playground dependencies within their existing compatible version ranges; both npm audit trees were cleared during the audit remediation.
+
 - Single-statement validation now recognizes trigger boundaries without treating ordinary `begin`/`end` identifiers as SQL blocks. All three scanners preserve TEMP triggers, comments, nested CASE expressions, and EXPLAIN forms while rejecting appended SQL.
 - JS/worker tests now build current bundles through `pretest:ts`, fixing missing `dist` files on clean checkouts and in CI. The duplicate CI build step was removed.
 - iOS `run()`, `runBatch()`, and `runMany()` now drain `RETURNING` rows through `SQLITE_DONE` before reading change counts or committing.
@@ -29,7 +39,7 @@
 - Additional scanner regression cases on JS/Android/iOS, end-to-end SQL rejection and trigger tests, special-column round-trips, seven native iOS RETURNING tests, and a main-process Electron disposal test covering queued writes, rollback, repeated disposal, and worker restart.
 
 - Regression coverage for all six fixes, including Electron cache isolation across applications and restarts, both query result paths, Android numeric literal rewriting, and Web transaction recovery across SQL methods.
-- The shared suite now contains 417 tests in 76 groups; native and JS unit tests cover bridge validation and prepared-statement cleanup separately.
+- The shared suite now contains 439 tests in 76 groups, including 22 audit regressions; native and JS unit tests cover bridge validation and prepared-statement cleanup separately.
 
 ## [0.1.1] - 2026-07-12
 

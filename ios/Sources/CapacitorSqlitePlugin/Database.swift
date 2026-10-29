@@ -22,7 +22,8 @@ final class Database {
     let readonly: Bool
     private var db: OpaquePointer? // swiftlint:disable:this identifier_name
     private var openState: Bool = false
-    var inTransaction: Bool = false
+    // Raw SQL transaction statements and SQLite error rollbacks also change this state.
+    var inTransaction: Bool { db.map { sqlite3_get_autocommit($0) == 0 } ?? false }
     // Serial queue serializes all ops including open/close — prevents all races.
     private let queue: DispatchQueue
 
@@ -73,7 +74,6 @@ final class Database {
             guard openState, let handle = db else { return }
             if inTransaction {
                 try? SQLiteHelpers.rollbackTransaction(db: handle)
-                inTransaction = false
             }
             do {
                 try SQLiteHelpers.close(db: handle)
@@ -136,7 +136,6 @@ final class Database {
     func queryCompact(statement: String, values: [Any] = []) throws -> SQLiteHelpers.CompactRows {
         try queue.sync {
             let handle = try requireOpen("query")
-            defer { inTransaction = sqlite3_get_autocommit(handle) == 0 }
             return try SQLiteHelpers.queryCompact(db: handle, sql: statement, values: values)
         }
     }
@@ -197,7 +196,6 @@ final class Database {
             }
             db = nil
             openState = false
-            inTransaction = false
             throw error
         }
     }
@@ -206,7 +204,10 @@ final class Database {
         let handle = try requireOpen("execute")
         try requireWritable("execute")
         let before = SQLiteHelpers.totalChanges(db: handle)
-        if transaction { try beginTransactionUnsafe() }
+        if transaction {
+            try statements.forEach(requireManagedTransactionStatement)
+            try beginTransactionUnsafe()
+        }
         do {
             for sql in statements {
                 let trimmed = sql.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -215,15 +216,12 @@ final class Database {
             }
             if transaction { try commitTransactionUnsafe() }
         } catch SQLiteError.invalidParams(let msg) {
-            inTransaction = sqlite3_get_autocommit(handle) == 0
             if transaction { try? rollbackTransactionUnsafe() }
             throw DatabaseError.invalidParams(msg)
         } catch SQLiteError.execute(let msg) {
-            inTransaction = sqlite3_get_autocommit(handle) == 0
             if transaction { try? rollbackTransactionUnsafe() }
             throw DatabaseError.execute(msg)
         } catch {
-            inTransaction = sqlite3_get_autocommit(handle) == 0
             if transaction { try? rollbackTransactionUnsafe() }
             throw error
         }
@@ -238,14 +236,12 @@ final class Database {
         } catch SQLiteError.invalidParams(let msg) {
             throw DatabaseError.invalidParams(msg)
         } catch let err as SQLiteError {
-            inTransaction = sqlite3_get_autocommit(handle) == 0
             throw DatabaseError.run("\(err)")
         }
     }
 
     private func queryUnsafe(statement: String, values: [Any]) throws -> [[String: Any]] {
         let handle = try requireOpen("query")
-        defer { inTransaction = sqlite3_get_autocommit(handle) == 0 }
         do {
             return try SQLiteHelpers.query(db: handle, sql: statement, values: values)
         } catch SQLiteError.invalidParams(let msg) {
@@ -291,9 +287,7 @@ final class Database {
         }
         do {
             try SQLiteHelpers.beginTransaction(db: handle)
-            inTransaction = true
         } catch SQLiteError.execute(let msg) {
-            inTransaction = sqlite3_get_autocommit(handle) == 0
             throw DatabaseError.transaction(msg)
         }
     }
@@ -302,9 +296,7 @@ final class Database {
         let handle = try requireOpen("commitTransaction")
         do {
             try SQLiteHelpers.commitTransaction(db: handle)
-            inTransaction = false
         } catch SQLiteError.execute(let msg) {
-            inTransaction = sqlite3_get_autocommit(handle) == 0
             throw DatabaseError.transaction(msg)
         }
     }
@@ -313,7 +305,6 @@ final class Database {
         let handle = try requireOpen("rollbackTransaction")
         do {
             try SQLiteHelpers.rollbackTransaction(db: handle)
-            inTransaction = false
         } catch SQLiteError.execute(let msg) {
             throw DatabaseError.transaction(msg)
         }
@@ -335,8 +326,12 @@ final class Database {
             .filter { $0.version > current }
             .sorted { $0.version < $1.version }
 
-        guard !pending.isEmpty else { return }
-
+        // Reject transaction boundaries across the input before any migration can change the database.
+        for migration in migrations where migration.statements.contains(where: SQLStatement.isTransactionControl) {
+            throw DatabaseError.migration(
+                "Migration v\(migration.version): transaction control requires transaction:false"
+            )
+        }
         for migration in pending {
             do {
                 try SQLiteHelpers.beginTransaction(db: handle)
@@ -366,6 +361,13 @@ final class Database {
     func requireWritable(_ context: String) throws {
         guard !readonly else {
             throw DatabaseError.execute("\(context): database '\(name)' is open in readonly mode")
+        }
+    }
+
+    func requireManagedTransactionStatement(_ sql: String) throws {
+        // User SQL must not commit or replace the transaction owned by an atomic operation.
+        guard !SQLStatement.isTransactionControl(sql) else {
+            throw DatabaseError.invalidParams("transaction control requires transaction:false")
         }
     }
 

@@ -1,7 +1,7 @@
 import sqlite3InitModule, { type Database, type ExecOptions } from '@sqlite.org/sqlite-wasm';
 
 // Keep the worker1 envelope used by sqlite3Worker1Promiser, adding SQLite's actual
-// transaction state to both successful replies and SQL errors.
+// connection state to both successful replies and SQL errors (rowid survives rollback).
 interface WorkerRequest {
   type: string;
   messageId: string;
@@ -58,6 +58,7 @@ void sqlite3InitModule().then((sqlite3) => {
         dbId,
         result,
         inTransaction: db?.pointer ? sqlite3.capi.sqlite3_get_autocommit(db.pointer) === 0 : false,
+        lastInsertRowId: db?.pointer ? sqlite3.capi.sqlite3_last_insert_rowid(db.pointer) : 0,
       });
     } catch (error) {
       globalThis.postMessage({
@@ -66,6 +67,7 @@ void sqlite3InitModule().then((sqlite3) => {
         dbId,
         result: { message: error instanceof Error ? error.message : String(error) },
         inTransaction: db?.pointer ? sqlite3.capi.sqlite3_get_autocommit(db.pointer) === 0 : false,
+        lastInsertRowId: db?.pointer ? sqlite3.capi.sqlite3_last_insert_rowid(db.pointer) : 0,
       });
     }
   };

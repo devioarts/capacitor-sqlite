@@ -4,7 +4,7 @@
 
 |               | Scope                                        | Purpose                                                                                 |
 | ------------- | -------------------------------------------- | --------------------------------------------------------------------------------------- |
-| **Automated** | 417 tests · 76 groups · 12 stress benchmarks · 24 diagnostics | Cross-platform behavioral, compatibility, and performance-regression coverage           |
+| **Automated** | 439 tests · 76 groups · 12 stress benchmarks · 24 diagnostics | Cross-platform behavioral, compatibility, and performance-regression coverage           |
 | **Manual**    | 11 scenarios                                 | OS lifecycle, storage-failure, profiler, and native-environment checks outside JS reach |
 
 Tests are part of the example app (`playground/`).  
@@ -30,7 +30,31 @@ state which matrix entries were actually executed.
 
 ## Running from the command line
 
-The 417 suite tests, 12 full-load benchmarks, and 24 layer diagnostics are defined once, in
+On a clean checkout, install and build the plugin before resolving it from the
+playground. Native playground projects are generated and deliberately not versioned:
+
+```sh
+npm ci
+npm run build
+npm ci --prefix playground
+cd playground
+npx cap add android # once, when testing Android
+npx cap add ios     # once, when testing iOS
+```
+
+Run the suite commands below from the repository root. The release workflow performs
+these preparation steps itself. iOS deployment and its inspector runner both use
+`com.devioarts.capacitor.sqlite`, matching `playground/capacitor.config.ts`; deployment
+replaces the test app without uninstalling its existing data.
+
+Audit regression cases live in `playground/src/tests/auditRegressionTests.ts` and run
+through the same public plugin API on every platform. The transaction recovery cases
+also cover schema-level rollback and preparation errors on every supported backend.
+Native Android instrumentation tests exercise WAL connection counters, transaction
+recovery and large RETURNING results against the Android SQLite framework, in addition
+to the JVM scanner tests. Local dated audit records follow [docs/maintenance.md](docs/maintenance.md).
+
+The 439 suite tests, 12 full-load benchmarks, and 24 layer diagnostics are defined once, in
 `playground/src/tests/suiteTests.ts`, `playground/src/tests/stressBenchmarks.ts`, and
 `playground/src/tests/diagnosticBenchmarks.ts`, as functions
 that take a `CapacitorSqlitePlugin` implementation and return test/benchmark definitions. The

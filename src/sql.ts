@@ -1,5 +1,10 @@
 const SQL_CACHE_LIMIT = 256;
 
+// SQLite permits non-ASCII identifiers and `$` after their first character.
+// Read whole identifiers so `a$b` is not a bind and `end$tag` is not trigger END.
+const IDENTIFIER_START = /[A-Za-z_\u0080-\uFFFF]/;
+const IDENTIFIER_PART = /[A-Za-z0-9_$\u0080-\uFFFF]/;
+
 function cached<T>(cache: Map<string, T>, sql: string, compute: () => T): T {
   const hit = cache.get(sql);
   if (hit !== undefined || cache.has(sql)) {
@@ -51,7 +56,7 @@ function computeHasMultipleSqlStatements(sql: string): boolean {
       afterSemicolon = true;
       triggerEnd = false;
       continue;
-    } else if (/[A-Za-z_]/.test(ch) && (i === 0 || !/[A-Za-z0-9_]/.test(sql[i - 1]))) {
+    } else if (IDENTIFIER_START.test(ch) && (i === 0 || !IDENTIFIER_PART.test(sql[i - 1]))) {
       const keyword = readKeyword(sql, i)!;
       token = keyword.keyword;
       i = keyword.end - 1;
@@ -79,6 +84,13 @@ function computeHasMultipleSqlStatements(sql: string): boolean {
 export function assertSingleSqlStatement(sql: string, label: string): void {
   if (hasMultipleSqlStatements(sql)) {
     throw new Error(`${label} must contain exactly one SQL statement`);
+  }
+}
+
+export function assertManagedTransactionStatement(sql: string, label = 'statement'): void {
+  // Match execute/migration trimming: trailing Unicode whitespace must not hide a COMMIT from this guard.
+  if (['BEGIN', 'COMMIT', 'END', 'ROLLBACK', 'SAVEPOINT', 'RELEASE'].includes(sqlStatementType(sql.trim()))) {
+    throw new Error(`${label}: transaction-control SQL requires transaction: false`);
   }
 }
 
@@ -111,11 +123,13 @@ function scanAnonymousBindParameters(sql: string): { count: number; error?: stri
         };
       }
       placeholders++;
-    } else if ((ch === ':' || ch === '@' || ch === '$') && /[A-Za-z_]/.test(sql[i + 1] ?? '')) {
+    } else if ((ch === ':' || ch === '@' || ch === '$') && IDENTIFIER_PART.test(sql[i + 1] ?? '')) {
       return {
         count: placeholders,
         error: 'Only anonymous ? placeholders are supported; named placeholders are not supported',
       };
+    } else if (IDENTIFIER_START.test(ch)) {
+      i = readKeyword(sql, i)!.end - 1;
     }
   }
   return { count: placeholders };
@@ -265,9 +279,9 @@ function skipIgnorable(sql: string, start: number): number {
 }
 
 function readKeyword(sql: string, start: number): { keyword: string; end: number } | null {
-  if (!/[A-Za-z_]/.test(sql[start] ?? '')) return null;
+  if (!IDENTIFIER_START.test(sql[start] ?? '')) return null;
   let end = start + 1;
-  while (end < sql.length && /[A-Za-z0-9_]/.test(sql[end])) end++;
+  while (end < sql.length && IDENTIFIER_PART.test(sql[end])) end++;
   return { keyword: sql.slice(start, end).toUpperCase(), end };
 }
 
@@ -282,7 +296,7 @@ function hasKeyword(sql: string, target: string): boolean {
       i = skipLineComment(sql, i);
     } else if (ch === '/' && sql[i + 1] === '*') {
       i = skipBlockComment(sql, i);
-    } else if (/[A-Za-z_]/.test(ch) && (i === 0 || !/[A-Za-z0-9_]/.test(sql[i - 1]))) {
+    } else if (IDENTIFIER_START.test(ch) && (i === 0 || !IDENTIFIER_PART.test(sql[i - 1]))) {
       const keyword = readKeyword(sql, i);
       if (keyword?.keyword === target) return true;
       if (keyword) i = keyword.end - 1;
@@ -303,7 +317,7 @@ function keywords(sql: string): string[] {
       i = skipLineComment(sql, i);
     } else if (ch === '/' && sql[i + 1] === '*') {
       i = skipBlockComment(sql, i);
-    } else if (/[A-Za-z_]/.test(ch) && (i === 0 || !/[A-Za-z0-9_]/.test(sql[i - 1]))) {
+    } else if (IDENTIFIER_START.test(ch) && (i === 0 || !IDENTIFIER_PART.test(sql[i - 1]))) {
       const keyword = readKeyword(sql, i);
       if (keyword) {
         result.push(keyword.keyword);
@@ -318,7 +332,7 @@ function skipIdentifier(sql: string, start: number): number {
   let i = skipIgnorable(sql, start);
   if (sql[i] === "'" || sql[i] === '"' || sql[i] === '`') return skipQuoted(sql, i, sql[i]) + 1;
   if (sql[i] === '[') return skipBracketIdentifier(sql, i) + 1;
-  while (i < sql.length && /[A-Za-z0-9_$]/.test(sql[i])) i++;
+  while (i < sql.length && IDENTIFIER_PART.test(sql[i])) i++;
   return i;
 }
 

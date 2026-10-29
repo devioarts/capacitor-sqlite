@@ -23,7 +23,8 @@ import { execFileSync } from 'node:child_process';
 const { logger: appiumSupportLogger } = await import('@appium/support');
 appiumSupportLogger.log.level = 'warn';
 
-const BUNDLE_ID = 'com.devioarts.example.sqlite';
+// Match capacitor.config.ts; the old example ID attached to a different/missing app on clean builds.
+const BUNDLE_ID = 'com.devioarts.capacitor.sqlite';
 const PER_CALL_TIMEOUT_MS = 15_000;
 const POLL_INTERVAL_MS = 1_500;
 const stressOnly = process.argv.includes('--stress-only');

@@ -123,7 +123,7 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
   }
 
   async query<T = Record<string, unknown>>(options: QueryOptions): Promise<SqliteResult<{ rows: T[] }>> {
-    if ((options as unknown as Record<string, unknown>).__capacitorSqliteCompactRows === true) {
+    if ((options as unknown as Record<string, unknown> | null | undefined)?.__capacitorSqliteCompactRows === true) {
       // Internal renderer request: keep the columnar representation through both
       // structured-clone boundaries. src/index.ts restores public row objects.
       return this.request('__queryCompact', options) as Promise<SqliteResult<{ rows: T[] }>>;

@@ -121,16 +121,6 @@ class SqlStatementGuardTest {
     }
 
     @Test
-    fun detectsOrRollbackOnlyAsAdjacentSqlKeywords() {
-        assertTrue(SQLiteHelpers.hasRollbackConflictClause("INSERT OR ROLLBACK INTO t VALUES (1)"))
-        assertTrue(SQLiteHelpers.hasRollbackConflictClause("UPDATE OR /* gap */ ROLLBACK t SET v = 1"))
-        assertFalse(SQLiteHelpers.hasRollbackConflictClause("SELECT 'OR ROLLBACK'"))
-        assertFalse(SQLiteHelpers.hasRollbackConflictClause("SELECT or_rollback FROM t"))
-        assertFalse(SQLiteHelpers.hasRollbackConflictClause("SELECT 1 -- OR ROLLBACK\n"))
-        assertFalse(SQLiteHelpers.hasRollbackConflictClause("INSERT OR IGNORE INTO t VALUES (1)"))
-    }
-
-    @Test
     fun qualifiedNewEndDoesNotCloseTriggerBodyEarly() {
         val trigger =
             "CREATE TRIGGER trg AFTER INSERT ON t BEGIN INSERT INTO log VALUES " +
@@ -173,5 +163,31 @@ class SqlStatementGuardTest {
             assertFalse(SQLiteHelpers.hasMultipleStatements("/* lead */ $sql; /* done */"), sql)
             assertTrue(SQLiteHelpers.hasMultipleStatements("$sql; /* gap */ DELETE FROM t"), sql)
         }
+    }
+
+    @Test
+    fun lexicalPreflightAcceptsUnicodeAndDollarIdentifiers() {
+        SQLiteHelpers.validateRunInput("WITH český AS (SELECT ?) SELECT * FROM český", listOf(1))
+        SQLiteHelpers.validateRunInput("UPDATE t SET a\$b=?", listOf(1))
+        for (sql in listOf("SELECT :1", "SELECT @1", "SELECT $1", "SELECT ?1")) {
+            assertThrows(CapacitorSqliteException::class.java) { SQLiteHelpers.validateRunInput(sql, emptyList()) }
+        }
+    }
+
+    @Test
+    fun automaticTransactionsRejectControlStatements() {
+        for (sql in listOf(
+            "BEGIN",
+            "COMMIT\u00A0",
+            "\uFEFFCOMMIT",
+            "/* comment */ COMMIT",
+            "ROLLBACK",
+            "END",
+            "SAVEPOINT x",
+            "RELEASE x",
+        )) {
+            assertThrows(CapacitorSqliteException::class.java) { SQLiteHelpers.requireManagedTransactionStatement(sql) }
+        }
+        SQLiteHelpers.requireManagedTransactionStatement("CREATE TABLE begin(end)")
     }
 }
