@@ -49,7 +49,7 @@ jobs:
             suite_command: npm run test:suite:android
             stress_command: npm run test:suite:android:stress
           - platform: ios
-            runner: macos-latest
+            runner: macos-15-intel
             timeout: 90
             suite_command: npm run test:suite:ios
             stress_command: npm run test:suite:ios:stress
