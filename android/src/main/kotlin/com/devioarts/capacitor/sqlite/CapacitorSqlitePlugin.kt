@@ -126,6 +126,9 @@ class CapacitorSqlitePlugin : Plugin() {
         val directory = call.getString("directory")
         val migrations =
             try {
+                if (call.data.has("migrations") && call.getArray("migrations") == null) {
+                    throw IllegalArgumentException("'migrations' must be an array")
+                }
                 jsonArrayToListOfMaps(call.getArray("migrations"), "migrations")
             } catch (e: IllegalArgumentException) {
                 return failure(call, "MIGRATION_FAILED", e.message ?: "Invalid migrations", "open")

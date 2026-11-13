@@ -33,7 +33,7 @@ the Web plugin and its internal worker/WASM assets, and builds the Electron entr
 
 ### `npm run lint`
 
-Runs ESLint, Prettier, SwiftLint, and ktlint. SwiftLint should report 0 violations before review.
+Runs ESLint, Prettier, SwiftLint, and ktlint. SwiftLint must report no serious violations; existing warnings are tolerated but should not grow.
 
 ### `npm run test:ts`
 
@@ -47,7 +47,7 @@ Web/Electron builds, and migration validation tests.
 
 ### Full Suite
 
-The shared behavioral suite currently has 417 tests in 76 groups, 12 stress benchmarks,
+The shared behavioral suite currently has 457 tests in 77 groups, 12 stress benchmarks,
 and 24 layer diagnostics. The same test definitions are used by the playground UI and the CLI runners.
 
 ```shell

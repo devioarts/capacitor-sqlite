@@ -115,12 +115,19 @@ extension CapacitorSqlite {
     // then get silently truncated by SQLite itself when `setUserVersion` writes it.
     private static let maxMigrationVersion = 2_147_483_647
 
+    private func isBoolean(_ value: Any?) -> Bool {
+        guard let object = value as? NSObject else { return false }
+        return CFGetTypeID(object) == CFBooleanGetTypeID()
+    }
+
     private func parseMigration(
         _ item: [String: Any],
         index: Int,
         seenVersions: inout Set<Int>
     ) throws -> MigrationEntry {
-        guard let version = item["version"] as? Int, version > 0, version <= Self.maxMigrationVersion else {
+        // JSON `true` bridges to NSNumber and would otherwise cast to 1.
+        guard let version = item["version"] as? Int,
+              !isBoolean(item["version"]), version > 0, version <= Self.maxMigrationVersion else {
             throw CapacitorSqliteError.failed(
                 code: "MIGRATION_FAILED",
                 message: "Migration at index \(index): 'version' must be a positive integer between 1 and \(Self.maxMigrationVersion)"

@@ -4,7 +4,7 @@
 
 |               | Scope                                        | Purpose                                                                                 |
 | ------------- | -------------------------------------------- | --------------------------------------------------------------------------------------- |
-| **Automated** | 450 tests · 76 groups · 12 stress benchmarks · 24 diagnostics | Cross-platform behavioral, compatibility, and performance-regression coverage           |
+| **Automated** | 457 tests · 77 groups · 12 stress benchmarks · 24 diagnostics | Cross-platform behavioral, compatibility, and performance-regression coverage           |
 | **Manual**    | 11 scenarios                                 | OS lifecycle, storage-failure, profiler, and native-environment checks outside JS reach |
 
 Tests are part of the example app (`playground/`).  
@@ -30,6 +30,12 @@ state which matrix entries were actually executed.
 
 ## Running from the command line
 
+Use Node 24.15 or newer within the Node 24 line (or Node 26+) for the CLI suite.
+The iOS runner uses `appium-remote-debugger` 19 directly; no preload or compatibility
+shim is needed. It waits for the simulator's inspector socket and keeps one connection
+per suite/stress run. Rejected test promises report their original error instead of
+waiting for a timeout.
+
 On a clean checkout, install and build the plugin before resolving it from the
 playground. Native playground projects are generated and deliberately not versioned:
 
@@ -44,24 +50,34 @@ npx cap add ios     # once, when testing iOS
 
 Run the suite commands below from the repository root. The release workflow performs
 these preparation steps itself. iOS deployment and its inspector runner both use
-`com.devioarts.capacitor.sqlite`, matching `playground/capacitor.config.ts`; deployment
+`com.devioarts.pg.cap`, matching `playground/capacitor.config.ts`; deployment
 replaces the test app without uninstalling its existing data.
 
 Audit regression cases live in `playground/src/tests/auditRegressionTests.ts` and
 `playground/src/tests/novemberRegressionTests.ts` and run
 through the same public plugin API on every platform. The transaction recovery cases
 also cover schema-level rollback and preparation errors on every supported backend.
+The `november-or-fail-*` cases check partial standalone writes, caller-owned rollback,
+and atomic rollback in `execute`, `runBatch`, and `runMany`. `qph-05` checks that invalid
+run/query binds write no rows; `mig-14` checks fresh and already-open databases for
+unchanged schema versions and absent migration tables. `mem-01` checks retained data
+and readonly mismatch rejection when reopening a memory database.
 Native Android instrumentation tests exercise WAL connection counters, transaction
 recovery and large RETURNING results against the Android SQLite framework, in addition
 to the JVM scanner tests. Local dated audit records follow [docs/maintenance.md](docs/maintenance.md).
 
-The 439 suite tests, 12 full-load benchmarks, and 24 layer diagnostics are defined once, in
+The 457 suite tests, 12 full-load benchmarks, and 24 layer diagnostics are defined once, in
 `playground/src/tests/suiteTests.ts`, `playground/src/tests/stressBenchmarks.ts`, and
 `playground/src/tests/diagnosticBenchmarks.ts`, as functions
 that take a `CapacitorSqlitePlugin` implementation and return test/benchmark definitions. The
 playground UI (`PageSuite.tsx` / `PageStress.tsx`) calls these with the real `CapacitorSqlite`
 import; the CLI runners below call them with a platform backend directly, so it's the same test
 code running either way, not a copy.
+
+The 100,000-row read benchmarks seed their data in batches of 10,000 outside the
+measured interval. The measured query still returns all 100,000 rows; this avoids
+turning read setup into an unrelated 100,000-statement Capacitor input test on
+devices with small Java heaps.
 
 | Command                       | Platform                | How it connects                                                                                                                                                                                                      |
 | ----------------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -192,8 +208,9 @@ Prerequisites:
   If more than one target is connected, set `ANDROID_SERIAL=<serial>`; the runner
   selects the WebView socket belonging to the playground PID and keeps USB-powered
   devices awake so another app's WebView or screen sleep cannot cause a false hang.
-- **iOS**: a Simulator already booted (`xcrun simctl boot "iPhone 17 Pro"`), matching the
-  destination name used in the `test:suite:ios:build` script.
+- **iOS**: a Simulator already booted. The build scripts default to the destination name
+  `iPhone 17 Pro`; if that device is not installed, set `IOS_DESTINATION` (for example
+  `IOS_DESTINATION='platform=iOS Simulator,id=<UDID>'`).
 
 ---
 

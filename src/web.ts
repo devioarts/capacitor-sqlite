@@ -942,7 +942,8 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
 
   private openModeError(database: string, readonly: boolean, directory: SqliteDirectory): SqliteFailure | null {
     const existing = this.openDbs.get(database);
-    if (!existing || (existing.readonly === readonly && existing.directory === directory)) return null;
+    if (!existing || (existing.readonly === readonly && (database === ':memory:' || existing.directory === directory)))
+      return null;
     return this.err(
       'DB_ALREADY_OPEN',
       'open',

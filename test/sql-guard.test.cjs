@@ -6,7 +6,6 @@ const {
   assertSingleSqlStatement,
   assertManagedTransactionStatement,
   hasConflictClause,
-  hasRollbackConflictClause,
   hasMultipleSqlStatements,
   isInsertStatement,
   isQueryResultStatement,
@@ -243,15 +242,6 @@ test('detects an UPSERT conflict clause so run() can avoid a stale lastInsertId'
   assert.equal(hasConflictClause("INSERT INTO t (note) VALUES ('ON CONFLICT nice')"), false);
   assert.equal(hasConflictClause('INSERT INTO t ("conflict") VALUES (1)'), false);
   assert.equal(hasConflictClause('INSERT INTO t VALUES (1) /* on conflict */'), false);
-});
-
-test('detects OR ROLLBACK only as real adjacent SQL tokens', () => {
-  assert.equal(hasRollbackConflictClause('INSERT OR ROLLBACK INTO t VALUES (1)'), true);
-  assert.equal(hasRollbackConflictClause('UPDATE OR ROLLBACK t SET v = 1'), true);
-  assert.equal(hasRollbackConflictClause("INSERT INTO t VALUES ('OR ROLLBACK')"), false);
-  assert.equal(hasRollbackConflictClause('INSERT INTO t VALUES (1) /* OR ROLLBACK */'), false);
-  assert.equal(hasRollbackConflictClause('INSERT OR\n-- gap\nROLLBACK INTO t VALUES (1)'), true);
-  assert.equal(hasRollbackConflictClause('INSERT OR FAIL INTO t VALUES (1)'), false);
 });
 
 const ordinaryIdentifierSql = [

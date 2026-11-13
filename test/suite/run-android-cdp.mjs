@@ -14,7 +14,7 @@ import { existsSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-const APP_ID = 'com.devioarts.capacitor.sqlite';
+const APP_ID = 'com.devioarts.pg.cap';
 const FORWARD_PORT = 9333;
 const PER_CALL_TIMEOUT_MS = 15_000;
 const POLL_INTERVAL_MS = 1_500;

@@ -296,6 +296,10 @@ native queue entry, result object, and callback back to JavaScript. For hundreds
 thousands of rows, send chunks through `runBatch()` for mixed SQL or `runMany()` for one
 repeated statement.
 
+Large native inputs are decoded by Capacitor before the plugin can validate them.
+On devices with small Java heaps, an oversized batch can exhaust memory during that
+decode; chunk large imports rather than relying on the plugin to reject them safely.
+
 Mixed read/write fan-out against one database is serialized by design. A long burst of
 writes can delay reads submitted at the same time, especially on iOS where thousands of
 small plugin calls have noticeably higher callback/queue-drain overhead than one batch.
@@ -365,6 +369,13 @@ recovery also fails, the connection is closed and must be reopened with `open()`
 that exceptional close discards in-memory databases and TEMP state. Previously
 committed persistent data remains intact. Check the returned `success` before
 continuing after any transaction error.
+
+`success: false` does not guarantee zero changes for a single statement that uses SQLite's
+`OR FAIL` conflict policy: rows written before the conflicting row may stay (iOS, Web,
+Electron), while Android's single-statement wrapper rolls them back when no manual
+transaction is active. Inside a manual transaction, Android also retains partial writes
+until the caller rolls back. For an atomic write use
+an automatic batch (`runBatch`) or a manual transaction with a checked rollback.
 
 Automatic transactions own their boundaries. `execute()`, `runBatch()` and `runMany()`
 reject explicit `BEGIN`, `COMMIT`, `END`, `ROLLBACK`, `SAVEPOINT` and `RELEASE` when

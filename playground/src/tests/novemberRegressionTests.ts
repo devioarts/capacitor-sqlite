@@ -104,5 +104,48 @@ export function buildNovemberRegressionTests(api: CapacitorSqlitePlugin): TestCa
         }
       }),
     })),
+    ...[false, true].map((manual): TestCase => ({
+      id: `november-or-fail-run-${manual}`, group: 'Regression', name: `OR FAIL preserves the documented run state (manual=${manual})`,
+      fn: withDatabase(`or_fail_run_${manual}`, async (database) => {
+        const platform = assertOk(await api.getPluginPlatform(), 'platform').platform;
+        assertOk(await api.execute({ database, statements: [
+          'DROP TABLE IF EXISTS t', 'CREATE TABLE t(id INTEGER PRIMARY KEY)', 'INSERT INTO t VALUES(99)',
+        ] }), 'setup');
+        if (manual) {
+          assertOk(await api.beginTransaction({ database }), 'begin');
+          assertOk(await api.run({ database, statement: 'INSERT INTO t VALUES(2)' }), 'earlier transaction write');
+        }
+        assertFail(await api.run({ database, statement: 'INSERT OR FAIL INTO t VALUES(1),(1)' }), 'OR FAIL', 'EXECUTE_FAILED');
+        const rows = assertOk(await api.query<{ id: number }>({ database, statement: 'SELECT id FROM t ORDER BY id' }), 'rows').rows;
+        const expected = manual ? '1,2,99' : platform === 'android' ? '99' : '1,99';
+        assertEqual(rows.map((row) => row.id).join(','), expected, 'partial write and earlier data');
+        if (manual) {
+          assertOk(await api.rollbackTransaction({ database }), 'rollback');
+          const restored = assertOk(await api.query<{ id: number }>({ database, statement: 'SELECT id FROM t ORDER BY id' }), 'restored rows').rows;
+          assertEqual(restored.map((row) => row.id).join(','), '99', 'rollback removes both pending writes');
+        }
+        assertOk(await api.beginTransaction({ database }), 'connection accepts another transaction');
+        assertOk(await api.rollbackTransaction({ database }), 'rollback empty transaction');
+      }),
+    })),
+    ...['execute', 'runBatch', 'runMany'].map((method): TestCase => ({
+      id: `november-or-fail-atomic-${method}`, group: 'Regression', name: `${method} rolls back earlier writes and the partial OR FAIL statement`,
+      fn: withDatabase(`or_fail_atomic_${method}`, async (database) => {
+        assertOk(await api.execute({ database, statements: [
+          'DROP TABLE IF EXISTS t', 'CREATE TABLE t(id INTEGER PRIMARY KEY)', 'INSERT INTO t VALUES(99)',
+        ] }), 'setup');
+        const statements = ['INSERT INTO t VALUES(2),(3)', 'INSERT OR FAIL INTO t VALUES(1),(1)'];
+        const result = method === 'execute'
+          ? await api.execute({ database, statements })
+          : method === 'runBatch'
+            ? await api.runBatch({ database, set: statements.map((statement) => ({ statement })) })
+            : await api.runMany({ database, statement: 'INSERT OR FAIL INTO t VALUES(?),(?)', values: [[2,3],[1,1]] });
+        assertFail(result, 'atomic OR FAIL', 'EXECUTE_FAILED');
+        const rows = assertOk(await api.query<{ id: number }>({ database, statement: 'SELECT id FROM t ORDER BY id' }), 'rows').rows;
+        assertEqual(rows.map((row) => row.id).join(','), '99', 'all attempted writes rolled back');
+        assertOk(await api.beginTransaction({ database }), 'connection accepts another transaction');
+        assertOk(await api.rollbackTransaction({ database }), 'rollback empty transaction');
+      }),
+    })),
   ];
 }

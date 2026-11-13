@@ -855,11 +855,8 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
     },
   },
   {
-    id: 'qph-05', group: 'Query Placeholders', name: 'Android rejects unsupported placeholder forms and count mismatch',
+    id: 'qph-05', group: 'Query Placeholders', name: 'run/query reject unsupported placeholders and bind counts without writing',
     fn: async () => {
-      const plat = assertOk(await CapacitorSqlite.getPluginPlatform(), 'platform');
-      if (plat.platform !== 'android') skipTest('Android-specific placeholder scanner test');
-
       const DB = 'suite_qph05';
       await silentClose(DB);
       assertOk(await CapacitorSqlite.open({ database: DB }), 'open');
@@ -869,6 +866,15 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
       assertFail(await CapacitorSqlite.query({ database: DB, statement: 'SELECT $value AS v', values: [1] }), '$name placeholder', 'INVALID_PARAMS');
       assertFail(await CapacitorSqlite.query({ database: DB, statement: 'SELECT ? AS a, ? AS b', values: [1] }), 'missing value', 'INVALID_PARAMS');
       assertFail(await CapacitorSqlite.query({ database: DB, statement: 'SELECT ? AS a', values: [1, 2] }), 'extra value', 'INVALID_PARAMS');
+      assertOk(await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t(a,b)'] }), 'setup');
+      for (const placeholder of ['?1', ':value', '@value', '$value']) {
+        assertFail(await CapacitorSqlite.run({ database: DB, statement: `INSERT INTO t(a) VALUES(${placeholder})`, values: [1] }), `run ${placeholder}`, 'INVALID_PARAMS');
+      }
+      assertFail(await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t VALUES(?,?)', values: [1] }), 'run missing value', 'INVALID_PARAMS');
+      assertFail(await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t(a) VALUES(?)', values: [1,2] }), 'run extra value', 'INVALID_PARAMS');
+      assertEqual(assertOk(await CapacitorSqlite.query<{ n: number }>({ database: DB, statement: 'SELECT count(*) AS n FROM t' }), 'unchanged').rows[0].n, 0, 'invalid binds wrote nothing');
+      assertOk(await CapacitorSqlite.run({ database: DB, statement: 'INSERT INTO t(a) VALUES(?)', values: [7] }), 'valid bind after failures');
+      assertEqual(assertOk(await CapacitorSqlite.query<{ a: number }>({ database: DB, statement: 'SELECT a FROM t' }), 'valid row').rows[0].a, 7, 'connection remains usable');
       await silentClose(DB);
     },
   },
@@ -7226,6 +7232,45 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
       const version = assertOk(await CapacitorSqlite.getSchemaVersion({ database: DB }), 'version');
       assertEqual(version.version, 1, 'version remains v1');
       await silentClose(DB);
+    },
+  },
+  {
+    id: 'mig-14', group: 'Migrations', name: 'malformed migrations input is rejected and never applied',
+    fn: async () => {
+      const DB = 'suite_mig14';
+      await silentClose(DB);
+      assertOk(await CapacitorSqlite.open({ database: DB }), 'fixture open');
+      assertOk(await CapacitorSqlite.execute({ database: DB, statements: ['DROP TABLE IF EXISTS bad_mig', 'PRAGMA user_version=0'] }), 'fixture reset');
+      await silentClose(DB);
+      const sql = ['CREATE TABLE bad_mig (v INTEGER)'];
+      for (const [label, migrations] of [
+        ['object', { version: 1, statements: sql }],
+        ['string', 'nope'],
+        ['null', null],
+        ['boolean version', [{ version: true, statements: sql }]],
+        ['false version', [{ version: false, statements: sql }]],
+        ['fractional version', [{ version: 1.5, statements: sql }]],
+      ] as const) {
+        try {
+          assertFail(await CapacitorSqlite.open({ database: DB, migrations: migrations as never }), `${label} fresh open`, 'MIGRATION_FAILED');
+          assertOk(await CapacitorSqlite.open({ database: DB }), 'plain open');
+          assertFail(await CapacitorSqlite.open({ database: DB, migrations: migrations as never }), `${label} reopen`, 'MIGRATION_FAILED');
+          assertEqual(assertOk(await CapacitorSqlite.getSchemaVersion({ database: DB }), 'version').version, 0, 'schema version unchanged');
+          assertEqual(assertOk(await CapacitorSqlite.query<{ n: number }>({ database: DB, statement: "SELECT count(*) AS n FROM sqlite_master WHERE name='bad_mig'" }), 'table check').rows[0].n, 0, 'invalid migration created no table');
+        } finally { await silentClose(DB); }
+      }
+    },
+  },
+  {
+    id: 'mem-01', group: 'Open', name: ':memory: reopen ignores directory',
+    fn: async () => {
+      await silentClose(':memory:');
+      assertOk(await CapacitorSqlite.open({ database: ':memory:' }), 'open');
+      assertOk(await CapacitorSqlite.execute({ database: ':memory:', statements: ['DROP TABLE IF EXISTS memory_reopen', 'CREATE TABLE memory_reopen(v)', 'INSERT INTO memory_reopen VALUES(7)'] }), 'seed memory');
+      assertOk(await CapacitorSqlite.open({ database: ':memory:', directory: 'cache' }), 'reopen with directory');
+      assertEqual(assertOk(await CapacitorSqlite.query<{ v: number }>({ database: ':memory:', statement: 'SELECT v FROM memory_reopen' }), 'retained memory').rows[0].v, 7, 'reopen preserves data');
+      assertFail(await CapacitorSqlite.open({ database: ':memory:', directory: 'cache', readonly: true }), 'readonly mismatch still rejected', 'DB_ALREADY_OPEN');
+      await silentClose(':memory:');
     },
   },
 

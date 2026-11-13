@@ -287,7 +287,12 @@ internal object SQLiteHelpers {
         val raw = Build.VERSION.SDK_INT >= 35 && statementType(sql) != "PRAGMA"
         val owned = (writes || raw) && !db.inTransaction()
         if (owned) {
-            if (writes) db.beginTransactionNonExclusive() else db.beginTransactionReadOnly()
+            // Not-writes implies raw, i.e. API 35+; the explicit check lets Lint see it.
+            if (writes) {
+                db.beginTransactionNonExclusive()
+            } else if (Build.VERSION.SDK_INT >= 35) {
+                db.beginTransactionReadOnly()
+            }
         }
         try {
             val read = {

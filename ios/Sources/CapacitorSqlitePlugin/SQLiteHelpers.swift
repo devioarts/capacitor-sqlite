@@ -172,9 +172,7 @@ enum SQLiteHelpers {
     // MARK: - Parameterized DML (single statement)
 
     static func run(db: OpaquePointer, sql: String, values: [Any]) throws -> (changes: Int, lastInsertId: Int64) {
-        if hasMultipleStatements(sql) {
-            throw SQLiteError.invalidParams("SQL string must contain exactly one statement")
-        }
+        try validateRunInput(sql: sql, valueCount: values.count)
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
             let msg = String(validatingUTF8: sqlite3_errmsg(db)) ?? "prepare failed"
@@ -204,13 +202,6 @@ enum SQLiteHelpers {
         return (changes, inserted ? currentInsertId : 0)
     }
 
-    /// Prepares and binds without stepping, used to validate an entire batch
-    /// before transaction:false can persist any early item.
-    static func validateRunStatement(db: OpaquePointer, sql: String, values: [Any]) throws {
-        let statement = try PreparedRunStatement(db: db, sql: sql, values: values)
-        statement.close()
-    }
-
     // MARK: - SELECT
 
     static func query(db: OpaquePointer, sql: String, values: [Any]) throws -> [[String: Any]] {
@@ -226,9 +217,7 @@ enum SQLiteHelpers {
     }
 
     private static func prepareQuery(db: OpaquePointer, sql: String, values: [Any]) throws -> OpaquePointer? {
-        if hasMultipleStatements(sql) {
-            throw SQLiteError.invalidParams("SQL string must contain exactly one statement")
-        }
+        try validateRunInput(sql: sql, valueCount: values.count)
         guard SQLStatement.isQueryResultStatement(sql) else {
             throw SQLiteError.prepare("'statement' must be a SELECT, PRAGMA, EXPLAIN, or DML statement with RETURNING")
         }

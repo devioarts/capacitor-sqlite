@@ -22,6 +22,7 @@
       "default": "./electron/dist/plugin.cjs.js"
     },
     "./electron/settings": {
+      "types": "./electron/types-public/settings.d.ts",
       "require": "./electron/dist/plugin-settings.js",
       "default": "./electron/dist/plugin-settings.js"
     },
@@ -77,7 +78,7 @@
     "test:p1": "npm run test:p0 && npm run verify:web && npm run verify:electron && npm run test:electron:worker",
     "test:p2": "npm run test:p1 && npm run test:p2:js",
     "test:p2:js": "tsc --ignoreConfig --target es2017 --module commonjs --outDir build/test-p2 src/migrations.ts && node --test test/migration-validation.test.cjs",
-    "test:electron:worker": "node --test test/electron-worker-lifecycle.test.cjs test/native-query-validation.test.cjs test/package-import.test.cjs test/web-worker.test.cjs",
+    "test:electron:worker": "node --test test/electron-worker-lifecycle.test.cjs test/native-query-validation.test.cjs test/package-import.test.cjs test/web-worker.test.cjs test/ios-suite-runner.test.cjs",
     "test:suite:web": "node test/suite/run-web-cdp.mjs",
     "test:suite:web:stress": "node test/suite/run-web-cdp.mjs --stress",
     "test:suite:web:stress-only": "node test/suite/run-web-cdp.mjs --stress-only",
@@ -87,13 +88,13 @@
     "test:suite:electron:stress-only": "tsc --project test/suite/tsconfig.json && node build/test-suite/test/suite/run-electron.js --stress-only",
     "test:suite:electron:diagnostics": "tsc --project test/suite/tsconfig.json && node build/test-suite/test/suite/run-electron.js --diagnostics-only",
     "test:suite:android:build": "cd playground && npm run build && npx cap sync android && cd android && ./gradlew assembleDebug",
-    "test:suite:android:deploy": "\"${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools/adb\" install -r playground/android/app/build/outputs/apk/debug/app-debug.apk && \"${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools/adb\" shell monkey -p com.devioarts.capacitor.sqlite -c android.intent.category.LAUNCHER 1",
+    "test:suite:android:deploy": "\"${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools/adb\" install -r playground/android/app/build/outputs/apk/debug/app-debug.apk && \"${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools/adb\" shell am start -W -n com.devioarts.pg.cap/.MainActivity",
     "test:suite:android": "npm run test:suite:android:build && npm run test:suite:android:deploy && node test/suite/run-android-cdp.mjs",
     "test:suite:android:stress": "npm run test:suite:android:build && npm run test:suite:android:deploy && node test/suite/run-android-cdp.mjs --stress",
     "test:suite:android:stress-only": "npm run test:suite:android:build && npm run test:suite:android:deploy && node test/suite/run-android-cdp.mjs --stress-only",
     "test:suite:android:diagnostics": "npm run test:suite:android:build && npm run test:suite:android:deploy && node test/suite/run-android-cdp.mjs --diagnostics-only",
     "test:suite:ios:build": "cd playground && npm run build && npx cap sync ios && cd ios/App && xcodebuild -project App.xcodeproj -scheme App -configuration Debug -sdk iphonesimulator -destination \"${IOS_DESTINATION:-platform=iOS Simulator,name=iPhone 17 Pro}\" -derivedDataPath ../../../build/test-suite-ios build",
-    "test:suite:ios:deploy": "xcrun simctl install booted build/test-suite-ios/Build/Products/Debug-iphonesimulator/App.app && xcrun simctl launch --terminate-running-process booted com.devioarts.capacitor.sqlite",
+    "test:suite:ios:deploy": "xcrun simctl install booted build/test-suite-ios/Build/Products/Debug-iphonesimulator/App.app && xcrun simctl launch --terminate-running-process booted com.devioarts.pg.cap",
     "test:suite:ios": "npm run test:suite:ios:build && npm run test:suite:ios:deploy && node test/suite/run-ios-cdp.mjs",
     "test:suite:ios:stress": "npm run test:suite:ios:build && npm run test:suite:ios:deploy && node test/suite/run-ios-cdp.mjs --stress",
     "test:suite:ios:stress-only": "npm run test:suite:ios:build && npm run test:suite:ios:deploy && node test/suite/run-ios-cdp.mjs --stress-only",
@@ -114,22 +115,22 @@
     "release": "npm publish --access public"
   },
   "devDependencies": {
-    "@capacitor/android": "^8.0.0",
-    "@capacitor/core": "^8.0.0",
+    "@capacitor/android": "^8.6.2",
+    "@capacitor/core": "^8.6.2",
     "@capacitor/docgen": "^0.3.0",
-    "@capacitor/ios": "^8.0.0",
+    "@capacitor/ios": "^8.6.2",
     "@ionic/prettier-config": "^4.0.0",
-    "@types/node": "^24.0.0",
-    "appium-remote-debugger": "^17.0.0",
-    "eslint": "^10.13.0",
+    "@types/node": "^24.19.2",
+    "appium-remote-debugger": "^19.1.7",
+    "eslint": "^10.14.0",
     "eslint-config-prettier": "^10.1.0",
-    "prettier": "^3.9.0",
+    "prettier": "^3.10.1",
     "prettier-plugin-java": "^2.11.0",
-    "rimraf": "^6.1.0",
-    "rollup": "^4.64.0",
+    "rimraf": "^6.1.4",
+    "rollup": "^4.68.3",
     "swiftlint": "^2.0.0",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.71.0"
+    "typescript-eslint": "^8.72.2"
   },
   "peerDependencies": {
     "@capacitor/core": ">=8.0.0",
@@ -155,7 +156,7 @@
   "allowScripts": {
     "fsevents@2.3.3": true,
     "swiftlint@2.0.0": true,
-    "appium-ios-tuntap@2.0.0": true,
+    "appium-ios-tuntap@3.0.3": true,
     "sharp@0.34.5": true
   }
 }

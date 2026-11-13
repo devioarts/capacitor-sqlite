@@ -23,7 +23,6 @@ function cached<T>(cache: Map<string, T>, sql: string, compute: () => T): T {
 const multipleStatementCache = new Map<string, boolean>();
 const statementTypeCache = new Map<string, string>();
 const conflictCache = new Map<string, boolean>();
-const rollbackConflictCache = new Map<string, boolean>();
 const bindParameterCache = new Map<string, { count: number; error?: string }>();
 
 export function hasMultipleSqlStatements(sql: string): boolean {
@@ -177,23 +176,6 @@ export function hasConflictClause(sql: string): boolean {
   return cached(conflictCache, sql, () => hasKeyword(sql, 'CONFLICT', 'ON'));
 }
 
-/**
- * Returns true for SQLite's statement-level `OR ROLLBACK` conflict policy.
- *
- * Unlike ABORT/FAIL, ROLLBACK can end an explicit transaction behind the
- * plugin's back. Backends which mirror transaction state in a boolean use this
- * signal to clear that mirror after a failed statement.
- */
-export function hasRollbackConflictClause(sql: string): boolean {
-  return cached(rollbackConflictCache, sql, () => {
-    const tokens = keywords(sql);
-    for (let i = 0; i + 1 < tokens.length; i++) {
-      if (tokens[i] === 'OR' && tokens[i + 1] === 'ROLLBACK') return true;
-    }
-    return false;
-  });
-}
-
 function hasTailContent(sql: string, start: number): boolean {
   for (let i = start; i < sql.length; i++) {
     const ch = sql[i];
@@ -318,32 +300,6 @@ function hasKeyword(sql: string, target: string, precededBy?: string): boolean {
     }
   }
   return false;
-}
-
-function keywords(sql: string): string[] {
-  const result: string[] = [];
-  for (let i = 0; i < sql.length; i++) {
-    const ch = sql[i];
-    if (ch === "'" || ch === '"' || ch === '`') {
-      i = skipQuoted(sql, i, ch);
-    } else if (ch === '[') {
-      i = skipBracketIdentifier(sql, i);
-    } else if (ch === '-' && sql[i + 1] === '-') {
-      i = skipLineComment(sql, i);
-    } else if (ch === '/' && sql[i + 1] === '*') {
-      i = skipBlockComment(sql, i);
-    } else if (
-      IDENTIFIER_START.test(ch) &&
-      (i === 0 || SQLITE_WHITESPACE.test(sql[i - 1]) || !IDENTIFIER_PART.test(sql[i - 1]))
-    ) {
-      const keyword = readKeyword(sql, i);
-      if (keyword) {
-        result.push(keyword.keyword);
-        i = keyword.end - 1;
-      }
-    }
-  }
-  return result;
 }
 
 function skipIdentifier(sql: string, start: number): number {
