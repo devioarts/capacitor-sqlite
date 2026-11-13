@@ -1,4 +1,5 @@
 import XCTest
+import SQLite3
 @testable import CapacitorSqlitePlugin
 
 class CapacitorSqliteBindingTests: XCTestCase {
@@ -25,6 +26,37 @@ class CapacitorSqliteBindingTests: XCTestCase {
         XCTAssertEqual(rows[0]["v"] as? Int64, 42)
     }
 
+    func testInvalidQueryBindingsReleasePreparedStatements() throws {
+        let handle = try SQLiteHelpers.open(path: ":memory:")
+        defer { try? SQLiteHelpers.close(db: handle) }
+        for _ in 0..<3 {
+            XCTAssertThrowsError(try SQLiteHelpers.query(db: handle, sql: "SELECT ?", values: []))
+            XCTAssertThrowsError(try SQLiteHelpers.queryCompact(db: handle, sql: "SELECT ?", values: []))
+            XCTAssertNil(sqlite3_next_stmt(handle, nil), "failed query must finalize its statement")
+        }
+    }
+
+    func testQueryAutoRollbackUpdatesBothQueryPaths() throws {
+        try impl.open(database: ":memory:", readonly: false, migrations: [])
+        try impl.execute(database: ":memory:", statements: [
+            "CREATE TABLE t(v INTEGER UNIQUE)", "INSERT INTO t VALUES (1)"
+        ])
+        for compact in [false, true] {
+            try impl.beginTransaction(database: ":memory:")
+            _ = try impl.run(database: ":memory:", statement: "INSERT INTO t VALUES (2)", values: [])
+            let sql = "INSERT OR ROLLBACK INTO t VALUES (1) RETURNING v"
+            if compact {
+                XCTAssertThrowsError(try impl.queryCompact(database: ":memory:", statement: sql, values: []))
+            } else {
+                XCTAssertThrowsError(try impl.query(database: ":memory:", statement: sql, values: []))
+            }
+            try impl.beginTransaction(database: ":memory:")
+            let rows = try impl.query(database: ":memory:", statement: "SELECT COUNT(*) AS n FROM t", values: [])
+            XCTAssertEqual(rows[0]["n"] as? Int64, 1)
+            try impl.rollbackTransaction(database: ":memory:")
+        }
+    }
+
     func testBindUnsafeIntegerThrowsInsteadOfCrashing() throws {
         try impl.open(database: ":memory:", readonly: false, migrations: [])
         try impl.execute(database: ":memory:", statements: ["CREATE TABLE t (v)"])
@@ -38,7 +70,9 @@ class CapacitorSqliteBindingTests: XCTestCase {
     func testExecuteRejectsMultipleStatementsInOneString() throws {
         try impl.open(database: ":memory:", readonly: false, migrations: [])
         XCTAssertThrowsError(
-            try impl.execute(database: ":memory:", statements: ["CREATE TABLE a (id INTEGER); CREATE TABLE b (id INTEGER)"])
+            try impl.execute(
+                database: ":memory:", statements: ["CREATE TABLE a (id INTEGER); CREATE TABLE b (id INTEGER)"]
+            )
         )
     }
 
@@ -46,7 +80,9 @@ class CapacitorSqliteBindingTests: XCTestCase {
         try impl.open(database: ":memory:", readonly: false, migrations: [])
         try impl.execute(database: ":memory:", statements: ["CREATE TABLE t (v TEXT)"])
         XCTAssertThrowsError(
-            try impl.run(database: ":memory:", statement: "INSERT INTO t VALUES ('a'); INSERT INTO t VALUES ('b')", values: [])
+            try impl.run(
+                database: ":memory:", statement: "INSERT INTO t VALUES ('a'); INSERT INTO t VALUES ('b')", values: []
+            )
         )
     }
 

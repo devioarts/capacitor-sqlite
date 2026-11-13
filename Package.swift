@@ -24,6 +24,7 @@ let package = Package(
         .testTarget(
             name: "CapacitorSqlitePluginTests",
             dependencies: ["CapacitorSqlitePlugin"],
-            path: "ios/Tests/CapacitorSqlitePluginTests")
+            path: "ios/Tests/CapacitorSqlitePluginTests",
+            resources: [.copy("Fixtures")])
     ]
 )

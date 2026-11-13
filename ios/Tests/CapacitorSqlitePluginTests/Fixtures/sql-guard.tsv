@@ -1,0 +1,25 @@
+# name	sql_utf8_base64	type_utf8_base64	multiple	conflict	managed	bind_count
+select	U0VMRUNUID8=	U0VMRUNU	false	false	false	1
+cr-in-comment	U0VMRUNUIDEgLS0gYw07IFNFTEVDVCAy	U0VMRUNU	false	false	false	0
+cr-trailing-comment	U0VMRUNUIDE7LS0gYw1TRUxFQ1QgMg==	U0VMRUNU	false	false	false	0
+lf-ends-comment	U0VMRUNUIDEgLS0gYwo7IFNFTEVDVCAy	U0VMRUNU	true	false	false	0
+cr-hidden-end	LS0gYw3igIvvu78tLSBjCkVORA==	RU5E	false	false	true	0
+cr-bind-comment	U0VMRUNUID8gLS0gYw0gPyBAbmFtZSA6eCAkdmFsdWU=	U0VMRUNU	false	false	false	1
+cr-then-lf-bind	U0VMRUNUID8gLS0gYw0gPwosID8=	U0VMRUNU	false	false	false	2
+nbsp-identifier	wqBFTkQ=	wqBFTkQ=	false	false	true	0
+nbsp-tail	U0VMRUNUIDE7wqA=	U0VMRUNU	true	false	false	0
+bom	77u/RU5E	RU5E	false	false	true	0
+ascii-whitespace	CQsMDQogRU5E	RU5E	false	false	true	0
+conflict-column	SU5TRVJUIElOVE8gdChjb25mbGljdCkgVkFMVUVTKD8p	SU5TRVJU	false	false	false	1
+conflict-quoted	SU5TRVJUIElOVE8gdCgiT04iLGNvbmZsaWN0KSBWQUxVRVMoPyw/KQ==	SU5TRVJU	false	false	false	2
+upsert	SU5TRVJUIElOVE8gdCBWQUxVRVMoPykgT04gLyogZ2FwICovIENPTkZMSUNUKHYpIERPIFVQREFURSBTRVQgdj0/	SU5TRVJU	false	true	false	2
+conflict-string	SU5TRVJUIElOVE8gdCBWQUxVRVMoJ09OIENPTkZMSUNUJyk=	SU5TRVJU	false	false	false	0
+conflict-punctuation	SU5TRVJUIElOVE8gdChvbixjb25mbGljdCkgVkFMVUVTKD8sPyk=	SU5TRVJU	false	false	false	2
+returning-column	SU5TRVJUIElOVE8gdCgicmV0dXJuaW5nIikgVkFMVUVTKD8p	SU5TRVJU	false	false	false	1
+cte	V0lUSCB4IEFTIChTRUxFQ1QgPykgSU5TRVJUIElOVE8gdCBTRUxFQ1QgKiBGUk9NIHg=	SU5TRVJU	false	false	false	1
+trigger	Q1JFQVRFIFRSSUdHRVIgdHIgQUZURVIgSU5TRVJUIE9OIHQgQkVHSU4gU0VMRUNUIDE7IFNFTEVDVCBORVcuZW5kOyBFTkQ=	Q1JFQVRF	false	false	false	0
+trigger-tail	Q1JFQVRFIFRSSUdHRVIgdHIgQUZURVIgSU5TRVJUIE9OIHQgQkVHSU4gU0VMRUNUIDE7IEVORDsgU0VMRUNUIDI=	Q1JFQVRF	true	false	false	0
+unicode-bind	U0VMRUNUIGEkYiwgxI1lc2vDvSwg6LOH5paZIEZST00gdCBXSEVSRSB2PT8=	U0VMRUNU	false	false	false	1
+upsert-bom	SU5TRVJUIElOVE8gdCBWQUxVRVMoPykgT04g77u/Q09ORkxJQ1QodikgRE8gVVBEQVRFIFNFVCB2PT8=	SU5TRVJU	false	true	false	2
+trigger-bom	Q1JFQVRFIO+7v1RSSUdHRVIgdHIgQUZURVIgSU5TRVJUIE9OIHQgQkVHSU4gU0VMRUNUIDE7IFNFTEVDVCAyOyBFTkQ=	Q1JFQVRF	false	false	false	0
+named-bind-bom	U0VMRUNUIO+7vyRuYW1l	U0VMRUNU	false	false	false	-1

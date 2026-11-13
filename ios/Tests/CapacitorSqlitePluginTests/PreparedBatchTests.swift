@@ -87,4 +87,27 @@ final class PreparedBatchTests: XCTestCase {
         let rows = try impl.query(database: ":memory:", statement: "SELECT COUNT(*) AS n FROM t", values: [])
         XCTAssertEqual(rows[0]["n"] as? Int64, 0)
     }
+
+    func testAutocommitBatchValidatesEveryBindBeforeFirstWrite() throws {
+        try impl.open(database: ":memory:", readonly: false, migrations: [])
+        try impl.execute(database: ":memory:", statements: ["CREATE TABLE t (v INTEGER)"])
+
+        XCTAssertThrowsError(try impl.runBatch(
+            database: ":memory:",
+            set: [
+                ["statement": "INSERT INTO t VALUES (?)", "values": [1] as [Any]],
+                ["statement": "INSERT INTO t VALUES (?)", "values": [2, 3] as [Any]]
+            ],
+            transaction: false
+        )) { error in
+            guard case CapacitorSqliteError.failed(let code, let message) = error else {
+                return XCTFail("Expected CapacitorSqliteError.failed, got \(error)")
+            }
+            XCTAssertEqual(code, "INVALID_PARAMS")
+            XCTAssertTrue(message.contains("Bind value count mismatch"))
+        }
+
+        let rows = try impl.query(database: ":memory:", statement: "SELECT COUNT(*) AS n FROM t", values: [])
+        XCTAssertEqual(rows[0]["n"] as? Int64, 0)
+    }
 }

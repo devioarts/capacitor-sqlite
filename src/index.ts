@@ -5,8 +5,9 @@ import {
   ELECTRON_COMPACT_QUERY_OPTION,
   encodeNativeBridgeValues,
   usesJsonValueBridge,
-} from './bridge-values';
-import { assertAnonymousBindParameterCount, assertSingleSqlStatement } from './sql';
+} from './bridge-values.js';
+// Explicit extensions keep the published ESM entry loadable without a bundler.
+import { assertAnonymousBindParameterCount, assertSingleSqlStatement } from './sql.js';
 import type {
   CapacitorSqlitePlugin,
   QueryOptions,
@@ -51,7 +52,14 @@ function decodeValue(v: unknown): unknown {
 
 function decodeRow(row: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const k of Object.keys(row)) out[k] = decodeValue(row[k]);
+  for (const k of Object.keys(row)) {
+    const value = decodeValue(row[k]);
+    if (k === '__proto__') {
+      Object.defineProperty(out, k, { value, enumerable: true, writable: true, configurable: true });
+    } else {
+      out[k] = value;
+    }
+  }
   return out;
 }
 
@@ -250,14 +258,20 @@ export const CapacitorSqlite: CapacitorSqlitePlugin = normalizesRejectedCalls
       runMany: (o: RunManyOptions) => callRunMany(o),
       query: async <T>(o: QueryOptions) => {
         const usesCompactRows = platform === 'electron' || encodesBridgeValues;
-        const queryOptions = usesCompactRows
-          ? ({
-              ...o,
-              values: bridgeValues(o.values),
-              [ELECTRON_COMPACT_QUERY_OPTION]: true,
-            } as QueryOptions)
-          : o;
-        const r = await nativeCall('query', () => _raw.query<T>(queryOptions), 'INVALID_PARAMS');
+        const r = await nativeCall(
+          'query',
+          () => {
+            const queryOptions = usesCompactRows
+              ? ({
+                  ...o,
+                  values: bridgeValues(o.values),
+                  [ELECTRON_COMPACT_QUERY_OPTION]: true,
+                } as QueryOptions)
+              : o;
+            return _raw.query<T>(queryOptions);
+          },
+          'INVALID_PARAMS',
+        );
         if (!r.success) return r;
         if (usesCompactRows) {
           try {

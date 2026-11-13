@@ -36,4 +36,13 @@ class CapacitorSqliteTextTests: XCTestCase {
         let rows = try impl.query(database: ":memory:", statement: "SELECT v FROM t", values: [])
         XCTAssertEqual(rows[0]["v"] as? String, "text64:" + Data("blob64:test".utf8).base64EncodedString())
     }
+
+    func testInvalidUtf8UsesReplacementCharactersInBothQueryPaths() throws {
+        try impl.open(database: ":memory:", readonly: false, migrations: [])
+        let sql = "SELECT CAST(X'80FF' AS TEXT) AS v"
+        let rows = try impl.query(database: ":memory:", statement: sql, values: [])
+        XCTAssertEqual(rows[0]["v"] as? String, "\u{fffd}\u{fffd}")
+        let compact = try impl.queryCompact(database: ":memory:", statement: sql, values: [])
+        XCTAssertEqual(compact.values[0][0] as? String, "\u{fffd}\u{fffd}")
+    }
 }

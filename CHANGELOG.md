@@ -1,5 +1,30 @@
 # Changelog
 
+## [Unreleased]
+
+## [0.2.0] - 2026-11-13
+
+### Fixed
+
+- Consistent SQL, placeholder and migration validation across platforms, including Unicode SQL, comments and triggers.
+- Correct transaction state and rollback after constraint, statement preparation and commit failures.
+- Batch statements execute in order, preserving dependencies on earlier schema changes.
+- Correct native `RETURNING` execution and change counts, Android typed bindings and large-row reads on API 35+.
+- Preserve special query column names, UTF-8 text and BLOB values; invalid native query inputs return failure results.
+- Recover failed Web workers without replaying writes and preserve data when reopening `:memory:` with a different directory.
+- Fix Electron large-rowid handling and worker shutdown.
+- Fix plain Node ESM imports, Electron settings declarations and CocoaPods source tags.
+
+### Changed
+
+- Electron cache storage is isolated per application. Rebuild data from the former shared cache directory; existing files are not migrated automatically.
+- Automatic batches and migrations reject explicit transaction-control SQL. Malformed inputs previously accepted by some backends now return failures consistently.
+- Web builds include an internal worker and SQLite WASM/OPFS assets. Public TypeScript method signatures remain unchanged from 0.1.1.
+
+### Added
+
+- Upgrade guidance for 0.2.0, including transaction recovery, cache storage and large-query/bridge memory limits.
+
 ## [0.1.1] - 2026-07-12
 
 ### Added

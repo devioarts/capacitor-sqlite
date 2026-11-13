@@ -17,6 +17,22 @@ npm install @devioarts/capacitor-sqlite
 npx cap sync
 ```
 
+## Upgrading to 0.2.0
+
+Public TypeScript method signatures and result shapes are unchanged from 0.1.1.
+Validation consistently rejects malformed migrations, bind-count mismatches,
+unsupported placeholders, and multiple statements packed into one SQL string.
+Explicit transaction-control SQL is rejected inside automatic batches and migrations;
+use the transaction methods, or `transaction: false` where supported.
+
+Electron cache databases now use an application-specific directory. Rebuild data
+from the former shared cache directory; those files are not moved automatically.
+
+When upgrading from 0.0.2, replace `getPlatform()` with `getPluginPlatform()`;
+that rename already occurred before this release. `lastInsertId` is conservatively
+`0` for UPSERT and other ambiguous insert paths; use `query()` with `RETURNING`
+when the exact row ID is needed and the platform's SQLite supports it.
+
 ## Platform setup
 
 ### Web
@@ -50,9 +66,15 @@ import { pluginSettings } from '@devioarts/capacitor-sqlite/electron/settings';
 // For custom IPC, expose CapacitorSqlite from the main process after app.whenReady().
 const capacitorSqlite = new CapacitorSqlite();
 
-// Release the worker thread (and let SQLite flush its WAL) before the process exits.
-app.on('before-quit', () => {
-  void capacitorSqlite.dispose();
+// Prevent quitting until SQLite finishes queued work and closes its connections.
+let sqliteClosed = false;
+app.on('before-quit', (event) => {
+  if (sqliteClosed) return;
+  event.preventDefault();
+  void capacitorSqlite.dispose().then(() => {
+    sqliteClosed = true;
+    app.quit();
+  });
 });
 ```
 
@@ -61,8 +83,13 @@ Databases are stored in `app.getPath('userData')/CapacitorSQLite/<name>.db` by d
 `CapacitorSqlite` lazily spawns its worker thread on first use and keeps it alive for the
 life of the process. Call `dispose()` (not part of the shared `CapacitorSqlitePlugin`
 interface — an Electron-only addition) to terminate it explicitly; a later call spawns a
-fresh worker on demand, so `dispose()` is also safe to use to recover from a worker stuck
-in a bad state.
+fresh worker on demand. Disposal waits for queued work before closing connections; it
+cannot interrupt a running or stuck SQL statement. Stop submitting database work before
+calling it during app shutdown.
+
+The Electron cache key is derived from the application's `userData` path, so apps do not
+share cache databases. Existing files in the former shared cache directory are not moved
+automatically; rebuild cache data when upgrading.
 
 ## Quick start
 
@@ -138,7 +165,7 @@ await CapacitorSqlite.open({
 | omitted / `default` | `Library/Application Support/CapacitorSQLite/<name>.db` | `<filesDir>/CapacitorSQLite/<name>.db`                                                                   | OPFS `file:<name>.db?vfs=opfs` | `userData/CapacitorSQLite/<name>.db`               | Backed up on iOS and Android by default; Electron `userData` may be cloud-backed by the OS/user environment |
 | `library`           | `Library/Application Support/CapacitorSQLite/<name>.db` | `<filesDir>/CapacitorSQLite/<name>.db`                                                                   | OPFS fallback                  | `userData/CapacitorSQLite/<name>.db`               | Same as `default`; recommended for persistent app databases                                                 |
 | `documents`         | `Documents/CapacitorSQLite/<name>.db`                   | app-specific external Documents if available, otherwise `<filesDir>/Documents/CapacitorSQLite/<name>.db` | OPFS fallback                  | Falls back to `userData/CapacitorSQLite/<name>.db` | Backed up on iOS/Android by default; use only for user-document/export-style data                           |
-| `cache`             | `Library/Caches/CapacitorSQLite/<name>.db`              | `<cacheDir>/CapacitorSQLite/<name>.db`                                                                   | OPFS fallback                  | `temp/capacitor-sqlite/CapacitorSQLite/<name>.db`  | Not intended for cloud backup; OS may delete cache data                                                     |
+| `cache`             | `Library/Caches/CapacitorSQLite/<name>.db`              | `<cacheDir>/CapacitorSQLite/<name>.db`                                                                   | OPFS fallback                  | `temp/capacitor-sqlite/<app-key>/CapacitorSQLite/<name>.db`  | Not intended for cloud backup; OS may delete cache data                                                     |
 
 > **Web:** all directory values use OPFS because browsers do not expose native app
 > directory paths to the plugin.
@@ -183,6 +210,56 @@ await CapacitorSqlite.open({
 });
 ```
 
+### Rebuilding tables with foreign keys
+
+The plugin enables `foreign_keys` on writable connections. SQLite treats `DROP TABLE`
+as an implicit DELETE for foreign-key actions. Rebuilding a referenced table can
+therefore delete child rows with `ON DELETE CASCADE`, even if the migration succeeds.
+`PRAGMA foreign_keys=OFF` **inside a migration has no effect** because each migration
+already runs in a transaction.
+
+For a rebuild, keep one connection open, stop all other application use of that
+connection, disable foreign keys **outside** a transaction, apply the migration,
+check integrity, and restore enforcement even after failure:
+
+```ts
+const database = 'myapp';
+const opened = await CapacitorSqlite.open({ database });
+if (!opened.success) throw new Error(opened.error.message);
+const disabled = await CapacitorSqlite.execute({
+  database, transaction: false, statements: ['PRAGMA foreign_keys=OFF'],
+});
+if (!disabled.success) throw new Error(disabled.error.message);
+try {
+  const migrated = await CapacitorSqlite.open({
+    database,
+    migrations: [{ version: 2, statements: [
+      'CREATE TABLE parent_new(id INTEGER PRIMARY KEY, extra TEXT)',
+      'INSERT INTO parent_new(id) SELECT id FROM parent',
+      'DROP TABLE parent',
+      'ALTER TABLE parent_new RENAME TO parent',
+    ] }],
+  });
+  if (!migrated.success) throw new Error(migrated.error.message);
+  const checked = await CapacitorSqlite.query({ database, statement: 'PRAGMA foreign_key_check' });
+  if (!checked.success) throw new Error(checked.error.message);
+  if (checked.data.rows.length) throw new Error('Foreign-key violations after migration');
+} finally {
+  const restored = await CapacitorSqlite.execute({
+    database, transaction: false, statements: ['PRAGMA foreign_keys=ON'],
+  });
+  if (!restored.success) throw new Error(restored.error.message);
+}
+```
+
+Do not close/reopen between disabling enforcement and migrating: a new connection
+re-enables foreign keys. A failed version rolls back its own changes; earlier
+versions remain committed. `foreign_key_check` runs after those commits and cannot
+undo them. On any migration/check/restore failure, stop using the database and
+handle recovery before resuming writes. Enabling foreign keys does not repair
+existing violations. Back up persistent data before schema rebuilds and preserve
+indexes, triggers, views, and all required columns in the application's migration.
+
 ## Batch inserts
 
 `runBatch()` executes multiple statements in a single native call — significantly faster than looping `run()` because it avoids repeated JS→native bridge roundtrips:
@@ -201,14 +278,17 @@ On web, persistent OPFS writes are especially sensitive to autocommit overhead. 
 `runBatch()` or an explicit transaction for groups of writes instead of many sequential
 single-row `run()` calls.
 
-With its default `transaction: true`, `runBatch()` validates the complete set before
-the first write. Android and iOS reuse one prepared statement for repeated identical SQL
-and read the connection change counter once around the complete batch; this avoids
-per-row prepare and metadata queries without changing atomicity or the returned
-`changes`. `transaction: false` deliberately retains per-statement autocommit semantics.
+With its default `transaction: true`, `runBatch()` validates every item's shape, value
+types and placeholder count before the first write. SQL is prepared in execution order
+inside the transaction, so a later statement can use a table or column created earlier
+in the same batch. Native and Electron backends reuse prepared ordinary DML statements; PRAGMA
+statements are prepared on each occurrence because preparation itself can change
+connection settings. `transaction: false` deliberately retains per-statement autocommit
+semantics, including earlier successful SQL when a later SQL preparation/execution fails.
 
 When every operation uses the same SQL, `runMany()` avoids repeating that SQL in every
-item. Android, iOS, and Electron prepare one reusable statement for the loop; Web's
+item. Android, iOS, and Electron reuse prepared statements for ordinary DML.
+Android row-producing DML with RETURNING prepares its execution per item; Web's
 sqlite-wasm Worker1 keeps the same compact request even though it does not expose a
 persistent prepared-statement handle:
 
@@ -231,6 +311,10 @@ fan-out benchmark, not a bulk-insert API: every item still has its own plugin ca
 native queue entry, result object, and callback back to JavaScript. For hundreds or
 thousands of rows, send chunks through `runBatch()` for mixed SQL or `runMany()` for one
 repeated statement.
+
+Large native inputs are decoded by Capacitor before the plugin can validate them.
+On devices with small Java heaps, an oversized batch can exhaust memory during that
+decode; chunk large imports rather than relying on the plugin to reject them safely.
 
 Mixed read/write fan-out against one database is serialized by design. A long burst of
 writes can delay reads submitted at the same time, especially on iOS where thousands of
@@ -295,6 +379,28 @@ is active, returns `TRANSACTION_FAILED`.
 
 `close()` automatically rolls back any open transaction.
 
+On Android, a failed COMMIT rolls back that transaction because the framework can
+release its connection bookkeeping while SQLite still holds the transaction. If
+recovery also fails, the connection is closed and must be reopened with `open()`;
+that exceptional close discards in-memory databases and TEMP state. Previously
+committed persistent data remains intact. Check the returned `success` before
+continuing after any transaction error.
+
+`success: false` does not guarantee zero changes for a single statement that uses SQLite's
+`OR FAIL` conflict policy: rows written before the conflicting row may stay (iOS, Web,
+Electron), while Android's single-statement wrapper rolls them back when no manual
+transaction is active. Inside a manual transaction, Android also retains partial writes
+until the caller rolls back. For an atomic write use
+an automatic batch (`runBatch`) or a manual transaction with a checked rollback.
+
+Automatic transactions own their boundaries. `execute()`, `runBatch()` and `runMany()`
+reject explicit `BEGIN`, `COMMIT`, `END`, `ROLLBACK`, `SAVEPOINT` and `RELEASE` when
+`transaction: true`; migrations always reject them. Validation happens before the first
+write so an inner `COMMIT` cannot leave a failed atomic operation partially committed.
+Use `transaction: false` when intentionally managing transaction SQL yourself, or use
+the dedicated transaction methods. Raw transaction statements and these methods share
+the same actual SQLite transaction state.
+
 ## In-memory databases
 
 Pass `':memory:'` as the database name for an ephemeral, in-memory database — useful in tests or for temporary scratch space:
@@ -357,11 +463,10 @@ The plugin exposes positional arrays, not named bind objects. The number of supp
 values must exactly equal the number of real anonymous `?` placeholders; placeholders
 inside strings, quoted identifiers, and SQL comments are ignored by the count scanner.
 
-On Android, `query()` has to use `SQLiteDatabase.rawQuery(sql, String[])`, which
-only accepts string bind arguments. To preserve SQLite types, the plugin scans SQL
-before `rawQuery()` and safely inlines numeric, boolean, and BLOB values as SQL
-literals. The scanner ignores `?` inside string literals, quoted identifiers, and
-SQL comments, and rejects unsupported numbered/named placeholder forms.
+Android binds numeric, boolean, BLOB, text and NULL values through typed native
+bindings. It does not interpolate values into SQL. The SQL scanner validates the
+anonymous-placeholder contract while ignoring string literals, quoted identifiers,
+and SQL comments.
 
 ## SQL trust boundary
 
@@ -374,6 +479,12 @@ Do not pass user-authored SQL into the plugin. Bind user data through `values`
 instead of string concatenation. Parameter binding protects values, but it does not
 make dangerous SQL commands safe if the SQL text itself is untrusted.
 
+Name/directory validation applies to the main database opened through `open()`.
+It does not restrict paths embedded in trusted SQL: `ATTACH DATABASE` can access
+other SQLite files and `VACUUM INTO` can write an export wherever the host process
+has filesystem permission. These commands are not a path-sandbox escape because
+this API does not provide an SQL sandbox.
+
 ## Platform notes
 
 |              | iOS                                  | Android                   | Web                                              | Electron                  |
@@ -382,6 +493,21 @@ make dangerous SQL commands safe if the SQL text itself is untrusted.
 | WAL mode     | ✓                                    | ✓                         | Not supported by sqlite-wasm                     | ✓                         |
 | `:memory:`   | ✓                                    | ✓                         | ✓                                                | ✓                         |
 | Min version  | iOS 15                               | API 24                    | OPFS VFS + SharedArrayBuffer support; Safari 17+ | Electron 40+ (Node 24+)   |
+
+### SQLite feature versions on Android
+
+Android uses the device's system SQLite; the minimum Android API level does not
+promise every SQL feature. Call `getVersion({ database })` on an open database and
+check its returned SQLite version before using optional syntax:
+
+| Feature | Minimum SQLite version |
+| --- | --- |
+| UPSERT (`ON CONFLICT ... DO UPDATE`) | 3.24.0 |
+| Window functions | 3.25.0 |
+| DML `RETURNING` | 3.35.0 |
+| STRICT tables | 3.37.0 |
+
+A feature's syntax support does not remove platform transport limits described below.
 
 ### Cross-platform caveats
 
@@ -392,15 +518,29 @@ correctness-sensitive code:
   `run().statement`, each `runBatch().set[].statement`, and each migration statement
   must contain exactly one SQL statement. Multiple statements packed into one string
   (`"INSERT …; INSERT …"`) return a failure on every platform.
-- **Android `query()` placeholder scanning.** Android's `rawQuery()` accepts only
-  string bind args, so the plugin scans SQL and inlines numeric, boolean, and BLOB
-  `?` values as SQL literals to preserve types. Use only anonymous `?`
+- **Android typed query bindings.** Values are bound as their SQLite types without
+  rewriting SQL. API 35+ SELECT/EXPLAIN and DML RETURNING use `SQLiteRawStatement`;
+  older releases and PRAGMAs use a typed cursor factory. Use only anonymous `?`
   placeholders; numbered/named placeholders are intentionally not supported.
+- **Android large rows.** Before API 35, each SELECT row must fit the system
+  `CursorWindow` (often around 2 MB, device-dependent), even when the total result
+  spans multiple windows. Read large TEXT/BLOB cells in bounded chunks with
+  `substr(value, ?, ?)`; SQLite offsets start at 1. API 35+ SELECT/EXPLAIN avoids
+  CursorWindow and pins a read-only transaction when no transaction is active.
+  PRAGMA retains its existing autocommit effects and cursor-based transport.
 - **Android row-returning PRAGMA statements.** Android's `execute()` uses
   `SQLiteDatabase.execSQL()`, which rejects SQL that returns a result row. For PRAGMA
   statements such as `journal_mode` that report a value, use `query()` instead; PRAGMA
   statements that do not return rows, such as `PRAGMA foreign_keys = ON`, can still be
   run through `execute()`.
+- **Android DML with `RETURNING`.** Android 15/API 35+ reads these results through
+  `SQLiteRawStatement`, executing the write once. On older Android releases with
+  SQLite `RETURNING` support, the result must fit in one system `CursorWindow` (its
+  capacity is device-dependent). An oversized result returns `QUERY_FAILED` and rolls
+  back that statement's changes instead of executing the write again for another
+  window. This also applies when `run`, `runBatch`, or `runMany` discard RETURNING
+  rows. Split large writes into smaller statements on those releases; plain SELECT
+  queries can span multiple windows but each row must fit one window.
 - **Call ordering and multi-database scheduling.** Calls against a database are serialized
   for safety. Always `await` transaction boundaries (`beginTransaction` / `commitTransaction` /
   `rollbackTransaction`) before issuing dependent work. On **both** Android and iOS, every
@@ -441,6 +581,31 @@ correctness-sensitive code:
   that counter did not change—for example after inserting into a `WITHOUT ROWID` table,
   replacing the same explicit rowid, or reusing a deleted rowid. Use `query()` with
   `RETURNING` whenever application correctness depends on the exact affected id.
+
+### Bounded reads and worker failures
+
+`query()` materializes its complete result in memory and transports it to JavaScript.
+There is no implicit row limit or streaming cursor. Bound large reads in application
+SQL, for example keyset pagination over a unique increasing primary key:
+
+```ts
+await CapacitorSqlite.query({
+  database: 'myapp',
+  statement: 'SELECT id, name FROM items WHERE id > ? ORDER BY id LIMIT ?',
+  values: [lastSeenId, 1000],
+});
+```
+
+On iOS, malformed UTF-8 in a TEXT value is decoded with U+FFFD replacements instead
+of failing the entire query. Query `CAST(value AS BLOB)` when the original bytes matter.
+
+On web worker `error`/`messageerror`, pending calls fail, all connection handles become
+invalid, and further operations require explicit `open()`. A fresh worker is created
+on that reopen; `:memory:` and connection-local TEMP data are lost. Persistent OPFS
+commits remain subject to SQLite/storage guarantees. A failed write's outcome can be
+unknown: inspect persistent state before retrying it. The plugin does not replay
+writes automatically. Only worker startup has a time limit; this does not introduce
+a query timeout for long-running SQL.
 
 ## Testing
 
@@ -629,6 +794,8 @@ Statements run in a single transaction by default; pass
 `transaction: false` to keep prior successful statements if a later one fails.
 When called inside `beginTransaction()`, pass `transaction: false`;
 nested transactions return TRANSACTION_FAILED.
+Explicit transaction-control SQL requires `transaction: false`; automatic
+transaction boundaries cannot be committed or released by an item in the list.
 
 | Param         | Type                                                      |
 | ------------- | --------------------------------------------------------- |
@@ -684,6 +851,9 @@ Use this for mixed-SQL bulk writes. For one repeated statement, prefer
 `lastInsertId` is always `0`; use `run()` when you need the inserted row ID.
 When called inside `beginTransaction()`, pass `transaction: false`;
 nested transactions return TRANSACTION_FAILED.
+Shape, value types and placeholder counts are validated before the first write;
+SQL is prepared in execution order so earlier DDL can create later dependencies.
+Explicit transaction-control SQL requires `transaction: false`.
 
 | Param         | Type                                                        |
 | ------------- | ----------------------------------------------------------- |
@@ -702,7 +872,8 @@ runMany(options: RunManyOptions) => Promise<SqliteResult<RunManyResult>>
 
 Execute one parameterized statement for many value sets in one plugin call.
 Unlike `runBatch()`, the SQL text is transported and classified only once.
-Native and Electron backends retain one prepared statement for the loop;
+Native and Electron backends reuse a prepared statement for ordinary DML.
+Android DML RETURNING prepares the row-producing execution per item;
 sqlite-wasm Worker1 does not expose persistent statement handles, but still
 benefits from the compact request shape. All value sets are validated before
 the first write.
@@ -717,6 +888,7 @@ The operation is atomic by default. Pass `transaction: false` to preserve
 successful earlier executions if a later execution fails. `lastInsertId`
 on the aggregate result is always `0`; opt into `returnResults` when each
 execution's inserted row ID is required.
+Explicit transaction-control SQL requires `transaction: false`.
 
 | Param         | Type                                                      |
 | ------------- | --------------------------------------------------------- |
@@ -742,6 +914,9 @@ Numbered and named placeholders are not guaranteed across platforms.
 INTEGER result values outside JavaScript's safe integer range are returned
 as strings rather than imprecise numbers.
 Column names become object keys. Results are in `data.rows`.
+Android before API 35 requires DML RETURNING results to fit in one system
+CursorWindow; oversized results return QUERY_FAILED and roll back that statement.
+API 35+ streams DML results without replaying the write.
 
 | Param         | Type                                                  |
 | ------------- | ----------------------------------------------------- |
@@ -831,20 +1006,20 @@ rollbackTransaction(options: { database: string; }) => Promise<SqliteResult>
 
 #### OpenOptions
 
-| Prop             | Type                                                        | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| ---------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`database`**   | <code>string</code>                                         | Database file name (without extension). On iOS and Electron, open database registry keys are matched case-insensitively to avoid two handles pointing at the same file on case-insensitive filesystems.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| **`readonly`**   | <code>boolean</code>                                        | When `true`, opens the database in read-only mode. Read operations are allowed, while write operations (`execute`, `run`, `runBatch`, `runMany`, `vacuum`, write transactions, and migrations) return a failure. Attempting to reopen an already-open database with a different `readonly` value or `directory` returns DB_ALREADY_OPEN.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| **`directory`**  | <code><a href="#sqlitedirectory">SqliteDirectory</a></code> | Logical storage location for the database file. Raw filesystem paths are not accepted. - `default` / omitted: recommended persistent app storage - iOS: `Library/Application Support/CapacitorSQLite/` - Android: `&lt;filesDir&gt;/CapacitorSQLite/` - Electron: `app.getPath('userData')/CapacitorSQLite/` - Web: OPFS (`file:&lt;name&gt;.db?vfs=opfs`) - `documents`: user-document location where appropriate - iOS: `Documents/CapacitorSQLite/` - Android: app-specific external Documents if available, otherwise `&lt;filesDir&gt;/Documents/CapacitorSQLite/` - Electron: falls back to `userData` to avoid placing app databases in the user's Documents folder - Web: OPFS fallback - `library`: persistent app support data - iOS: `Library/Application Support/CapacitorSQLite/` - Android: `&lt;filesDir&gt;/CapacitorSQLite/` - Electron: `userData/CapacitorSQLite/` - Web: OPFS fallback - `cache`: rebuildable data only; the OS may delete it - iOS: `Library/Caches/CapacitorSQLite/` - Android: `&lt;cacheDir&gt;/CapacitorSQLite/` - Electron: `temp/capacitor-sqlite/CapacitorSQLite/` - Web: OPFS fallback `:memory:` databases ignore this option. |
-| **`migrations`** | <code>Migration[]</code>                                    | When provided the plugin reads `PRAGMA user_version`, then runs every migration whose `version` is greater than the stored value, in order. After all migrations complete it writes the highest version back. Returns MIGRATION_FAILED if any entry is malformed, versions are duplicated, or a statement fails.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Prop             | Type                                                        | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ---------------- | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`database`**   | <code>string</code>                                         | Database file name (without extension). On iOS and Electron, open database registry keys are matched case-insensitively to avoid two handles pointing at the same file on case-insensitive filesystems.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| **`readonly`**   | <code>boolean</code>                                        | When `true`, opens the database in read-only mode. Read operations are allowed, while write operations (`execute`, `run`, `runBatch`, `runMany`, `vacuum`, write transactions, and migrations) return a failure. Attempting to reopen an already-open database with a different `readonly` value or `directory` returns DB_ALREADY_OPEN.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| **`directory`**  | <code><a href="#sqlitedirectory">SqliteDirectory</a></code> | Logical storage location for the database file. Raw filesystem paths are not accepted. - `default` / omitted: recommended persistent app storage - iOS: `Library/Application Support/CapacitorSQLite/` - Android: `&lt;filesDir&gt;/CapacitorSQLite/` - Electron: `app.getPath('userData')/CapacitorSQLite/` - Web: OPFS (`file:&lt;name&gt;.db?vfs=opfs`) - `documents`: user-document location where appropriate - iOS: `Documents/CapacitorSQLite/` - Android: app-specific external Documents if available, otherwise `&lt;filesDir&gt;/Documents/CapacitorSQLite/` - Electron: falls back to `userData` to avoid placing app databases in the user's Documents folder - Web: OPFS fallback - `library`: persistent app support data - iOS: `Library/Application Support/CapacitorSQLite/` - Android: `&lt;filesDir&gt;/CapacitorSQLite/` - Electron: `userData/CapacitorSQLite/` - Web: OPFS fallback - `cache`: rebuildable data only; the OS may delete it - iOS: `Library/Caches/CapacitorSQLite/` - Android: `&lt;cacheDir&gt;/CapacitorSQLite/` - Electron: `temp/capacitor-sqlite/&lt;app-key&gt;/CapacitorSQLite/` - Web: OPFS fallback `:memory:` databases ignore this option. |
+| **`migrations`** | <code>Migration[]</code>                                    | When provided the plugin reads `PRAGMA user_version`, then runs every migration whose `version` is greater than the stored value, in order. After all migrations complete it writes the highest version back. Returns MIGRATION_FAILED if any entry is malformed, versions are duplicated, or a statement fails.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
 
 #### Migration
 
-| Prop             | Type                  | Description                                                                                             |
-| ---------------- | --------------------- | ------------------------------------------------------------------------------------------------------- |
-| **`version`**    | <code>number</code>   | Target schema version. Must be unique within an `open()` call. Migrations run in ascending order.       |
-| **`statements`** | <code>string[]</code> | SQL statements executed when upgrading to this version. Each string must contain exactly one statement. |
+| Prop             | Type                  | Description                                                                                                                                                   |
+| ---------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`version`**    | <code>number</code>   | Target schema version. Must be unique within an `open()` call. Migrations run in ascending order.                                                             |
+| **`statements`** | <code>string[]</code> | SQL statements executed when upgrading to this version. Each string must contain exactly one statement; explicit transaction-control statements are rejected. |
 
 
 #### ExecuteOptions
@@ -979,11 +1154,11 @@ buffer as needed.
 
 #### QueryOptions
 
-| Prop            | Type                                                  | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| --------------- | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`database`**  | <code>string</code>                                   |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| **`statement`** | <code>string</code>                                   | Result-producing statement using anonymous `?` placeholders for bound values.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| **`values`**    | <code><a href="#sqlitevalues">SQLiteValues</a></code> | Positional values bound to anonymous `?` placeholders, in order. The value count must exactly match the placeholder count; `?` inside SQL strings, quoted identifiers, and comments is not counted. `number` values must be finite; integer `number` values must be within `Number.MAX_SAFE_INTEGER`. BLOB values should use <a href="#uint8array">`Uint8Array`</a>. Android/iOS transport them through a private tagged base64 envelope; Web/Electron retain the typed array. On Android, `query()` uses a small SQL scanner before calling `rawQuery(String[])` so numeric, boolean, and BLOB values keep their SQLite types. The scanner ignores `?` inside strings, quoted identifiers, and SQL comments, and rejects unsupported numbered/named placeholder forms. |
+| Prop            | Type                                                  | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| --------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`database`**  | <code>string</code>                                   |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| **`statement`** | <code>string</code>                                   | Result-producing statement using anonymous `?` placeholders for bound values.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| **`values`**    | <code><a href="#sqlitevalues">SQLiteValues</a></code> | Positional values bound to anonymous `?` placeholders, in order. The value count must exactly match the placeholder count; `?` inside SQL strings, quoted identifiers, and comments is not counted. `number` values must be finite; integer `number` values must be within `Number.MAX_SAFE_INTEGER`. BLOB values should use <a href="#uint8array">`Uint8Array`</a>. Android/iOS transport them through a private tagged base64 envelope; Web/Electron retain the typed array. Android binds typed values without rewriting SQL. API 35+ SELECT/EXPLAIN and DML RETURNING use SQLiteRawStatement; older releases and PRAGMAs use a typed cursor factory. A SELECT row on Android before API 35 must fit the system CursorWindow; fetch large TEXT/BLOB cells in chunks with substr(). |
 
 
 ### Type Aliases

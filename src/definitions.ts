@@ -5,7 +5,7 @@ export type SqliteDirectory = 'default' | 'documents' | 'library' | 'cache';
 export interface Migration {
   /** Target schema version. Must be unique within an `open()` call. Migrations run in ascending order. */
   version: number;
-  /** SQL statements executed when upgrading to this version. Each string must contain exactly one statement. */
+  /** SQL statements executed when upgrading to this version. Each string must contain exactly one statement; explicit transaction-control statements are rejected. */
   statements: string[];
 }
 
@@ -48,7 +48,7 @@ export interface OpenOptions {
    * - `cache`: rebuildable data only; the OS may delete it
    *   - iOS: `Library/Caches/CapacitorSQLite/`
    *   - Android: `<cacheDir>/CapacitorSQLite/`
-   *   - Electron: `temp/capacitor-sqlite/CapacitorSQLite/`
+   *   - Electron: `temp/capacitor-sqlite/<app-key>/CapacitorSQLite/`
    *   - Web: OPFS fallback
    *
    * `:memory:` databases ignore this option.
@@ -147,10 +147,10 @@ export interface QueryOptions {
    * BLOB values should use `Uint8Array`. Android/iOS transport them through a
    * private tagged base64 envelope; Web/Electron retain the typed array.
    *
-   * On Android, `query()` uses a small SQL scanner before calling
-   * `rawQuery(String[])` so numeric, boolean, and BLOB values keep their SQLite
-   * types. The scanner ignores `?` inside strings, quoted identifiers, and SQL
-   * comments, and rejects unsupported numbered/named placeholder forms.
+   * Android binds typed values without rewriting SQL. API 35+ SELECT/EXPLAIN
+   * and DML RETURNING use SQLiteRawStatement; older releases and PRAGMAs use a
+   * typed cursor factory. A SELECT row on Android before API 35 must fit the
+   * system CursorWindow; fetch large TEXT/BLOB cells in chunks with substr().
    */
   values?: SQLiteValues;
 }
@@ -242,6 +242,8 @@ export interface CapacitorSqlitePlugin {
    * `transaction: false` to keep prior successful statements if a later one fails.
    * When called inside `beginTransaction()`, pass `transaction: false`;
    * nested transactions return TRANSACTION_FAILED.
+   * Explicit transaction-control SQL requires `transaction: false`; automatic
+   * transaction boundaries cannot be committed or released by an item in the list.
    */
   execute(options: ExecuteOptions): Promise<SqliteResult<{ changes: number }>>;
 
@@ -273,13 +275,17 @@ export interface CapacitorSqlitePlugin {
    * `lastInsertId` is always `0`; use `run()` when you need the inserted row ID.
    * When called inside `beginTransaction()`, pass `transaction: false`;
    * nested transactions return TRANSACTION_FAILED.
+   * Shape, value types and placeholder counts are validated before the first write;
+   * SQL is prepared in execution order so earlier DDL can create later dependencies.
+   * Explicit transaction-control SQL requires `transaction: false`.
    */
   runBatch(options: RunBatchOptions): Promise<SqliteResult<{ changes: number; lastInsertId: number }>>;
 
   /**
    * Execute one parameterized statement for many value sets in one plugin call.
    * Unlike `runBatch()`, the SQL text is transported and classified only once.
-   * Native and Electron backends retain one prepared statement for the loop;
+   * Native and Electron backends reuse a prepared statement for ordinary DML.
+   * Android DML RETURNING prepares the row-producing execution per item;
    * sqlite-wasm Worker1 does not expose persistent statement handles, but still
    * benefits from the compact request shape. All value sets are validated before
    * the first write.
@@ -294,6 +300,7 @@ export interface CapacitorSqlitePlugin {
    * successful earlier executions if a later execution fails. `lastInsertId`
    * on the aggregate result is always `0`; opt into `returnResults` when each
    * execution's inserted row ID is required.
+   * Explicit transaction-control SQL requires `transaction: false`.
    */
   runMany(options: RunManyOptions): Promise<SqliteResult<RunManyResult>>;
 
@@ -307,6 +314,9 @@ export interface CapacitorSqlitePlugin {
    * INTEGER result values outside JavaScript's safe integer range are returned
    * as strings rather than imprecise numbers.
    * Column names become object keys. Results are in `data.rows`.
+   * Android before API 35 requires DML RETURNING results to fit in one system
+   * CursorWindow; oversized results return QUERY_FAILED and roll back that statement.
+   * API 35+ streams DML results without replaying the write.
    */
   query<T = Record<string, unknown>>(options: QueryOptions): Promise<SqliteResult<{ rows: T[] }>>;
 

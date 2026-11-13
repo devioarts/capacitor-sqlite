@@ -1,5 +1,4 @@
 import Foundation
-import SQLite3
 
 extension Database {
     // Validation, transaction state, optional per-item metadata, and two error
@@ -20,22 +19,8 @@ extension Database {
             throw DatabaseError.invalidParams("runMany: 'values' must be a non-empty array of value arrays")
         }
 
-        let prepared: SQLiteHelpers.PreparedRunStatement
-        do {
-            prepared = try SQLiteHelpers.PreparedRunStatement(
-                db: handle,
-                sql: sql,
-                values: valueSets[0],
-                bindInitialValues: false
-            )
-            // Validate every bind before the first write.
-            for values in valueSets { try prepared.validate(values: values) }
-        } catch SQLiteError.invalidParams(let message) {
-            throw DatabaseError.invalidParams(message)
-        } catch {
-            throw DatabaseError.run("runMany validation failed: \(error)")
-        }
-        defer { prepared.close() }
+        if transaction { try requireManagedTransactionStatement(sql) }
+        let normalizedValueSets = try validateRunManyValues(sql: sql, valueSets: valueSets)
 
         if transaction && inTransaction {
             throw DatabaseError.transaction("runMany: a transaction is already active on '\(name)'")
@@ -44,8 +29,13 @@ extension Database {
         var results: [(changes: Int, lastInsertId: Int64)]? = returnResults ? [] : nil
         if transaction { try beginTransactionUnsafe() }
         do {
-            for values in valueSets {
-                try prepared.bind(values: values)
+            // Even preparation of PRAGMA must happen inside the transaction we own.
+            let prepared = try SQLiteHelpers.PreparedRunStatement(
+                db: handle, sql: sql, normalizedValues: normalizedValueSets[0], bindInitialValues: false
+            )
+            defer { prepared.close() }
+            for values in normalizedValueSets {
+                try prepared.bindNormalizedPrevalidated(values: values)
                 if returnResults {
                     results?.append(try prepared.executeWithMetadata())
                 } else {
@@ -59,9 +49,20 @@ extension Database {
             if transaction { try? rollbackTransactionUnsafe() }
             throw DatabaseError.invalidParams(message)
         } catch {
-            inTransaction = sqlite3_get_autocommit(handle) == 0
             if transaction { try? rollbackTransactionUnsafe() }
-            throw DatabaseError.run("\(error)")
+            throw DatabaseError.run((error as? SQLiteError)?.message ?? "\(error)")
+        }
+    }
+
+    private func validateRunManyValues(sql: String, valueSets: [[Any]]) throws -> [SQLiteBindValues] {
+        do {
+            let normalized = try valueSets.map(SQLiteHelpers.normalizeBindValues)
+            for values in normalized { try SQLiteHelpers.validateRunInput(sql: sql, valueCount: values.count) }
+            return normalized
+        } catch SQLiteError.invalidParams(let message) {
+            throw DatabaseError.invalidParams(message)
+        } catch {
+            throw DatabaseError.run("runMany validation failed: \(error)")
         }
     }
 }

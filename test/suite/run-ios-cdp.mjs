@@ -8,12 +8,6 @@
 // (with the CLI hook from src/cliHook.ts) is installed and launched.
 // See package.json's "test:suite:ios" script, which does all of this.
 //
-// Each call below opens a fresh Remote Web Inspector connection rather than
-// holding one connection open for the whole run: the RPC channel has been
-// observed to occasionally stop responding mid-poll on a long-lived
-// connection, while short-lived connect → evaluate → disconnect round trips
-// have been reliable in testing.
-//
 // Usage: node test/suite/run-ios-cdp.mjs [--stress|--stress-only|--diagnostics|--diagnostics-only] [--timeout-ms=900000]
 
 import { execFileSync } from 'node:child_process';
@@ -23,7 +17,8 @@ import { execFileSync } from 'node:child_process';
 const { logger: appiumSupportLogger } = await import('@appium/support');
 appiumSupportLogger.log.level = 'warn';
 
-const BUNDLE_ID = 'com.devioarts.example.sqlite';
+// Match capacitor.config.ts; the old example ID attached to a different/missing app on clean builds.
+const BUNDLE_ID = 'com.devioarts.pg.cap';
 const PER_CALL_TIMEOUT_MS = 15_000;
 const POLL_INTERVAL_MS = 1_500;
 const stressOnly = process.argv.includes('--stress-only');
@@ -58,32 +53,10 @@ function findSimulatorOsVersion(udid) {
 }
 
 function findWebInspectorSocket(udid) {
-  // webinspectord_sim runs one process per booted simulator; its open file list
-  // includes both a reference to the simulator's own data directory (to identify
-  // which simulator it belongs to) and the unix socket it's listening on.
-  const out = sh('lsof', ['-c', 'webinspectord']);
-  const lines = out.split('\n');
-  let currentPid = null;
-  let matchedPid = null;
-  for (const line of lines) {
-    const cols = line.trim().split(/\s+/);
-    if (cols[0] === 'COMMAND') continue;
-    const pid = cols[1];
-    if (pid !== currentPid) {
-      currentPid = pid;
-      matchedPid = null;
-    }
-    if (line.includes(`Devices/${udid}/`)) {
-      matchedPid = pid;
-    }
-    if (matchedPid === pid && line.includes('webinspectord_sim.socket')) {
-      const socketMatch = line.match(/(\/private\/var\/tmp\/[^\s]+webinspectord_sim\.socket)/);
-      if (socketMatch) return socketMatch[1];
-    }
-  }
-  throw new Error(
-    `Could not find the com.apple.webinspectord_sim.socket for simulator ${udid}. Is it booted and running an app?`,
-  );
+  // The launchd socket exists even when the on-demand inspector process is stopped.
+  const socketPath = sh('xcrun', ['simctl', 'getenv', udid, 'RWI_LISTEN_SOCKET']).trim();
+  if (!socketPath) throw new Error(`Web Inspector socket is not available for simulator ${udid}`);
+  return socketPath;
 }
 
 function withTimeout(promise, ms, label) {
@@ -102,7 +75,7 @@ const quietLog = {
   },
 };
 
-async function evalOnce(socketPath, platformVersion, expression) {
+async function withPage(socketPath, platformVersion, fn) {
   const { RemoteDebugger } = await import('appium-remote-debugger');
   const rd = new RemoteDebugger({ bundleId: BUNDLE_ID, isSafari: false, socketPath, platformVersion, log: quietLog });
   try {
@@ -117,36 +90,51 @@ async function evalOnce(socketPath, platformVersion, expression) {
       PER_CALL_TIMEOUT_MS,
       'selectPage',
     );
-    return await withTimeout(rd.execute(expression), PER_CALL_TIMEOUT_MS, 'execute');
+    return await fn(rd);
   } finally {
     await rd.disconnect().catch(() => undefined);
   }
 }
 
+function evalOnce(socketPath, platformVersion, expression) {
+  return withPage(socketPath, platformVersion, (rd) =>
+    withTimeout(rd.execute(expression), PER_CALL_TIMEOUT_MS, 'execute'),
+  );
+}
+
 async function runAsync(socketPath, platformVersion, expression, resultVar) {
-  // The remote debugger's result decoder rejects bare booleans/undefined, so
-  // every evaluated expression here must resolve to a string or object.
-  await evalOnce(
-    socketPath,
-    platformVersion,
-    `
-      window.${resultVar} = undefined;
-      (${expression}).then((r) => { window.${resultVar} = JSON.stringify(r); });
+  // Reconnecting during the load races Web Inspector page initialization.
+  return withPage(socketPath, platformVersion, async (rd) => {
+    const evaluate = (script) => withTimeout(rd.execute(script), PER_CALL_TIMEOUT_MS, 'execute');
+    const errorVar = `${resultVar}Error`;
+    // The remote debugger's result decoder rejects bare booleans/undefined, so
+    // every evaluated expression here must resolve to a string or object.
+    await evaluate(
+      `
+      window.${resultVar} = null;
+      window.${errorVar} = null;
+      Promise.resolve(${expression})
+        .then((r) => { window.${resultVar} = JSON.stringify(r); })
+        .catch((err) => {
+          window.${errorVar} = String(err && (err.stack || err.message) || err);
+        });
       'started';
     `,
-  );
-  const deadline = Date.now() + TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    // Always wrap in an object: a bare `null`/string/boolean result trips up
-    // the remote debugger's response decoder (it calls Object.hasOwn on it).
-    // Note: rd.execute() already JSON-parses string results that look like
-    // valid JSON, so `wrapped` here is already a plain object, not a string.
-    const wrapped = await evalOnce(socketPath, platformVersion, `JSON.stringify({ v: window.${resultVar} ?? null })`);
-    const inner = wrapped.v;
-    if (inner !== null) return JSON.parse(inner);
-    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-  }
-  throw new Error(`Timed out waiting for ${resultVar}`);
+    );
+    const deadline = Date.now() + TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      // Always wrap in an object: a bare `null`/string/boolean result trips up
+      // the remote debugger's response decoder (it calls Object.hasOwn on it).
+      // Note: rd.execute() already JSON-parses string results that look like
+      // valid JSON, so `wrapped` here is already a plain object, not a string.
+      const wrapped = await evaluate(`JSON.stringify({ v: window.${resultVar}, error: window.${errorVar} })`);
+      if (wrapped.error) throw new Error(wrapped.error);
+      const inner = wrapped.v;
+      if (inner !== null) return JSON.parse(inner);
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    }
+    throw new Error(`Timed out waiting for ${resultVar}`);
+  });
 }
 
 async function main() {
@@ -154,7 +142,16 @@ async function main() {
   const platformVersion = findSimulatorOsVersion(udid);
   console.log(`Using booted simulator ${udid} (iOS ${platformVersion})`);
 
-  const socketPath = findWebInspectorSocket(udid);
+  let socketPath;
+  for (let attempt = 0; attempt < 30; attempt++) {
+    try {
+      socketPath = findWebInspectorSocket(udid);
+      break;
+    } catch (error) {
+      if (attempt === 29) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
   console.log(`Found Web Inspector socket: ${socketPath}`);
 
   let ready = null;

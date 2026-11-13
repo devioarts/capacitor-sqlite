@@ -60,12 +60,10 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
   }
 
   /**
-   * Terminates the worker thread that runs all SQLite work, failing any in-flight
-   * requests with `NOT_AVAILABLE`. Not part of `CapacitorSqlitePlugin` — call it
-   * explicitly from your Electron main process, typically from `app.on('before-quit')`,
-   * to release the worker (and let SQLite flush its WAL) before the process exits.
-   * A later call automatically spawns a fresh worker on demand, so this is also safe to
-   * use to recover from a worker stuck in a bad state.
+   * Waits for queued SQLite work, closes all connections, and terminates the worker.
+   * Not part of `CapacitorSqlitePlugin`; await it from your Electron main process
+   * before allowing the app to quit. A later call spawns a fresh worker on demand.
+   * This is graceful shutdown: it cannot interrupt a running or stuck SQL statement.
    */
   async dispose(): Promise<void> {
     if (this.disposing) return this.disposing;
@@ -125,7 +123,7 @@ export class CapacitorSqlite implements CapacitorSqlitePlugin {
   }
 
   async query<T = Record<string, unknown>>(options: QueryOptions): Promise<SqliteResult<{ rows: T[] }>> {
-    if ((options as unknown as Record<string, unknown>).__capacitorSqliteCompactRows === true) {
+    if ((options as unknown as Record<string, unknown> | null | undefined)?.__capacitorSqliteCompactRows === true) {
       // Internal renderer request: keep the columnar representation through both
       // structured-clone boundaries. src/index.ts restores public row objects.
       return this.request('__queryCompact', options) as Promise<SqliteResult<{ rows: T[] }>>;

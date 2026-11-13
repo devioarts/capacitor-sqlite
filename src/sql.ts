@@ -1,4 +1,10 @@
 const SQL_CACHE_LIMIT = 256;
+const SQLITE_WHITESPACE = /[\t-\r \uFEFF]/;
+
+// SQLite permits non-ASCII identifiers and `$` after their first character.
+// Read whole identifiers so `a$b` is not a bind and `end$tag` is not trigger END.
+const IDENTIFIER_START = /[A-Za-z_\u0080-\uFFFF]/;
+const IDENTIFIER_PART = /[A-Za-z0-9_$\u0080-\uFFFF]/;
 
 function cached<T>(cache: Map<string, T>, sql: string, compute: () => T): T {
   const hit = cache.get(sql);
@@ -17,7 +23,6 @@ function cached<T>(cache: Map<string, T>, sql: string, compute: () => T): T {
 const multipleStatementCache = new Map<string, boolean>();
 const statementTypeCache = new Map<string, string>();
 const conflictCache = new Map<string, boolean>();
-const rollbackConflictCache = new Map<string, boolean>();
 const bindParameterCache = new Map<string, { count: number; error?: string }>();
 
 export function hasMultipleSqlStatements(sql: string): boolean {
@@ -25,60 +30,56 @@ export function hasMultipleSqlStatements(sql: string): boolean {
 }
 
 function computeHasMultipleSqlStatements(sql: string): boolean {
-  // Tracks BEGIN/CASE ... END nesting (trigger bodies, CASE expressions) so a
-  // semicolon inside one of these blocks isn't mistaken for a statement
-  // separator. Only a semicolon seen while this is back at 0 is a real split.
-  let blockDepth = 0;
-  // Tracks '(' / ')' nesting. SQLite does not reserve BEGIN as a keyword, so
-  // `CREATE TABLE t(begin TEXT)` is valid SQL — without this, the bare `begin`
-  // column name below would be misread as a trigger-body opener and swallow the
-  // semicolon after it. A genuine trigger BEGIN always appears outside any
-  // parentheses (after `ON ...`/`WHEN ...`/`FOR EACH ROW`), so gating on
-  // `parenDepth === 0` filters out identifier occurrences without affecting
-  // real trigger bodies.
-  let parenDepth = 0;
-  // `BEGIN` as the very first token is a transaction statement (`BEGIN;`,
-  // `BEGIN TRANSACTION;`), not a trigger-body opener — it must not swallow the
-  // semicolon that follows it ("BEGIN; DROP TABLE t" is two statements).
-  const firstTokenStart = skipIgnorable(sql, 0);
+  // A trigger ends at `; END;`. BEGIN/END elsewhere can be ordinary identifiers.
+  let header = 0;
+  let trigger = false;
+  let afterSemicolon = false;
+  let triggerEnd = false;
   for (let i = 0; i < sql.length; i++) {
     const ch = sql[i];
+    let token = '';
+    if (SQLITE_WHITESPACE.test(ch)) continue;
+    if (ch === '-' && sql[i + 1] === '-') {
+      i = skipLineComment(sql, i);
+      continue;
+    }
+    if (ch === '/' && sql[i + 1] === '*') {
+      i = skipBlockComment(sql, i);
+      continue;
+    }
     if (ch === "'" || ch === '"' || ch === '`') {
       i = skipQuoted(sql, i, ch);
     } else if (ch === '[') {
       i = skipBracketIdentifier(sql, i);
-    } else if (ch === '-' && sql[i + 1] === '-') {
-      i = skipLineComment(sql, i);
-    } else if (ch === '/' && sql[i + 1] === '*') {
-      i = skipBlockComment(sql, i);
-    } else if (ch === '(') {
-      parenDepth++;
-    } else if (ch === ')') {
-      if (parenDepth > 0) parenDepth--;
-    } else if (/[A-Za-z_]/.test(ch) && (i === 0 || !/[A-Za-z0-9_]/.test(sql[i - 1]))) {
-      const keyword = readKeyword(sql, i);
-      if (keyword) {
-        // A '.' immediately before rules out a qualified reference like `NEW.begin`
-        // (used in a trigger's WHEN clause, for example) — real BEGIN/CASE keywords
-        // are never preceded by a dot.
-        const isQualifiedRef = i > 0 && sql[i - 1] === '.';
-        if (
-          !isQualifiedRef &&
-          ((keyword.keyword === 'BEGIN' && i !== firstTokenStart && parenDepth === 0) ||
-            // CASE only nests inside an already-open trigger BEGIN block — a bare
-            // `case` identifier at the top level (SQLite rejects it as unquoted, but
-            // the guard should not depend on that) is otherwise inert.
-            (keyword.keyword === 'CASE' && blockDepth > 0))
-        ) {
-          blockDepth++;
-        } else if (!isQualifiedRef && keyword.keyword === 'END' && blockDepth > 0) {
-          blockDepth--;
-        }
-        i = keyword.end - 1;
-      }
-    } else if (ch === ';' && blockDepth === 0) {
-      return hasTailContent(sql, i + 1);
+    } else if (ch === ';') {
+      if (!trigger || triggerEnd) return hasTailContent(sql, i + 1);
+      afterSemicolon = true;
+      triggerEnd = false;
+      continue;
+    } else if (
+      IDENTIFIER_START.test(ch) &&
+      (i === 0 || SQLITE_WHITESPACE.test(sql[i - 1]) || !IDENTIFIER_PART.test(sql[i - 1]))
+    ) {
+      const keyword = readKeyword(sql, i)!;
+      token = keyword.keyword;
+      i = keyword.end - 1;
     }
+    if (header === 0 && token === 'EXPLAIN') {
+      header = 3;
+    } else if (header === 3 && token === 'QUERY') {
+      header = 4;
+    } else if (header === 4 && token === 'PLAN') {
+      header = 5;
+    } else if ((header === 0 || header === 3 || header === 5) && token === 'CREATE') {
+      header = 1;
+    } else if (header === 1 && (token === 'TEMP' || token === 'TEMPORARY')) {
+      header = 2;
+    } else {
+      if ((header === 1 || header === 2) && token === 'TRIGGER') trigger = true;
+      header = -1;
+    }
+    triggerEnd = afterSemicolon && token === 'END';
+    afterSemicolon = false;
   }
   return false;
 }
@@ -86,6 +87,13 @@ function computeHasMultipleSqlStatements(sql: string): boolean {
 export function assertSingleSqlStatement(sql: string, label: string): void {
   if (hasMultipleSqlStatements(sql)) {
     throw new Error(`${label} must contain exactly one SQL statement`);
+  }
+}
+
+export function assertManagedTransactionStatement(sql: string, label = 'statement'): void {
+  // Match execute/migration trimming: trailing Unicode whitespace must not hide a COMMIT from this guard.
+  if (['BEGIN', 'COMMIT', 'END', 'ROLLBACK', 'SAVEPOINT', 'RELEASE'].includes(sqlStatementType(sql.trim()))) {
+    throw new Error(`${label}: transaction-control SQL requires transaction: false`);
   }
 }
 
@@ -102,6 +110,7 @@ function scanAnonymousBindParameters(sql: string): { count: number; error?: stri
   let placeholders = 0;
   for (let i = 0; i < sql.length; i++) {
     const ch = sql[i];
+    if (SQLITE_WHITESPACE.test(ch)) continue;
     if (ch === "'" || ch === '"' || ch === '`') {
       i = skipQuoted(sql, i, ch);
     } else if (ch === '[') {
@@ -118,11 +127,13 @@ function scanAnonymousBindParameters(sql: string): { count: number; error?: stri
         };
       }
       placeholders++;
-    } else if ((ch === ':' || ch === '@' || ch === '$') && /[A-Za-z_]/.test(sql[i + 1] ?? '')) {
+    } else if ((ch === ':' || ch === '@' || ch === '$') && IDENTIFIER_PART.test(sql[i + 1] ?? '')) {
       return {
         count: placeholders,
         error: 'Only anonymous ? placeholders are supported; named placeholders are not supported',
       };
+    } else if (IDENTIFIER_START.test(ch)) {
+      i = readKeyword(sql, i)!.end - 1;
     }
   }
   return { count: placeholders };
@@ -162,30 +173,13 @@ export function isQueryResultStatement(sql: string): boolean {
 // `run-11` (UPSERT) regression-tests this; callers that need the affected row's id for an
 // UPSERT should use `query()` with a `RETURNING` clause instead.
 export function hasConflictClause(sql: string): boolean {
-  return cached(conflictCache, sql, () => hasKeyword(sql, 'CONFLICT'));
-}
-
-/**
- * Returns true for SQLite's statement-level `OR ROLLBACK` conflict policy.
- *
- * Unlike ABORT/FAIL, ROLLBACK can end an explicit transaction behind the
- * plugin's back. Backends which mirror transaction state in a boolean use this
- * signal to clear that mirror after a failed statement.
- */
-export function hasRollbackConflictClause(sql: string): boolean {
-  return cached(rollbackConflictCache, sql, () => {
-    const tokens = keywords(sql);
-    for (let i = 0; i + 1 < tokens.length; i++) {
-      if (tokens[i] === 'OR' && tokens[i + 1] === 'ROLLBACK') return true;
-    }
-    return false;
-  });
+  return cached(conflictCache, sql, () => hasKeyword(sql, 'CONFLICT', 'ON'));
 }
 
 function hasTailContent(sql: string, start: number): boolean {
   for (let i = start; i < sql.length; i++) {
     const ch = sql[i];
-    if (/\s/.test(ch) || ch === ';') {
+    if (SQLITE_WHITESPACE.test(ch) || ch === ';') {
       continue;
     }
     if (ch === '-' && sql[i + 1] === '-') {
@@ -254,7 +248,7 @@ function skipIgnorable(sql: string, start: number): number {
   let i = start;
   while (i < sql.length) {
     const ch = sql[i];
-    if (/\s/.test(ch) || ch === ';') {
+    if (SQLITE_WHITESPACE.test(ch) || ch === ';') {
       i++;
       continue;
     }
@@ -272,60 +266,47 @@ function skipIgnorable(sql: string, start: number): number {
 }
 
 function readKeyword(sql: string, start: number): { keyword: string; end: number } | null {
-  if (!/[A-Za-z_]/.test(sql[start] ?? '')) return null;
+  if (!IDENTIFIER_START.test(sql[start] ?? '')) return null;
   let end = start + 1;
-  while (end < sql.length && /[A-Za-z0-9_]/.test(sql[end])) end++;
+  while (end < sql.length && IDENTIFIER_PART.test(sql[end])) end++;
   return { keyword: sql.slice(start, end).toUpperCase(), end };
 }
 
-function hasKeyword(sql: string, target: string): boolean {
+function hasKeyword(sql: string, target: string, precededBy?: string): boolean {
+  let previous = '';
   for (let i = 0; i < sql.length; i++) {
     const ch = sql[i];
     if (ch === "'" || ch === '"' || ch === '`') {
       i = skipQuoted(sql, i, ch);
+      previous = '';
     } else if (ch === '[') {
       i = skipBracketIdentifier(sql, i);
+      previous = '';
     } else if (ch === '-' && sql[i + 1] === '-') {
       i = skipLineComment(sql, i);
     } else if (ch === '/' && sql[i + 1] === '*') {
       i = skipBlockComment(sql, i);
-    } else if (/[A-Za-z_]/.test(ch) && (i === 0 || !/[A-Za-z0-9_]/.test(sql[i - 1]))) {
+    } else if (
+      !SQLITE_WHITESPACE.test(ch) &&
+      IDENTIFIER_START.test(ch) &&
+      (i === 0 || SQLITE_WHITESPACE.test(sql[i - 1]) || !IDENTIFIER_PART.test(sql[i - 1]))
+    ) {
       const keyword = readKeyword(sql, i);
-      if (keyword?.keyword === target) return true;
+      if (keyword?.keyword === target && (!precededBy || previous === precededBy)) return true;
+      previous = keyword?.keyword ?? '';
       if (keyword) i = keyword.end - 1;
+    } else if (!SQLITE_WHITESPACE.test(ch)) {
+      previous = '';
     }
   }
   return false;
-}
-
-function keywords(sql: string): string[] {
-  const result: string[] = [];
-  for (let i = 0; i < sql.length; i++) {
-    const ch = sql[i];
-    if (ch === "'" || ch === '"' || ch === '`') {
-      i = skipQuoted(sql, i, ch);
-    } else if (ch === '[') {
-      i = skipBracketIdentifier(sql, i);
-    } else if (ch === '-' && sql[i + 1] === '-') {
-      i = skipLineComment(sql, i);
-    } else if (ch === '/' && sql[i + 1] === '*') {
-      i = skipBlockComment(sql, i);
-    } else if (/[A-Za-z_]/.test(ch) && (i === 0 || !/[A-Za-z0-9_]/.test(sql[i - 1]))) {
-      const keyword = readKeyword(sql, i);
-      if (keyword) {
-        result.push(keyword.keyword);
-        i = keyword.end - 1;
-      }
-    }
-  }
-  return result;
 }
 
 function skipIdentifier(sql: string, start: number): number {
   let i = skipIgnorable(sql, start);
   if (sql[i] === "'" || sql[i] === '"' || sql[i] === '`') return skipQuoted(sql, i, sql[i]) + 1;
   if (sql[i] === '[') return skipBracketIdentifier(sql, i) + 1;
-  while (i < sql.length && /[A-Za-z0-9_$]/.test(sql[i])) i++;
+  while (i < sql.length && IDENTIFIER_PART.test(sql[i])) i++;
   return i;
 }
 
@@ -370,7 +351,7 @@ function skipBracketIdentifier(sql: string, start: number): number {
 
 function skipLineComment(sql: string, start: number): number {
   for (let i = start + 2; i < sql.length; i++) {
-    if (sql[i] === '\n' || sql[i] === '\r') return i;
+    if (sql[i] === '\n') return i;
   }
   return sql.length - 1;
 }

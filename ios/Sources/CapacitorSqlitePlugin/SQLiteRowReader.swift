@@ -74,9 +74,8 @@ extension SQLiteHelpers {
         guard let ptr = sqlite3_column_text(stmt, index) else { return NSNull() }
         let byteCount = Int(sqlite3_column_bytes(stmt, index))
         let bytes = UnsafeBufferPointer(start: ptr, count: byteCount)
-        guard let text = String(bytes: bytes, encoding: .utf8) else {
-            throw SQLiteError.query("invalid UTF-8 text at column \(index)")
-        }
+        // swiftlint:disable:next optional_data_string_conversion
+        let text = String(decoding: bytes, as: UTF8.self)
         return encodeText(text)
     }
 

@@ -1,4 +1,4 @@
-const external = ['electron', 'node:sqlite', 'fs', 'path', 'worker_threads'];
+const external = ['electron', 'node:sqlite', 'node:crypto', 'fs', 'path', 'worker_threads'];
 
 // tsc --project electron/tsconfig.json uses rootDir: ".." (project root),
 // so output mirrors the full tree under electron/build/:

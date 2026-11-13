@@ -13,19 +13,6 @@ enum NativeBridgeValues {
         }
     }
 
-    static func decodeBatch(_ set: [[String: Any]]) throws -> [[String: Any]] {
-        try set.enumerated().map { index, item in
-            var decoded = item
-            if let rawValues = item["values"] {
-                guard let values = rawValues as? [Any] else {
-                    throw NativeBridgeValueError(message: "'set[\(index)].values' must be an array")
-                }
-                decoded["values"] = try decode(values, label: "set[\(index)].values")
-            }
-            return decoded
-        }
-    }
-
     static func decodeMany(_ valueSets: [Any]) throws -> [[Any]] {
         try valueSets.enumerated().map { index, value in
             guard let values = value as? [Any] else {

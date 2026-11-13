@@ -27,7 +27,7 @@
     "tailwindcss": "^4.3.0"
   },
   "devDependencies": {
-    "@capacitor/cli": "^8.0.0",
+    "@capacitor/cli": "^8.6.2",
     "@devioarts/capacitor-electron": "^0.3.0",
     "@eslint/js": "^10.0.0",
     "@types/node": "^24.0.0",

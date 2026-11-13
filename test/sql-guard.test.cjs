@@ -2,14 +2,49 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 
 const {
+  assertAnonymousBindParameterCount,
   assertSingleSqlStatement,
+  assertManagedTransactionStatement,
   hasConflictClause,
-  hasRollbackConflictClause,
   hasMultipleSqlStatements,
   isInsertStatement,
   isQueryResultStatement,
   sqlStatementType,
 } = require('../build/test-p0/sql.js');
+
+test('managed transactions reject only actual transaction boundaries, not trigger bodies', () => {
+  for (const sql of [
+    'BEGIN',
+    '/* comment */ COMMIT',
+    '\uFEFFCOMMIT',
+    'COMMIT\u00a0',
+    'END',
+    'ROLLBACK TO x',
+    'SAVEPOINT x',
+    'RELEASE x',
+  ]) {
+    assert.throws(() => assertManagedTransactionStatement(sql), /transaction: false/);
+  }
+  assert.doesNotThrow(() =>
+    assertManagedTransactionStatement('CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END'),
+  );
+  assert.doesNotThrow(() => assertManagedTransactionStatement('SELECT "COMMIT"'));
+});
+
+test('SQLite Unicode and dollar identifiers are not bind parameters or keyword fragments', () => {
+  for (const name of ['český', '資料', 'a$b', 'end$tag']) {
+    const sql = `WITH ${name} AS (SELECT ? AS n) SELECT n FROM ${name}`;
+    assert.equal(sqlStatementType(sql), 'SELECT');
+    assert.doesNotThrow(() => assertAnonymousBindParameterCount(sql, 1));
+  }
+  assert.equal(hasConflictClause('INSERT INTO t(conflict$flag) VALUES (?)'), false);
+  for (const placeholder of [':name', '@name', '$name', ':1', '$český', '@資料']) {
+    assert.throws(() => assertAnonymousBindParameterCount(`SELECT ${placeholder}`, 0), /named placeholders/);
+  }
+  const trigger = 'CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT end$tag FROM t; SELECT 1; END';
+  assert.equal(hasMultipleSqlStatements(trigger), false);
+  assert.equal(hasMultipleSqlStatements(`${trigger}; SELECT 2`), true);
+});
 
 test('allows a single statement with optional trailing semicolons and comments', () => {
   assert.equal(hasMultipleSqlStatements('SELECT 1'), false);
@@ -49,7 +84,9 @@ test('treats a trigger BEGIN...END body as a single statement', () => {
     false,
   );
   assert.equal(
-    hasMultipleSqlStatements("CREATE TRIGGER trg_case BEFORE UPDATE ON t BEGIN SELECT CASE WHEN NEW.x > 0 THEN 1 ELSE 0 END; END"),
+    hasMultipleSqlStatements(
+      'CREATE TRIGGER trg_case BEFORE UPDATE ON t BEGIN SELECT CASE WHEN NEW.x > 0 THEN 1 ELSE 0 END; END',
+    ),
     false,
   );
   // Must not throw — this is exactly one SQL statement despite the internal semicolons.
@@ -75,10 +112,7 @@ test('does not mistake identifiers containing BEGIN/END/CASE as keywords', () =>
     hasMultipleSqlStatements('CREATE TABLE t (begin_date TEXT, end_date TEXT, usecase TEXT, casefile TEXT)'),
     false,
   );
-  assert.equal(
-    hasMultipleSqlStatements("INSERT INTO t (begin_date, end_date, usecase) VALUES ('a', 'b', 'c')"),
-    false,
-  );
+  assert.equal(hasMultipleSqlStatements("INSERT INTO t (begin_date, end_date, usecase) VALUES ('a', 'b', 'c')"), false);
   assert.equal(
     hasMultipleSqlStatements(
       'CREATE TRIGGER trg AFTER INSERT ON t BEGIN INSERT INTO log (usecase_note) VALUES (NEW.usecase); END',
@@ -86,10 +120,7 @@ test('does not mistake identifiers containing BEGIN/END/CASE as keywords', () =>
     false,
   );
   // A real trailing statement after such identifiers must still be detected.
-  assert.equal(
-    hasMultipleSqlStatements('CREATE TABLE t (begin_date TEXT, end_date TEXT); SELECT 1'),
-    true,
-  );
+  assert.equal(hasMultipleSqlStatements('CREATE TABLE t (begin_date TEXT, end_date TEXT); SELECT 1'), true);
 });
 
 test('a leading BEGIN (transaction) does not mask a following statement', () => {
@@ -136,7 +167,7 @@ test('does not mistake a bare begin/case identifier for a trigger-body opener', 
   );
   assert.equal(
     hasMultipleSqlStatements(
-      "CREATE TRIGGER trg_nested AFTER INSERT ON t BEGIN INSERT INTO log VALUES (CASE WHEN NEW.a THEN (CASE WHEN NEW.b THEN 1 ELSE 2 END) ELSE 3 END); END",
+      'CREATE TRIGGER trg_nested AFTER INSERT ON t BEGIN INSERT INTO log VALUES (CASE WHEN NEW.a THEN (CASE WHEN NEW.b THEN 1 ELSE 2 END) ELSE 3 END); END',
     ),
     false,
   );
@@ -159,7 +190,7 @@ test('handles a trigger with a WHEN clause and nested CASE expressions', () => {
   );
   assert.equal(
     hasMultipleSqlStatements(
-      "CREATE TRIGGER trg_nested AFTER INSERT ON t BEGIN INSERT INTO log VALUES (CASE WHEN NEW.a THEN (CASE WHEN NEW.b THEN 1 ELSE 2 END) ELSE 3 END); END",
+      'CREATE TRIGGER trg_nested AFTER INSERT ON t BEGIN INSERT INTO log VALUES (CASE WHEN NEW.a THEN (CASE WHEN NEW.b THEN 1 ELSE 2 END) ELSE 3 END); END',
     ),
     false,
   );
@@ -213,11 +244,57 @@ test('detects an UPSERT conflict clause so run() can avoid a stale lastInsertId'
   assert.equal(hasConflictClause('INSERT INTO t VALUES (1) /* on conflict */'), false);
 });
 
-test('detects OR ROLLBACK only as real adjacent SQL tokens', () => {
-  assert.equal(hasRollbackConflictClause('INSERT OR ROLLBACK INTO t VALUES (1)'), true);
-  assert.equal(hasRollbackConflictClause('UPDATE OR ROLLBACK t SET v = 1'), true);
-  assert.equal(hasRollbackConflictClause("INSERT INTO t VALUES ('OR ROLLBACK')"), false);
-  assert.equal(hasRollbackConflictClause('INSERT INTO t VALUES (1) /* OR ROLLBACK */'), false);
-  assert.equal(hasRollbackConflictClause('INSERT OR\n-- gap\nROLLBACK INTO t VALUES (1)'), true);
-  assert.equal(hasRollbackConflictClause('INSERT OR FAIL INTO t VALUES (1)'), false);
+const ordinaryIdentifierSql = [
+  'SELECT begin FROM t',
+  'SELECT end FROM t',
+  'SELECT t . begin FROM t',
+  'UPDATE t SET begin = 1',
+  'DELETE FROM begin',
+  'DROP TABLE begin',
+  'CREATE TABLE begin(begin INTEGER, end INTEGER)',
+  'SELECT CASE WHEN 1 THEN 2 ELSE 3 END',
+];
+const triggerBoundarySql = [
+  'CREATE TRIGGER begin AFTER INSERT ON t BEGIN SELECT 1; END',
+  'CREATE TEMP TRIGGER tr AFTER INSERT ON t BEGIN SELECT end FROM t; SELECT begin FROM t; END',
+  'CREATE TEMPORARY TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; /* gap */ END',
+  'CREATE TRIGGER tr AFTER UPDATE OF begin,end ON t WHEN NEW.begin > 0 BEGIN SELECT NEW.end; END',
+  'CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT CASE WHEN NEW.begin THEN CASE WHEN NEW.end THEN 1 ELSE 2 END ELSE 3 END; END',
+  'CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT \'; END;\', "begin", `end`, [case]; END',
+  'CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; -- END; hidden\nSELECT 2; END',
+  'EXPLAIN CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END',
+  'EXPLAIN QUERY PLAN CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END',
+];
+
+for (const sql of ordinaryIdentifierSql) {
+  test(`ordinary identifiers preserve the statement boundary: ${sql}`, () => {
+    assert.equal(hasMultipleSqlStatements(`${sql}; /* gap */ DELETE FROM t`), true);
+    assert.equal(hasMultipleSqlStatements(`/* lead */ ${sql}; -- done`), false);
+  });
+}
+for (const sql of triggerBoundarySql) {
+  test(`trigger boundaries survive keyword identifiers: ${sql}`, () => {
+    assert.equal(hasMultipleSqlStatements(`/* lead */ ${sql}; /* done */`), false);
+    assert.equal(hasMultipleSqlStatements(`${sql}; /* gap */ DELETE FROM t`), true);
+  });
+}
+
+test('shared SQL corpus agrees across TS, Kotlin and both Swift scanners', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const corpus = fs.readFileSync(
+    path.join(__dirname, '../ios/Tests/CapacitorSqlitePluginTests/Fixtures/sql-guard.tsv'),
+    'utf8',
+  );
+  for (const line of corpus.split('\n').filter((line) => line && !line.startsWith('#'))) {
+    const [name, encodedSql, encodedType, multiple, conflict, managed, count] = line.split('\t');
+    const sql = Buffer.from(encodedSql, 'base64').toString('utf8');
+    assert.equal(sqlStatementType(sql), Buffer.from(encodedType, 'base64').toString('utf8'), name);
+    assert.equal(hasMultipleSqlStatements(sql), multiple === 'true', name);
+    assert.equal(hasConflictClause(sql), conflict === 'true', name);
+    if (Number(count) < 0) assert.throws(() => assertAnonymousBindParameterCount(sql, 0), /named placeholders/, name);
+    else assert.doesNotThrow(() => assertAnonymousBindParameterCount(sql, Number(count)), name);
+    if (managed === 'true') assert.throws(() => assertManagedTransactionStatement(sql), /transaction/, name);
+    else assert.doesNotThrow(() => assertManagedTransactionStatement(sql), name);
+  }
 });

@@ -44,13 +44,11 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
-    lintOptions {
-        abortOnError = false
-    }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_21
         targetCompatibility JavaVersion.VERSION_21
     }
+    sourceSets.test.resources.srcDir('../ios/Tests/CapacitorSqlitePluginTests/Fixtures')
     testOptions {
         unitTests.all {
             useJUnitPlatform()

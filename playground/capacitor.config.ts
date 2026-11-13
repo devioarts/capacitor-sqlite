@@ -1,7 +1,7 @@
 import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
-  appId: 'com.devioarts.capacitor.sqlite',
+  appId: 'com.devioarts.pg.cap',
   appName: 'cap-sqlite',
   webDir: 'dist',
   loggingBehavior: 'none'

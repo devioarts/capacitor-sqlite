@@ -21,9 +21,9 @@ import type {
 import { findDuplicateMigrationVersion, isValidMigrationVersion, MAX_MIGRATION_VERSION } from './migrations.js';
 import {
   assertSingleSqlStatement,
+  assertManagedTransactionStatement,
   assertAnonymousBindParameterCount,
   hasConflictClause,
-  hasRollbackConflictClause,
   isInsertStatement,
   isQueryResultStatement,
 } from './sql.js';
@@ -81,12 +81,18 @@ function validateDirectory(value: unknown): SqliteDirectory {
   throw new SqliteRuntimeError('INVALID_PARAMS', "'directory' must be one of: default, documents, library or cache");
 }
 
-function validateSql(value: unknown, label: string, code: SqliteErrorCode = 'INVALID_PARAMS'): string {
+function validateSql(
+  value: unknown,
+  label: string,
+  code: SqliteErrorCode = 'INVALID_PARAMS',
+  managedTransaction = false,
+): string {
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new SqliteRuntimeError(code, `'${label}' is required`);
   }
   try {
     assertSingleSqlStatement(value, `'${label}'`);
+    if (managedTransaction) assertManagedTransactionStatement(value, label);
   } catch (err) {
     throw new SqliteRuntimeError(code, err instanceof Error ? err.message : String(err));
   }
@@ -115,11 +121,11 @@ function validateValues(value: unknown, label: string): unknown[] {
   return value;
 }
 
-function validateStatements(value: unknown): string[] {
+function validateStatements(value: unknown, transaction: boolean): string[] {
   if (!Array.isArray(value) || value.length === 0) {
     throw new SqliteRuntimeError('INVALID_PARAMS', "'statements' must be a non-empty array");
   }
-  return value.map((item, index) => validateSql(item, `statements[${index}]`));
+  return value.map((item, index) => validateSql(item, `statements[${index}]`, 'INVALID_PARAMS', transaction));
 }
 
 function validateBindParameterCount(sql: string, count: number, label = 'values'): void {
@@ -153,7 +159,7 @@ function validateMigrations(value: unknown): Migration[] {
       );
     }
     const statements = migration.statements.map((sql, statementIndex) =>
-      validateSql(sql, `migrations[${index}].statements[${statementIndex}]`, 'MIGRATION_FAILED'),
+      validateSql(sql, `migrations[${index}].statements[${statementIndex}]`, 'MIGRATION_FAILED', true),
     );
     return { version: migration.version as number, statements };
   });
@@ -167,7 +173,7 @@ function validateMigrations(value: unknown): Migration[] {
   return migrations;
 }
 
-function validateRunBatchSet(value: unknown): { statement: string; values?: unknown[] }[] {
+function validateRunBatchSet(value: unknown, transaction: boolean): { statement: string; values?: unknown[] }[] {
   if (!Array.isArray(value) || value.length === 0) {
     throw new SqliteRuntimeError('INVALID_PARAMS', "'set' must be a non-empty array");
   }
@@ -176,7 +182,7 @@ function validateRunBatchSet(value: unknown): { statement: string; values?: unkn
       throw new SqliteRuntimeError('INVALID_PARAMS', `set[${index}] must be an object`);
     }
     const batchItem = item as Record<string, unknown>;
-    const statement = validateSql(batchItem.statement, `set[${index}].statement`);
+    const statement = validateSql(batchItem.statement, `set[${index}].statement`, 'INVALID_PARAMS', transaction);
     const values = validateValues(batchItem.values, `set[${index}].values`);
     validateBindParameterCount(statement, values.length, `set[${index}].values`);
     return { statement, values };
@@ -191,16 +197,18 @@ function errorCode(err: unknown, fallback: SqliteErrorCode): SqliteErrorCode {
   return err instanceof SqliteRuntimeError ? err.code : fallback;
 }
 
+function indexedExecutionError(err: unknown, label: string): SqliteRuntimeError {
+  const code = err instanceof SqliteRuntimeError ? err.code : 'EXECUTE_FAILED';
+  return new SqliteRuntimeError(code, `${label} failed: ${extractMessage(err)}`);
+}
+
 export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlugin {
   private promiser: Promiser | null = null;
+  private worker: Worker | null = null;
   // Stores the in-flight init Promise so concurrent callers coalesce on one worker.
   private initPromise: Promise<Promiser> | null = null;
 
   private openDbs = new Map<string, DbEntry>();
-  // Stores in-flight open Promises so concurrent open() calls for the same db coalesce.
-  private pendingOpens = new Map<string, Promise<SqliteResult>>();
-  private pendingOpenModes = new Map<string, boolean>();
-  private pendingOpenDirectories = new Map<string, SqliteDirectory>();
   private spCounter = 0;
   // Per-database serial queue: ensures only one operation runs at a time on each connection.
   private dbQueues = new Map<string, Promise<void>>();
@@ -241,7 +249,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
     );
     this.dbQueues.set(database, tail);
     tail.finally(() => {
-      if (this.dbQueues.get(database) === tail && !this.openDbs.has(database) && !this.pendingOpens.has(database)) {
+      if (this.dbQueues.get(database) === tail && !this.openDbs.has(database)) {
         this.dbQueues.delete(database);
       }
     });
@@ -317,31 +325,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
         return this.okEmpty();
       }
 
-      const pending = this.pendingOpens.get(database);
-      if (pending) {
-        const pendingReadonly = this.pendingOpenModes.get(database);
-        const pendingDirectory = this.pendingOpenDirectories.get(database);
-        if (pendingReadonly !== readonly || pendingDirectory !== directory) {
-          return this.err(
-            'DB_ALREADY_OPEN',
-            'open',
-            new Error(
-              `open: database '${database}' is already opening as ${pendingReadonly ? 'readonly' : 'read/write'}`,
-            ),
-          );
-        }
-        return pending;
-      }
-
-      const openOp = this._doOpen(database, readonly, directory, migrations).finally(() => {
-        this.pendingOpens.delete(database);
-        this.pendingOpenModes.delete(database);
-        this.pendingOpenDirectories.delete(database);
-      });
-      this.pendingOpens.set(database, openOp);
-      this.pendingOpenModes.set(database, readonly);
-      this.pendingOpenDirectories.set(database, directory);
-      return openOp;
+      return this._doOpen(database, readonly, directory, migrations);
     });
   }
 
@@ -521,8 +505,8 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
     try {
       const opts = assertPlainObject(options, 'execute');
       database = validateName(opts.database);
-      statements = validateStatements(opts.statements);
       transaction = opts.transaction !== false;
+      statements = validateStatements(opts.statements, transaction);
     } catch (err) {
       return this.err(errorCode(err, 'INVALID_PARAMS'), 'execute', err);
     }
@@ -561,10 +545,6 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
           throw innerErr;
         }
       } catch (err) {
-        const entry = this.openDbs.get(database);
-        if (entry?.inTransaction && statements.some((sql) => hasRollbackConflictClause(sql))) {
-          entry.inTransaction = false;
-        }
         return this.err(errorCode(err, 'EXECUTE_FAILED'), 'execute', err);
       }
     });
@@ -617,7 +597,6 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
             /* keep the last known mirror; the original SQL error is authoritative */
           }
         }
-        if (entry?.inTransaction && hasRollbackConflictClause(statement)) entry.inTransaction = false;
         return this.err(errorCode(err, 'EXECUTE_FAILED'), 'run', err);
       }
     });
@@ -632,8 +611,8 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
     try {
       const opts = assertPlainObject(options, 'runBatch');
       database = validateName(opts.database);
-      set = validateRunBatchSet(opts.set);
       transaction = opts.transaction !== false;
+      set = validateRunBatchSet(opts.set, transaction);
     } catch (err) {
       return this.err(errorCode(err, 'INVALID_PARAMS'), 'runBatch', err);
     }
@@ -650,11 +629,15 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
         const { dbId } = entry;
         const sp = transaction ? `sp_${++this.spCounter}` : null;
         if (sp) await execSql(promiser, dbId, `SAVEPOINT "${sp}"`);
+        let failedIndex: number | null = null;
         try {
           const before = await getTotalChanges(promiser, dbId);
-          for (const item of set) {
+          for (let index = 0; index < set.length; index += 1) {
+            failedIndex = index;
+            const item = set[index];
             await execSql(promiser, dbId, item.statement, item.values ?? []);
           }
+          failedIndex = null;
           const totalChanges = (await getTotalChanges(promiser, dbId)) - before;
           entry.lastInsertRowId = await getLastInsertRowId(promiser, dbId);
           if (sp) await execSql(promiser, dbId, `RELEASE "${sp}"`);
@@ -668,6 +651,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
               /* ignore */
             }
           }
+          if (failedIndex !== null) throw indexedExecutionError(innerErr, `set[${failedIndex}]`);
           throw innerErr;
         }
       } catch (err) {
@@ -679,9 +663,6 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
           } catch {
             /* preserve original batch error */
           }
-        }
-        if (entry?.inTransaction && set.some((item) => hasRollbackConflictClause(item.statement))) {
-          entry.inTransaction = false;
         }
         return this.err(errorCode(err, 'EXECUTE_FAILED'), 'runBatch', err);
       }
@@ -699,7 +680,8 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
     try {
       const opts = assertPlainObject(options, 'runMany');
       database = validateName(opts.database);
-      statement = validateSql(opts.statement, 'statement');
+      transaction = opts.transaction !== false;
+      statement = validateSql(opts.statement, 'statement', 'INVALID_PARAMS', transaction);
       if (!Array.isArray(opts.values) || opts.values.length === 0) {
         throw new SqliteRuntimeError('INVALID_PARAMS', "'values' must be a non-empty array of value arrays");
       }
@@ -708,7 +690,6 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
         validateBindParameterCount(statement, decoded.length);
         return decoded;
       });
-      transaction = opts.transaction !== false;
       returnResults = opts.returnResults === true;
     } catch (err) {
       return this.err(errorCode(err, 'INVALID_PARAMS'), 'runMany', err);
@@ -728,8 +709,11 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
         if (sp) await execSql(promiser, entry.dbId, `SAVEPOINT "${sp}"`);
         const before = await getTotalChanges(promiser, entry.dbId);
         const results: { changes: number; lastInsertId: number }[] | undefined = returnResults ? [] : undefined;
+        let failedIndex: number | null = null;
         try {
-          for (const values of valueSets) {
+          for (let index = 0; index < valueSets.length; index += 1) {
+            failedIndex = index;
+            const values = valueSets[index];
             if (results) {
               const beforeId = entry.lastInsertRowId;
               const outcome = await execRunSql(promiser, entry.dbId, statement, values);
@@ -744,6 +728,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
               await execSql(promiser, entry.dbId, statement, values);
             }
           }
+          failedIndex = null;
           const changes = (await getTotalChanges(promiser, entry.dbId)) - before;
           if (!results) entry.lastInsertRowId = await getLastInsertRowId(promiser, entry.dbId);
           if (sp) await execSql(promiser, entry.dbId, `RELEASE "${sp}"`);
@@ -757,6 +742,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
               /* preserve original error */
             }
           }
+          if (failedIndex !== null) throw indexedExecutionError(innerErr, `values[${failedIndex}]`);
           throw innerErr;
         }
       } catch (err) {
@@ -768,7 +754,6 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
           } catch {
             /* preserve original error */
           }
-          if (entry.inTransaction && hasRollbackConflictClause(statement)) entry.inTransaction = false;
         }
         return this.err(errorCode(err, 'EXECUTE_FAILED'), 'runMany', err);
       }
@@ -819,8 +804,6 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
         }
         return this.ok({ rows });
       } catch (err) {
-        const entry = this.openDbs.get(database);
-        if (entry?.inTransaction && hasRollbackConflictClause(statement)) entry.inTransaction = false;
         return this.err(errorCode(err, 'QUERY_FAILED'), 'query', err);
       }
     });
@@ -959,7 +942,8 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
 
   private openModeError(database: string, readonly: boolean, directory: SqliteDirectory): SqliteFailure | null {
     const existing = this.openDbs.get(database);
-    if (!existing || (existing.readonly === readonly && existing.directory === directory)) return null;
+    if (!existing || (existing.readonly === readonly && (database === ':memory:' || existing.directory === directory)))
+      return null;
     return this.err(
       'DB_ALREADY_OPEN',
       'open',
@@ -968,55 +952,85 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
   }
 
   private getOrCreatePromiser(): Promise<Promiser> {
-    // Store the Promise itself (not the result) so concurrent callers coalesce
-    // on a single worker — duplicate workers cause dbId collisions (sqlite-wasm #113).
     if (!this.initPromise) {
-      this.initPromise = new Promise<Promiser>((resolve, reject) => {
-        const holder: { ref?: Promiser } = {};
-        let worker: Worker | undefined;
-        let settled = false;
-        let timeout: ReturnType<typeof setTimeout> | undefined;
-        const clearReadyTimeout = () => {
-          if (timeout !== undefined) {
-            globalThis.clearTimeout(timeout);
-            timeout = undefined;
-          }
-        };
-        timeout = globalThis.setTimeout(() => {
-          if (settled) return;
-          settled = true;
-          worker?.terminate();
-          reject(new Error(`sqlite worker did not become ready within ${WORKER_READY_TIMEOUT_MS}ms`));
-        }, WORKER_READY_TIMEOUT_MS);
-        try {
-          const configuredWorker = sqlite3Worker1Promiser.defaultConfig.worker;
-          worker = typeof configuredWorker === 'function' ? configuredWorker() : configuredWorker;
-          holder.ref = sqlite3Worker1Promiser({
-            worker,
-            onready: () => {
-              if (settled) return;
-              settled = true;
-              clearReadyTimeout();
-              resolve(holder.ref as Promiser);
-            },
-          }) as any;
-        } catch (err) {
-          if (!settled) {
-            settled = true;
-            clearReadyTimeout();
-            worker?.terminate();
-            reject(err);
-          }
-        }
-      })
-        .then((p) => {
-          this.promiser = p;
-          return p;
-        })
-        .catch((err) => {
+      const worker = new Worker(new URL('./web-worker.js', import.meta.url), { type: 'module' });
+      this.worker = worker;
+      let rejectLost!: (error: Error) => void;
+      let failure: Error | null = null;
+      const requests = new Set<(error: Error) => void>();
+      const lost = new Promise<never>((_, reject) => {
+        rejectLost = reject;
+      });
+      // Failure can occur while no request is pending.
+      void lost.catch(() => undefined);
+      const fail = (error: Error) => {
+        if (failure) return;
+        failure = error;
+        globalThis.clearTimeout(timeout);
+        worker.terminate();
+        if (this.worker === worker) {
+          this.worker = null;
           this.initPromise = null;
           this.promiser = null;
-          throw err;
+          this.openDbs.clear();
+        }
+        rejectLost(error);
+        for (const reject of requests) reject(error);
+        requests.clear();
+      };
+      const timeout = globalThis.setTimeout(() => {
+        fail(new Error(`sqlite worker did not become ready within ${WORKER_READY_TIMEOUT_MS}ms`));
+      }, WORKER_READY_TIMEOUT_MS);
+      worker.addEventListener('error', () =>
+        fail(new Error('SQLite worker failed; operation outcome is unknown. Reopen databases before continuing.')),
+      );
+      worker.addEventListener('messageerror', () =>
+        fail(
+          new Error(
+            'SQLite worker response could not be decoded; operation outcome is unknown. Reopen databases before continuing.',
+          ),
+        ),
+      );
+      this.initPromise = Promise.race([sqlite3Worker1Promiser({ worker }), lost])
+        .then((factory) => {
+          const p = factory as Promiser;
+          globalThis.clearTimeout(timeout);
+          const syncConnectionState = (message: any) => {
+            if (typeof message?.inTransaction !== 'boolean') return;
+            for (const entry of this.openDbs.values()) {
+              if (entry.dbId === message.dbId) {
+                entry.inTransaction = message.inTransaction;
+                entry.lastInsertRowId = integerResult(message.lastInsertRowId);
+                break;
+              }
+            }
+          };
+          const promiser: Promiser = async (type, args) => {
+            try {
+              let rejectRequest!: (error: Error) => void;
+              const response = await new Promise<any>((resolve, reject) => {
+                rejectRequest = reject;
+                if (failure) {
+                  reject(failure);
+                  return;
+                }
+                requests.add(reject);
+                p(type, args).then(resolve, reject);
+              }).finally(() => requests.delete(rejectRequest));
+              syncConnectionState(response);
+              return response;
+            } catch (error) {
+              syncConnectionState(error);
+              throw error;
+            }
+          };
+          if (failure) throw failure;
+          this.promiser = promiser;
+          return promiser;
+        })
+        .catch((error) => {
+          fail(error instanceof Error ? error : new Error(extractMessage(error)));
+          throw error;
         });
     }
     return this.initPromise;
@@ -1106,7 +1120,12 @@ function integerResult(value: unknown): number {
 function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const key of Object.keys(row)) {
-    out[key] = normalizeValue(row[key]);
+    const value = normalizeValue(row[key]);
+    if (key === '__proto__') {
+      Object.defineProperty(out, key, { value, enumerable: true, writable: true, configurable: true });
+    } else {
+      out[key] = value;
+    }
   }
   return out;
 }

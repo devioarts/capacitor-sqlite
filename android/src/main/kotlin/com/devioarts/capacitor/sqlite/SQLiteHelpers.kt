@@ -2,10 +2,20 @@ package com.devioarts.capacitor.sqlite
 
 import android.database.Cursor
 import android.database.DatabaseUtils
+import android.database.sqlite.SQLiteConstraintException
+import android.database.sqlite.SQLiteCursor
 import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteProgram
 import android.database.sqlite.SQLiteStatement
+import android.os.Build
+import androidx.annotation.RequiresApi
+import java.util.UUID
 
 internal object SQLiteHelpers {
+    val DML_TYPES = setOf("INSERT", "UPDATE", "DELETE", "REPLACE")
+    private val TRANSACTION_TYPES = setOf("BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE")
+    private val COMMIT_TYPES = setOf("COMMIT", "END")
+
     internal data class CompactRows(val columns: List<String>, val values: List<List<Any?>>)
 
     internal class PreparedRunStatement(
@@ -14,11 +24,16 @@ internal object SQLiteHelpers {
         private val insertLike: Boolean,
         private val hasConflictClause: Boolean,
         private val parameterCount: Int,
+        private val sql: String,
     ) : AutoCloseable {
+        private var values: List<Any?> = emptyList()
+        private val returning = statementType(sql) in DML_TYPES && hasKeyword(sql, "RETURNING")
+
         fun bind(values: List<Any?>) {
             requireBindValueCount(parameterCount, values.size)
             statement.clearBindings()
             bindValues(statement, values)
+            this.values = values
         }
 
         fun bind(
@@ -31,12 +46,21 @@ internal object SQLiteHelpers {
             addPreparedTiming(timings, "dbClearBindingsMs", clearStart)
             val bindStart = System.nanoTime()
             bindValues(statement, values)
+            this.values = values
             addPreparedTiming(timings, "dbBindValuesMs", bindStart)
         }
 
-        fun execute() {
-            if (insertLike) statement.executeInsert() else statement.executeUpdateDelete()
-        }
+        // The owning batch handles rollback; its hot loop needs no per-row savepoint.
+        fun execute(): Long =
+            if (returning) {
+                queryCompact(db, sql, values, discardRows = true)
+                changeState(db).lastInsertRowId
+            } else if (insertLike) {
+                statement.executeInsert()
+            } else {
+                statement.executeUpdateDelete()
+                0L
+            }
 
         fun execute(timings: MutableMap<String, Double>?) {
             val stepStart = System.nanoTime()
@@ -46,25 +70,27 @@ internal object SQLiteHelpers {
 
         /** Exact public run() metadata while still reusing the prepared statement. */
         fun executeWithMetadata(): RunResult {
+            if (statementType(sql) in TRANSACTION_TYPES) {
+                if (statementType(sql) in COMMIT_TYPES && db.inTransaction()) {
+                    commitTransaction(db)
+                } else {
+                    statement.execute()
+                }
+                return RunResult(0L, 0L)
+            }
             val pinned = !db.inTransaction()
             if (pinned) db.beginTransactionNonExclusive()
             try {
                 val before = changeState(db)
-                val insertId =
-                    if (insertLike) {
-                        statement.executeInsert()
-                    } else {
-                        statement.executeUpdateDelete()
-                        0L
-                    }
+                val insertId = withStatementRecovery(db, sql) { execute() }
                 val changes = totalChanges(db) - before.totalChanges
                 val reliable =
                     insertLike && !hasConflictClause && changes > 0L &&
                         insertId >= 0L && insertId != before.lastInsertRowId
-                if (pinned) db.setTransactionSuccessful()
+                if (pinned) commitTransaction(db)
                 return RunResult(changes, if (reliable) insertId else 0L)
             } finally {
-                if (pinned) db.endTransaction()
+                if (pinned && db.inTransaction()) db.endTransaction()
             }
         }
 
@@ -90,7 +116,6 @@ internal object SQLiteHelpers {
     private val multipleStatementCache = sqlCache<Boolean>()
     private val statementTypeCache = sqlCache<String>()
     private val conflictCache = sqlCache<Boolean>()
-    private val rollbackConflictCache = sqlCache<Boolean>()
     private val bindCountCache = sqlCache<Int>()
 
     private fun <T> sqlCache(): MutableMap<String, T> =
@@ -127,10 +152,14 @@ internal object SQLiteHelpers {
     ): Long {
         requireSingleStatement(sql)
         val stmtType = statementType(sql)
+        if (stmtType in COMMIT_TYPES && db.inTransaction()) {
+            commitTransaction(db)
+            return 0L
+        }
         if (isInsertLike(stmtType) || isUpdateDelete(stmtType)) {
             return run(db, sql, emptyList()).changes
         }
-        db.execSQL(sql)
+        withStatementRecovery(db, sql) { db.execSQL(sql) }
         return 0L
     }
 
@@ -141,63 +170,72 @@ internal object SQLiteHelpers {
         sql: String,
         values: List<Any?>,
     ): RunResult {
-        requireSingleStatement(sql)
-        requireAnonymousBindParameterCount(sql, values.size)
-        val stmt = db.compileStatement(sql)
+        return prepareRunStatement(db, sql, values).use { it.executeWithMetadata() }
+    }
+
+    /** A savepoint detects native auto-rollback without trusting SQL text or undoing caller changes. */
+    private fun <T> withStatementRecovery(
+        db: SQLiteDatabase,
+        sql: String,
+        rollbackOnError: Boolean = false,
+        block: () -> T,
+    ): T {
+        if (!db.inTransaction() || statementType(sql) in TRANSACTION_TYPES) {
+            return block()
+        }
+        val marker = "__capacitor_sqlite_statement"
+        db.execSQL("SAVEPOINT $marker")
         try {
-            bindValues(stmt, values)
-            // total_changes() is a per-connection counter. With WAL connection pooling a
-            // read-only SELECT outside a transaction may run on a pooled read connection —
-            // wrong counter and per-call pool overhead. Pinning the session to the write
-            // connection keeps the counters correct and costs the same single commit as
-            // autocommit.
-            val pinned = !db.inTransaction()
-            if (pinned) db.beginTransactionNonExclusive()
+            val result = block()
+            db.execSQL("RELEASE SAVEPOINT $marker")
+            return result
+        } catch (error: Exception) {
             try {
-                // Read both connection counters in one Cursor/SQLite session. This keeps
-                // the conservative reused-rowid rule while removing one metadata query
-                // from every public run() call.
-                val before = changeState(db)
-                val stmtType = statementType(sql)
-                // An UPSERT (`INSERT ... ON CONFLICT ... DO UPDATE`) resolved via its DO
-                // UPDATE arm leaves last_insert_rowid() pointing at the connection's last
-                // real insert, not this statement's affected row, so executeInsert()'s
-                // returned id can't be trusted for statements containing a CONFLICT clause.
-                val result =
-                    if (isInsertLike(stmtType) && !hasConflictClause(sql)) {
-                        val lastId = stmt.executeInsert()
-                        RunResult(
-                            changes = totalChanges(db) - before.totalChanges,
-                            lastInsertId = if (lastId >= 0L && lastId != before.lastInsertRowId) lastId else 0L,
-                        )
-                    } else {
-                        stmt.executeUpdateDelete()
-                        RunResult(changes = totalChanges(db) - before.totalChanges, lastInsertId = 0L)
+                // Old Android treats every leading ROLLBACK as endTransaction; prefix bypasses that interception.
+                if (rollbackOnError) db.execSQL(";ROLLBACK TO SAVEPOINT $marker")
+                db.execSQL("RELEASE SAVEPOINT $marker")
+            } catch (cleanup: Exception) {
+                if (cleanup.message?.contains("no such savepoint: $marker") == true) {
+                    // Native ROLLBACK also removed our marker; unwind only stale framework state.
+                    try {
+                        db.endTransaction()
+                    } catch (_: Exception) {
                     }
-                if (pinned) db.setTransactionSuccessful()
-                return result
-            } finally {
-                if (pinned) db.endTransaction()
+                } else {
+                    error.addSuppressed(cleanup)
+                }
             }
-        } finally {
-            stmt.close()
+            throw error
         }
     }
 
-    /** Prepares and binds without stepping, used to make runBatch validation atomic. */
-    fun validateRunStatement(
-        db: SQLiteDatabase,
+    /** Validate the whole batch without preparing SQL (some PRAGMAs act during preparation). */
+    fun validateRunInput(
         sql: String,
         values: List<Any?>,
     ) {
-        prepareRunStatement(db, sql, values).close()
+        requireSingleStatement(sql)
+        requireAnonymousBindParameterCount(sql, values.size)
+        values.forEachIndexed { index, value ->
+            val position = index + 1
+            when (value) {
+                null, is String, is Boolean, is Int, is ByteArray -> Unit
+                is Long -> requireSafeInteger(!isUnsafeInteger(value), position)
+                is Double -> {
+                    requireFinite(value.isFinite(), position)
+                    requireSafeInteger(!isUnsafeInteger(value), position)
+                }
+                is Float -> {
+                    requireFinite(value.isFinite(), position)
+                    requireSafeInteger(!isUnsafeInteger(value.toDouble()), position)
+                }
+                is List<*> -> byteArrayFromList(value, position)
+                else -> throw CapacitorSqliteException("INVALID_PARAMS", "Unsupported bind value type at index $position")
+            }
+        }
     }
 
-    /**
-     * Prepare and bind once so a transactional runBatch can validate the entire set
-     * before its first write and then execute those exact statements without compiling
-     * and binding a second time.
-     */
+    /** Prepare at first execution; preflight validation must not compile SQL. */
     fun prepareRunStatement(
         db: SQLiteDatabase,
         sql: String,
@@ -207,14 +245,14 @@ internal object SQLiteHelpers {
         requireAnonymousBindParameterCount(sql, values.size)
         val stmt = db.compileStatement(sql)
         try {
-            bindValues(stmt, values)
             return PreparedRunStatement(
                 db,
                 stmt,
                 isInsertLike(statementType(sql)),
                 hasConflictClause(sql),
                 values.size,
-            )
+                sql,
+            ).also { it.bind(values) }
         } catch (error: Exception) {
             stmt.close()
             throw error
@@ -222,195 +260,142 @@ internal object SQLiteHelpers {
     }
 
     // MARK: - SELECT
-    // NOTE: Android rawQuery() only accepts String[] parameters, which causes all bound
-    // values to be stored as TEXT in SQLite. To preserve type semantics (TYPEOF(?) = "integer"
-    // for numbers/booleans, not "text"), non-string non-null primitives are inlined as SQL
-    // literals before rawQuery is called. Only String and null values are passed as rawQuery args.
 
     fun query(
         db: SQLiteDatabase,
         sql: String,
         values: List<Any?>,
     ): List<Map<String, Any?>> {
-        requireSingleStatement(sql)
-        requireQueryResultStatement(sql)
-        val (finalSql, finalValues) = injectLiterals(sql, values)
-        val strArgs: Array<String?>? =
-            if (finalValues.isEmpty()) {
-                null
-            } else {
-                finalValues.map { v ->
-                    when (v) {
-                        null -> null
-                        is String -> v
-                        else -> throw CapacitorSqliteException(
-                            "INVALID_PARAMS",
-                            "Unsupported query value type: ${v?.javaClass?.name}",
-                        )
-                    }
-                }.toTypedArray()
+        val compact = queryCompact(db, sql, values)
+        return compact.values.map { row ->
+            linkedMapOf<String, Any?>().also { out ->
+                compact.columns.forEachIndexed { index, name -> out[name] = row[index] }
             }
-        return db.rawQuery(finalSql, strArgs).use { extractRows(it) }
+        }
     }
 
     fun queryCompact(
         db: SQLiteDatabase,
         sql: String,
         values: List<Any?>,
+        discardRows: Boolean = false,
     ): CompactRows {
-        requireSingleStatement(sql)
+        validateRunInput(sql, values)
         requireQueryResultStatement(sql)
-        val (finalSql, finalValues) = injectLiterals(sql, values)
-        val strArgs: Array<String?>? =
-            if (finalValues.isEmpty()) {
-                null
-            } else {
-                finalValues.map { value ->
-                    when (value) {
-                        null -> null
-                        is String -> value
-                        else -> throw CapacitorSqliteException(
-                            "INVALID_PARAMS",
-                            "Unsupported query value type: ${value?.javaClass?.name}",
-                        )
-                    }
-                }.toTypedArray()
+        val writes = statementType(sql) in DML_TYPES
+        // PRAGMAs can change connection settings and must retain their autocommit semantics.
+        val raw = Build.VERSION.SDK_INT >= 35 && statementType(sql) != "PRAGMA"
+        val owned = (writes || raw) && !db.inTransaction()
+        if (owned) {
+            // Not-writes implies raw, i.e. API 35+; the explicit check lets Lint see it.
+            if (writes) {
+                db.beginTransactionNonExclusive()
+            } else if (Build.VERSION.SDK_INT >= 35) {
+                db.beginTransactionReadOnly()
             }
-        return db.rawQuery(finalSql, strArgs).use { cursor ->
+        }
+        try {
+            val read = {
+                if (raw) {
+                    queryRaw(db, sql, values, discardRows)
+                } else {
+                    queryCursor(db, sql, values, singleWindow = writes, discardRows = discardRows)
+                }
+            }
+            val result = if (writes) withStatementRecovery(db, sql, rollbackOnError = true, block = read) else read()
+            if (owned) commitTransaction(db)
+            return result
+        } finally {
+            if (owned && db.inTransaction()) db.endTransaction()
+        }
+    }
+
+    private fun queryCursor(
+        db: SQLiteDatabase,
+        sql: String,
+        values: List<Any?>,
+        singleWindow: Boolean,
+        discardRows: Boolean,
+    ): CompactRows =
+        db.rawQueryWithFactory({ _, driver, editTable, query ->
+            bindValues(query, values)
+            SQLiteCursor(driver, editTable, query)
+        }, sql, emptyArray(), "").use { cursor ->
+            if (singleWindow) {
+                val count = cursor.count
+                if (count > (cursor as SQLiteCursor).window.numRows) {
+                    throw CapacitorSqliteException(
+                        "QUERY_FAILED",
+                        "RETURNING result exceeds Android CursorWindow capacity; use smaller writes or Android 15+",
+                    )
+                }
+            }
+            if (discardRows) {
+                cursor.moveToLast()
+                return@use CompactRows(emptyList(), emptyList())
+            }
             val columns = cursor.columnNames.toList()
             val rows = ArrayList<List<Any?>>()
             while (cursor.moveToNext()) {
-                val row = ArrayList<Any?>(cursor.columnCount)
-                for (index in 0 until cursor.columnCount) {
-                    row.add(
+                rows.add(
+                    (0 until cursor.columnCount).map { index ->
                         when (cursor.getType(index)) {
                             Cursor.FIELD_TYPE_INTEGER -> normalizeInteger(cursor.getLong(index))
                             Cursor.FIELD_TYPE_FLOAT -> cursor.getDouble(index)
                             Cursor.FIELD_TYPE_STRING -> cursor.getString(index)
                             Cursor.FIELD_TYPE_BLOB -> cursor.getBlob(index)
                             else -> null
-                        },
-                    )
-                }
-                rows.add(row)
+                        }
+                    },
+                )
             }
             CompactRows(columns, rows)
         }
-    }
 
-    // Replace anonymous '?' placeholders with inline SQL literals for all
-    // non-string, non-null types. BLOBs -> X'hex', Booleans -> 0/1, Numbers ->
-    // numeric literal. String and null values remain as '?' and are passed
-    // through rawQuery's String[] args.
-    //
-    // This is a small SQL lexer, not a full parser. It only needs to know where
-    // placeholders are legal, so it skips string literals, quoted identifiers,
-    // and SQL comments before counting/replacing '?' markers.
-    private fun injectLiterals(
+    @RequiresApi(35)
+    private fun queryRaw(
+        db: SQLiteDatabase,
         sql: String,
         values: List<Any?>,
-    ): Pair<String, List<Any?>> {
-        val out = StringBuilder(sql.length + 32)
-        val remaining = mutableListOf<Any?>()
-        var paramIdx = 0
-        var i = 0
-        while (i < sql.length) {
-            val ch = sql[i]
-            when (ch) {
-                '\'', '"', '`' -> i = copyQuoted(sql, out, i, ch)
-                '[' -> i = copyBracketIdentifier(sql, out, i)
-                '-' ->
-                    if (i + 1 < sql.length && sql[i + 1] == '-') {
-                        i = copyLineComment(sql, out, i)
-                    } else {
-                        out.append(ch)
-                        i++
-                    }
-                '/' ->
-                    if (i + 1 < sql.length && sql[i + 1] == '*') {
-                        i = copyBlockComment(sql, out, i)
-                    } else {
-                        out.append(ch)
-                        i++
-                    }
-                '?' -> {
-                    if (i + 1 < sql.length && sql[i + 1].isDigit()) {
-                        throw CapacitorSqliteException(
-                            "INVALID_PARAMS",
-                            "Only anonymous '?' placeholders are supported; numbered placeholders like '?1' are not supported",
-                        )
-                    }
-                    if (paramIdx >= values.size) {
-                        throw CapacitorSqliteException(
-                            "INVALID_PARAMS",
-                            "Not enough bind values: SQL has more '?' placeholders than values",
-                        )
-                    }
-                    appendValue(out, remaining, values[paramIdx], paramIdx + 1)
-                    paramIdx++
-                    i++
-                }
-                ':', '@', '$' -> {
-                    if (i + 1 < sql.length && isIdentifierStart(sql[i + 1])) {
-                        throw CapacitorSqliteException(
-                            "INVALID_PARAMS",
-                            "Only anonymous '?' placeholders are supported; named placeholders are not supported",
-                        )
-                    }
-                    out.append(ch)
-                    i++
-                }
-                else -> {
-                    out.append(ch)
-                    i++
+        discardRows: Boolean,
+    ): CompactRows =
+        db.createRawStatement(sql).use { statement ->
+            values.forEachIndexed { index, value ->
+                val position = index + 1
+                when (value) {
+                    null -> statement.bindNull(position)
+                    is String -> statement.bindText(position, value)
+                    is Boolean -> statement.bindLong(position, if (value) 1L else 0L)
+                    is ByteArray -> statement.bindBlob(position, value)
+                    is List<*> -> statement.bindBlob(position, byteArrayFromList(value, position))
+                    is Double -> statement.bindDouble(position, value)
+                    is Float -> statement.bindDouble(position, value.toDouble())
+                    is Number -> statement.bindLong(position, value.toLong())
                 }
             }
+            if (discardRows) {
+                while (statement.step()) { /* Drain RETURNING without materializing its rows. */ }
+                return@use CompactRows(emptyList(), emptyList())
+            }
+            // Android's raw column getters require a current row, including column names.
+            if (!statement.step()) return@use CompactRows(emptyList(), emptyList())
+            val columns = (0 until statement.resultColumnCount).map(statement::getColumnName)
+            val rows = ArrayList<List<Any?>>()
+            do {
+                rows.add(
+                    columns.indices.map { index ->
+                        when (statement.getColumnType(index)) {
+                            Cursor.FIELD_TYPE_INTEGER -> normalizeInteger(statement.getColumnLong(index))
+                            Cursor.FIELD_TYPE_FLOAT -> statement.getColumnDouble(index)
+                            Cursor.FIELD_TYPE_STRING -> statement.getColumnText(index)
+                            Cursor.FIELD_TYPE_BLOB -> statement.getColumnBlob(index)
+                            else -> null
+                        }
+                    },
+                )
+            } while (statement.step())
+            CompactRows(columns, rows)
         }
-        if (paramIdx != values.size) {
-            throw CapacitorSqliteException(
-                "INVALID_PARAMS",
-                "Too many bind values: SQL has $paramIdx anonymous '?' placeholders but ${values.size} values were provided",
-            )
-        }
-        return out.toString() to remaining
-    }
-
-    private fun appendValue(
-        out: StringBuilder,
-        remaining: MutableList<Any?>,
-        value: Any?,
-        idx: Int,
-    ) {
-        when (value) {
-            is List<*> -> appendBlobLiteral(out, byteArrayFromList(value, idx))
-            is ByteArray -> appendBlobLiteral(out, value)
-            is Boolean -> out.append(if (value) "1" else "0")
-            is Long -> {
-                requireSafeInteger(!isUnsafeInteger(value), idx)
-                out.append(value.toString())
-            }
-            is Int, is Short, is Byte -> out.append(value.toString())
-            is Double -> {
-                requireFinite(value.isFinite(), idx)
-                requireSafeInteger(!isUnsafeInteger(value), idx)
-                out.append(value.toString())
-            }
-            is Float -> {
-                requireFinite(value.isFinite(), idx)
-                requireSafeInteger(!isUnsafeInteger(value.toDouble()), idx)
-                out.append(value.toString())
-            }
-            null -> out.append("NULL")
-            is String -> {
-                out.append('?')
-                remaining.add(value)
-            }
-            else -> throw CapacitorSqliteException(
-                "INVALID_PARAMS",
-                "Unsupported query value type at index $idx: ${value::class.java.name}",
-            )
-        }
-    }
 
     private fun requireSafeInteger(
         condition: Boolean,
@@ -433,90 +418,7 @@ internal object SQLiteHelpers {
         }
     }
 
-    private fun appendBlobLiteral(
-        out: StringBuilder,
-        bytes: ByteArray,
-    ) {
-        out.append("X'")
-        bytes.forEach { b -> out.append("%02x".format(b.toInt() and 0xFF)) }
-        out.append('\'')
-    }
-
-    private fun copyQuoted(
-        sql: String,
-        out: StringBuilder,
-        start: Int,
-        quote: Char,
-    ): Int {
-        var i = start
-        out.append(sql[i])
-        i++
-        while (i < sql.length) {
-            val ch = sql[i]
-            out.append(ch)
-            i++
-            if (ch == quote) {
-                if (i < sql.length && sql[i] == quote) {
-                    out.append(sql[i])
-                    i++
-                } else {
-                    break
-                }
-            }
-        }
-        return i
-    }
-
-    private fun copyBracketIdentifier(
-        sql: String,
-        out: StringBuilder,
-        start: Int,
-    ): Int {
-        var i = start
-        while (i < sql.length) {
-            val ch = sql[i]
-            out.append(ch)
-            i++
-            if (ch == ']') break
-        }
-        return i
-    }
-
-    private fun copyLineComment(
-        sql: String,
-        out: StringBuilder,
-        start: Int,
-    ): Int {
-        var i = start
-        while (i < sql.length) {
-            val ch = sql[i]
-            out.append(ch)
-            i++
-            if (ch == '\n' || ch == '\r') break
-        }
-        return i
-    }
-
-    private fun copyBlockComment(
-        sql: String,
-        out: StringBuilder,
-        start: Int,
-    ): Int {
-        var i = start
-        while (i < sql.length) {
-            val ch = sql[i]
-            out.append(ch)
-            i++
-            if (ch == '*' && i < sql.length && sql[i] == '/') {
-                out.append(sql[i])
-                i++
-                break
-            }
-        }
-        return i
-    }
-
-    private fun isIdentifierStart(ch: Char): Boolean = ch == '_' || ch.isLetter()
+    private fun isIdentifierStart(ch: Char): Boolean = ch == '_' || ch in 'A'..'Z' || ch in 'a'..'z' || ch.code >= 128
 
     // MARK: - Transactions
     // All transaction helpers use NON-EXCLUSIVE mode which is compatible with WAL
@@ -528,7 +430,32 @@ internal object SQLiteHelpers {
 
     fun commitTransaction(db: SQLiteDatabase) {
         db.setTransactionSuccessful()
-        db.endTransaction()
+        try {
+            db.endTransaction()
+        } catch (error: Exception) {
+            // After Android releases the session, plain ROLLBACK may use a WAL reader.
+            // A guaranteed write constraint forces the writer and rolls back the failed commit.
+            val marker = "__capacitor_rollback_" + UUID.randomUUID().toString().replace("-", "")
+            try {
+                db.execSQL("CREATE TEMP TABLE $marker(v INTEGER NOT NULL)")
+                try {
+                    db.execSQL("INSERT OR ROLLBACK INTO $marker VALUES(NULL)")
+                    throw IllegalStateException("Rollback constraint did not execute")
+                } catch (rollback: SQLiteConstraintException) {
+                    if (rollback.message?.contains("NOT NULL constraint failed: $marker.v") != true) throw rollback
+                }
+                db.execSQL("DROP TABLE IF EXISTS temp.$marker")
+            } catch (cleanup: Exception) {
+                error.addSuppressed(cleanup)
+                // An unverified connection must not accept further writes after failed recovery.
+                try {
+                    db.close()
+                } catch (close: Exception) {
+                    error.addSuppressed(close)
+                }
+            }
+            throw error
+        }
     }
 
     fun rollbackTransaction(db: SQLiteDatabase) {
@@ -564,6 +491,15 @@ internal object SQLiteHelpers {
         db.execSQL("VACUUM")
     }
 
+    fun requireManagedTransactionStatement(sql: String) {
+        if (statementType(sql.trim()) in TRANSACTION_TYPES) {
+            throw CapacitorSqliteException(
+                "INVALID_PARAMS",
+                "Transaction control SQL is not allowed inside an automatically managed transaction",
+            )
+        }
+    }
+
     fun requireSingleStatement(sql: String) {
         if (hasMultipleStatements(sql)) {
             throw CapacitorSqliteException(
@@ -576,53 +512,58 @@ internal object SQLiteHelpers {
     fun hasMultipleStatements(sql: String): Boolean = cached(multipleStatementCache, sql) { computeHasMultipleStatements(sql) }
 
     private fun computeHasMultipleStatements(sql: String): Boolean {
+        // A trigger ends at `; END;`. BEGIN/END elsewhere can be ordinary identifiers.
         var i = 0
-        // Tracks BEGIN/CASE ... END nesting (trigger bodies, CASE expressions) so a
-        // semicolon inside one of these blocks isn't mistaken for a statement
-        // separator. Only a semicolon seen while this is back at 0 is a real split.
-        var blockDepth = 0
-        // Tracks '(' / ')' nesting. SQLite does not reserve BEGIN as a keyword, so
-        // `CREATE TABLE t(begin TEXT)` is valid SQL — without this, the bare `begin`
-        // column name below would be misread as a trigger-body opener and swallow the
-        // semicolon after it. A genuine trigger BEGIN always appears outside any
-        // parentheses (after `ON ...`/`WHEN ...`/`FOR EACH ROW`), so gating on
-        // `parenDepth == 0` filters out identifier occurrences without affecting real
-        // trigger bodies.
-        var parenDepth = 0
-        // `BEGIN` as the very first token is a transaction statement (`BEGIN;`,
-        // `BEGIN TRANSACTION;`), not a trigger-body opener — it must not swallow
-        // the semicolon that follows it ("BEGIN; DROP TABLE t" is two statements).
-        val firstTokenStart = skipIgnorable(sql, 0)
+        var header = 0
+        var trigger = false
+        var afterSemicolon = false
+        var triggerEnd = false
         while (i < sql.length) {
             val ch = sql[i]
+            if (isSqlWhitespace(ch)) {
+                i++
+                continue
+            }
+            if (ch == '-' && i + 1 < sql.length && sql[i + 1] == '-') {
+                i = skipLineComment(sql, i) + 1
+                continue
+            }
+            if (ch == '/' && i + 1 < sql.length && sql[i + 1] == '*') {
+                i = skipBlockComment(sql, i) + 1
+                continue
+            }
+            var token = ""
             when {
                 ch == '\'' || ch == '"' || ch == '`' -> i = skipQuoted(sql, i, ch)
                 ch == '[' -> i = skipBracketIdentifier(sql, i)
-                ch == '-' && i + 1 < sql.length && sql[i + 1] == '-' -> i = skipLineComment(sql, i)
-                ch == '/' && i + 1 < sql.length && sql[i + 1] == '*' -> i = skipBlockComment(sql, i)
-                ch == '(' -> parenDepth++
-                ch == ')' -> if (parenDepth > 0) parenDepth--
-                isIdentifierStart(ch) && (i == 0 || !isIdentifierPart(sql[i - 1])) -> {
+                ch == ';' -> {
+                    if (!trigger || triggerEnd) return hasTailContent(sql, i + 1)
+                    afterSemicolon = true
+                    triggerEnd = false
+                    i++
+                    continue
+                }
+                isIdentifierStart(ch) && (i == 0 || isSqlWhitespace(sql[i - 1]) || !isIdentifierPart(sql[i - 1])) -> {
                     val keyword = readKeyword(sql, i)
                     if (keyword != null) {
-                        // A '.' immediately before rules out a qualified reference like
-                        // `NEW.begin` (used in a trigger's WHEN clause, for example) — real
-                        // BEGIN/CASE keywords are never preceded by a dot.
-                        val isQualifiedRef = i > 0 && sql[i - 1] == '.'
-                        when {
-                            !isQualifiedRef && keyword.keyword == "BEGIN" && i != firstTokenStart && parenDepth == 0 ->
-                                blockDepth++
-                            // CASE only nests inside an already-open trigger BEGIN block — a
-                            // bare `case` identifier at the top level (SQLite rejects it as
-                            // unquoted, but the guard should not depend on that) is otherwise inert.
-                            !isQualifiedRef && keyword.keyword == "CASE" && blockDepth > 0 -> blockDepth++
-                            !isQualifiedRef && keyword.keyword == "END" && blockDepth > 0 -> blockDepth--
-                        }
+                        token = keyword.keyword
                         i = keyword.end - 1
                     }
                 }
-                ch == ';' && blockDepth == 0 -> return hasTailContent(sql, i + 1)
             }
+            when {
+                header == 0 && token == "EXPLAIN" -> header = 3
+                header == 3 && token == "QUERY" -> header = 4
+                header == 4 && token == "PLAN" -> header = 5
+                (header == 0 || header == 3 || header == 5) && token == "CREATE" -> header = 1
+                header == 1 && (token == "TEMP" || token == "TEMPORARY") -> header = 2
+                else -> {
+                    if ((header == 1 || header == 2) && token == "TRIGGER") trigger = true
+                    header = -1
+                }
+            }
+            triggerEnd = afterSemicolon && token == "END"
+            afterSemicolon = false
             i++
         }
         return false
@@ -637,7 +578,7 @@ internal object SQLiteHelpers {
         var i = start
         while (i < sql.length) {
             val ch = sql[i]
-            if (ch.isWhitespace() || ch == ';') {
+            if (isSqlWhitespace(ch) || ch == ';') {
                 i++
                 continue
             }
@@ -691,7 +632,7 @@ internal object SQLiteHelpers {
     ): Int {
         var i = start + 2
         while (i < sql.length) {
-            if (sql[i] == '\n' || sql[i] == '\r') return i
+            if (sql[i] == '\n') return i
             i++
         }
         return sql.length - 1
@@ -740,18 +681,7 @@ internal object SQLiteHelpers {
     // still reflects whatever the connection's last *real* insert was — a stale, unrelated
     // value. run() uses this to fall back to lastInsertId 0 for any statement that could
     // take that arm.
-    fun hasConflictClause(sql: String): Boolean = cached(conflictCache, sql) { hasKeyword(sql, "CONFLICT") }
-
-    /** True only for adjacent real SQL keywords, never text in strings/comments/identifiers. */
-    fun hasRollbackConflictClause(sql: String): Boolean =
-        cached(rollbackConflictCache, sql) {
-            var previous: String? = null
-            for (keyword in keywords(sql)) {
-                if (previous == "OR" && keyword == "ROLLBACK") return@cached true
-                previous = keyword
-            }
-            false
-        }
+    fun hasConflictClause(sql: String): Boolean = cached(conflictCache, sql) { hasKeyword(sql, "CONFLICT", "ON") }
 
     private fun isInsertLike(stmtType: String): Boolean = stmtType == "INSERT" || stmtType == "REPLACE"
 
@@ -817,7 +747,7 @@ internal object SQLiteHelpers {
         var i = start
         while (i < sql.length) {
             val ch = sql[i]
-            if (ch.isWhitespace() || ch == ';') {
+            if (isSqlWhitespace(ch) || ch == ';') {
                 i++
                 continue
             }
@@ -847,48 +777,38 @@ internal object SQLiteHelpers {
     private fun hasKeyword(
         sql: String,
         target: String,
+        precededBy: String? = null,
     ): Boolean {
+        var previous = ""
         var i = 0
         while (i < sql.length) {
             val ch = sql[i]
             when {
-                ch == '\'' || ch == '"' || ch == '`' -> i = skipQuoted(sql, i, ch)
-                ch == '[' -> i = skipBracketIdentifier(sql, i)
+                ch == '\'' || ch == '"' || ch == '`' -> {
+                    i = skipQuoted(sql, i, ch)
+                    previous = ""
+                }
+                ch == '[' -> {
+                    i = skipBracketIdentifier(sql, i)
+                    previous = ""
+                }
                 ch == '-' && i + 1 < sql.length && sql[i + 1] == '-' -> i = skipLineComment(sql, i)
                 ch == '/' && i + 1 < sql.length && sql[i + 1] == '*' -> i = skipBlockComment(sql, i)
-                isIdentifierStart(ch) && (i == 0 || !isIdentifierPart(sql[i - 1])) -> {
+                !isSqlWhitespace(ch) && isIdentifierStart(ch) &&
+                    (i == 0 || isSqlWhitespace(sql[i - 1]) || !isIdentifierPart(sql[i - 1])) -> {
                     val keyword = readKeyword(sql, i)
-                    if (keyword?.keyword == target) return true
+                    if (keyword?.keyword == target && (precededBy == null || previous == precededBy)) return true
+                    previous = keyword?.keyword ?: ""
                     if (keyword != null) i = keyword.end - 1
                 }
+                !isSqlWhitespace(ch) -> previous = ""
             }
             i++
         }
         return false
     }
 
-    private fun keywords(sql: String): List<String> {
-        val result = mutableListOf<String>()
-        var i = 0
-        while (i < sql.length) {
-            val ch = sql[i]
-            when {
-                ch == '\'' || ch == '"' || ch == '`' -> i = skipQuoted(sql, i, ch)
-                ch == '[' -> i = skipBracketIdentifier(sql, i)
-                ch == '-' && i + 1 < sql.length && sql[i + 1] == '-' -> i = skipLineComment(sql, i)
-                ch == '/' && i + 1 < sql.length && sql[i + 1] == '*' -> i = skipBlockComment(sql, i)
-                isIdentifierStart(ch) && (i == 0 || !isIdentifierPart(sql[i - 1])) -> {
-                    val keyword = readKeyword(sql, i)
-                    if (keyword != null) {
-                        result.add(keyword.keyword)
-                        i = keyword.end - 1
-                    }
-                }
-            }
-            i++
-        }
-        return result
-    }
+    private fun isSqlWhitespace(ch: Char): Boolean = ch == ' ' || ch == '\uFEFF' || ch in '\t'..'\r'
 
     private fun skipIdentifier(
         sql: String,
@@ -925,7 +845,7 @@ internal object SQLiteHelpers {
         return sql.length
     }
 
-    private fun isIdentifierPart(ch: Char): Boolean = isIdentifierStart(ch) || ch.isDigit()
+    private fun isIdentifierPart(ch: Char): Boolean = isIdentifierStart(ch) || ch.isDigit() || ch == '$'
 
     private fun requireAnonymousBindParameterCount(
         sql: String,
@@ -960,7 +880,8 @@ internal object SQLiteHelpers {
                     count++
                 }
                 (ch == ':' || ch == '@' || ch == '$') &&
-                    i + 1 < sql.length && isIdentifierStart(sql[i + 1]) ->
+                    i + 1 < sql.length && isIdentifierPart(sql[i + 1]) &&
+                    (ch != '$' || i == 0 || isSqlWhitespace(sql[i - 1]) || !isIdentifierPart(sql[i - 1])) ->
                     throw CapacitorSqliteException(
                         "INVALID_PARAMS",
                         "Only anonymous '?' placeholders are supported; named placeholders are not supported",
@@ -972,7 +893,7 @@ internal object SQLiteHelpers {
     }
 
     private fun bindValues(
-        stmt: SQLiteStatement,
+        stmt: SQLiteProgram,
         values: List<Any?>,
     ) {
         values.forEachIndexed { i, v ->
@@ -1019,7 +940,7 @@ internal object SQLiteHelpers {
                         "BLOB value at index $idx contains a non-number at offset $itemIndex",
                     )
             val intValue = number.toInt()
-            if (intValue !in 0..255) {
+            if (!number.toDouble().isFinite() || number.toDouble() != intValue.toDouble() || intValue !in 0..255) {
                 throw CapacitorSqliteException(
                     "INVALID_PARAMS",
                     "BLOB value at index $idx contains an out-of-range byte at offset $itemIndex",
@@ -1033,26 +954,6 @@ internal object SQLiteHelpers {
         value.isFinite() && value % 1.0 == 0.0 && kotlin.math.abs(value) > MAX_SAFE_INTEGER
 
     private fun isUnsafeInteger(value: Long): Boolean = value > MAX_SAFE_INTEGER.toLong() || value < -MAX_SAFE_INTEGER.toLong()
-
-    private fun extractRows(cursor: Cursor): List<Map<String, Any?>> {
-        val rows = mutableListOf<Map<String, Any?>>()
-        while (cursor.moveToNext()) {
-            val row = mutableMapOf<String, Any?>()
-            for (i in 0 until cursor.columnCount) {
-                val name = cursor.getColumnName(i)
-                row[name] =
-                    when (cursor.getType(i)) {
-                        Cursor.FIELD_TYPE_INTEGER -> normalizeInteger(cursor.getLong(i))
-                        Cursor.FIELD_TYPE_FLOAT -> cursor.getDouble(i)
-                        Cursor.FIELD_TYPE_STRING -> cursor.getString(i)
-                        Cursor.FIELD_TYPE_BLOB -> cursor.getBlob(i)
-                        else -> null
-                    }
-            }
-            rows.add(row)
-        }
-        return rows
-    }
 
     private fun normalizeInteger(value: Long): Any = if (isUnsafeInteger(value)) value.toString() else value
 }

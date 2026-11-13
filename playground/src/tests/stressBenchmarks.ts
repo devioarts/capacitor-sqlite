@@ -176,11 +176,14 @@ export function buildStressBenchmarks(CapacitorSqlite: CapacitorSqlitePlugin): B
     await silentClose(DB_STRESS);
     mustSucceed(await CapacitorSqlite.open({ database: DB_STRESS }), 'open');
     mustSucceed(await CapacitorSqlite.execute({ database: DB_STRESS, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (id INTEGER, v TEXT)'] }), 'setup');
-    const set = Array.from({ length: rows }, (_, i) => ({
-      statement: 'INSERT INTO t VALUES (?,?)',
-      values: [i, `row${i}`] as [number, string],
-    }));
-    mustSucceed(await CapacitorSqlite.runBatch({ database: DB_STRESS, set }), 'seed batch');
+    // Keep untimed setup within the same bridge payload size as the batch benchmark.
+    for (let offset = 0; offset < rows; offset += WRITE_ROWS) {
+      const set = Array.from({ length: Math.min(WRITE_ROWS, rows - offset) }, (_, i) => ({
+        statement: 'INSERT INTO t VALUES (?,?)',
+        values: [offset + i, `row${offset + i}`] as [number, string],
+      }));
+      mustSucceed(await CapacitorSqlite.runBatch({ database: DB_STRESS, set }), 'seed batch');
+    }
     const start = Date.now();
     const r = await CapacitorSqlite.query({ database: DB_STRESS, statement: 'SELECT * FROM t' });
     const d = ms(start);
@@ -195,11 +198,13 @@ export function buildStressBenchmarks(CapacitorSqlite: CapacitorSqlitePlugin): B
     await silentClose(DB_STRESS);
     mustSucceed(await CapacitorSqlite.open({ database: DB_STRESS }), 'open');
     mustSucceed(await CapacitorSqlite.execute({ database: DB_STRESS, statements: ['DROP TABLE IF EXISTS t', 'CREATE TABLE t (id INTEGER, v TEXT)'] }), 'setup');
-    const set = Array.from({ length: rows }, (_, i) => ({
-      statement: 'INSERT INTO t VALUES (?,?)',
-      values: [i, `row${i}`] as [number, string],
-    }));
-    mustSucceed(await CapacitorSqlite.runBatch({ database: DB_STRESS, set }), 'seed batch');
+    for (let offset = 0; offset < rows; offset += WRITE_ROWS) {
+      const set = Array.from({ length: Math.min(WRITE_ROWS, rows - offset) }, (_, i) => ({
+        statement: 'INSERT INTO t VALUES (?,?)',
+        values: [offset + i, `row${offset + i}`] as [number, string],
+      }));
+      mustSucceed(await CapacitorSqlite.runBatch({ database: DB_STRESS, set }), 'seed batch');
+    }
     const start = Date.now();
     // Filter + sort + limit — exercises full index-less scan
     const r = await CapacitorSqlite.query({

@@ -20,14 +20,14 @@ enum SQLStatement {
 
     static func type(_ sql: String) -> String {
         if let cached = typeCache.object(forKey: sql as NSString) { return cached as String }
-        let result = computeType(sql)
+        let result = computeType(sql.unicodeScalars)
         typeCache.setObject(result as NSString, forKey: sql as NSString)
         return result
     }
 
-    private static func computeType(_ sql: String) -> String {
-        let first = readKeyword(sql, from: skipIgnorable(sql, from: sql.startIndex))
-        guard let first else { return "" }
+    // SQLite token boundaries are scalar/byte boundaries, never Swift grapheme clusters.
+    private static func computeType(_ sql: String.UnicodeScalarView) -> String {
+        guard let first = readKeyword(sql, from: skipIgnorable(sql, from: sql.startIndex)) else { return "" }
         if first.keyword != "WITH" { return first.keyword }
         return withMainStatementType(sql, from: first.end) ?? first.keyword
     }
@@ -35,6 +35,12 @@ enum SQLStatement {
     static func isInsertLike(_ sql: String) -> Bool {
         let stmtType = type(sql)
         return stmtType == "INSERT" || stmtType == "REPLACE"
+    }
+
+    static func isTransactionControl(_ sql: String) -> Bool {
+        // execute and migrations trim Foundation whitespace before passing SQL to SQLite.
+        let statementType = type(sql.trimmingCharacters(in: .whitespacesAndNewlines))
+        return ["BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE"].contains(statementType)
     }
 
     static func isQueryResultStatement(_ sql: String) -> Bool {
@@ -64,7 +70,7 @@ enum SQLStatement {
         cache: NSCache<NSString, NSNumber>
     ) -> Bool {
         if let cached = cache.object(forKey: sql as NSString) { return cached.boolValue }
-        let result = hasKeyword(sql, target: target)
+        let result = hasKeyword(sql.unicodeScalars, target: target, precededBy: target == "CONFLICT" ? "ON" : nil)
         cache.setObject(NSNumber(value: result), forKey: sql as NSString)
         return result
     }
@@ -74,7 +80,7 @@ enum SQLStatement {
     // keyword of the statement the CTEs actually feed (SELECT/INSERT/UPDATE/DELETE).
     // Returns nil if the WITH clause doesn't parse as expected, in which case callers
     // fall back to treating it as a plain 'WITH' statement type.
-    private static func withMainStatementType(_ sql: String, from start: String.Index) -> String? {
+    private static func withMainStatementType(_ sql: String.UnicodeScalarView, from start: String.Index) -> String? {
         var idx = skipIgnorable(sql, from: start)
         if let recursive = readKeyword(sql, from: idx), recursive.keyword == "RECURSIVE" {
             idx = skipIgnorable(sql, from: recursive.end)
@@ -85,6 +91,8 @@ enum SQLStatement {
             guard idx < sql.endIndex else { return nil }
 
             idx = skipIgnorable(sql, from: idx)
+            // Trailing whitespace or a comment can consume the remainder of a malformed CTE.
+            guard idx < sql.endIndex else { return nil }
             if sql[idx] == "(" {
                 idx = skipParenthesized(sql, from: idx)
                 guard idx < sql.endIndex else { return nil }
@@ -116,7 +124,7 @@ enum SQLStatement {
         return nil
     }
 
-    private static func skipIgnorable(_ sql: String, from start: String.Index) -> String.Index {
+    private static func skipIgnorable(_ sql: String.UnicodeScalarView, from start: String.Index) -> String.Index {
         var idx = start
         while idx < sql.endIndex {
             let character = sql[idx]
@@ -137,7 +145,9 @@ enum SQLStatement {
         return idx
     }
 
-    private static func readKeyword(_ sql: String, from start: String.Index) -> (keyword: String, end: String.Index)? {
+    private static func readKeyword(
+        _ sql: String.UnicodeScalarView, from start: String.Index
+    ) -> (keyword: String, end: String.Index)? {
         guard start < sql.endIndex, isIdentifierStart(sql[start]) else { return nil }
         var end = sql.index(after: start)
         while end < sql.endIndex, isIdentifierPart(sql[end]) {
@@ -146,31 +156,38 @@ enum SQLStatement {
         return (String(sql[start..<end]).uppercased(), end)
     }
 
-    private static func hasKeyword(_ sql: String, target: String) -> Bool {
+    private static func hasKeyword(_ sql: String.UnicodeScalarView, target: String, precededBy: String? = nil) -> Bool {
+        var previous = ""
         var idx = sql.startIndex
         while idx < sql.endIndex {
             let character = sql[idx]
             if character == "'" || character == "\"" || character == "`" {
                 idx = skipQuoted(sql, from: idx, quote: character)
+                previous = ""
             } else if character == "[" {
                 idx = skipBracketIdentifier(sql, from: idx)
+                previous = ""
             } else if character == "-", nextChar(sql, after: idx) == "-" {
                 idx = skipLineComment(sql, from: idx)
             } else if character == "/", nextChar(sql, after: idx) == "*" {
                 idx = skipBlockComment(sql, from: idx)
-            } else if isIdentifierStart(character),
-                      idx == sql.startIndex || !isIdentifierPart(sql[sql.index(before: idx)]) {
+            } else if isIdentifierStart(character), !isWhitespace(character),
+                      idx == sql.startIndex || isWhitespace(sql[sql.index(before: idx)]) ||
+                        !isIdentifierPart(sql[sql.index(before: idx)]) {
                 if let keyword = readKeyword(sql, from: idx) {
-                    if keyword.keyword == target { return true }
+                    if keyword.keyword == target && (precededBy == nil || previous == precededBy) { return true }
+                    previous = keyword.keyword
                     idx = sql.index(before: keyword.end)
                 }
+            } else if !isWhitespace(character) {
+                previous = ""
             }
             idx = sql.index(after: idx)
         }
         return false
     }
 
-    private static func skipIdentifier(_ sql: String, from start: String.Index) -> String.Index {
+    private static func skipIdentifier(_ sql: String.UnicodeScalarView, from start: String.Index) -> String.Index {
         var idx = skipIgnorable(sql, from: start)
         guard idx < sql.endIndex else { return idx }
         if sql[idx] == "'" || sql[idx] == "\"" || sql[idx] == "`" {
@@ -185,7 +202,7 @@ enum SQLStatement {
         return idx
     }
 
-    private static func skipParenthesized(_ sql: String, from start: String.Index) -> String.Index {
+    private static func skipParenthesized(_ sql: String.UnicodeScalarView, from start: String.Index) -> String.Index {
         var idx = start
         var depth = 0
         while idx < sql.endIndex {
@@ -209,12 +226,14 @@ enum SQLStatement {
         return sql.endIndex
     }
 
-    private static func nextChar(_ sql: String, after idx: String.Index) -> Character? {
+    private static func nextChar(_ sql: String.UnicodeScalarView, after idx: String.Index) -> Unicode.Scalar? {
         let next = sql.index(after: idx)
         return next < sql.endIndex ? sql[next] : nil
     }
 
-    private static func skipQuoted(_ sql: String, from start: String.Index, quote: Character) -> String.Index {
+    private static func skipQuoted(
+        _ sql: String.UnicodeScalarView, from start: String.Index, quote: Unicode.Scalar
+    ) -> String.Index {
         var idx = sql.index(after: start)
         while idx < sql.endIndex {
             if sql[idx] == quote {
@@ -230,7 +249,9 @@ enum SQLStatement {
         return sql.index(before: sql.endIndex)
     }
 
-    private static func skipBracketIdentifier(_ sql: String, from start: String.Index) -> String.Index {
+    private static func skipBracketIdentifier(
+        _ sql: String.UnicodeScalarView, from start: String.Index
+    ) -> String.Index {
         var idx = sql.index(after: start)
         while idx < sql.endIndex {
             if sql[idx] == "]" { return idx }
@@ -239,16 +260,16 @@ enum SQLStatement {
         return sql.index(before: sql.endIndex)
     }
 
-    private static func skipLineComment(_ sql: String, from start: String.Index) -> String.Index {
+    private static func skipLineComment(_ sql: String.UnicodeScalarView, from start: String.Index) -> String.Index {
         var idx = sql.index(start, offsetBy: 2, limitedBy: sql.endIndex) ?? sql.endIndex
         while idx < sql.endIndex {
-            if sql[idx] == "\n" || sql[idx] == "\r" { return idx }
+            if sql[idx] == "\n" { return idx }
             idx = sql.index(after: idx)
         }
         return sql.index(before: sql.endIndex)
     }
 
-    private static func skipBlockComment(_ sql: String, from start: String.Index) -> String.Index {
+    private static func skipBlockComment(_ sql: String.UnicodeScalarView, from start: String.Index) -> String.Index {
         var idx = sql.index(start, offsetBy: 2, limitedBy: sql.endIndex) ?? sql.endIndex
         while idx < sql.endIndex {
             if sql[idx] == "*", nextChar(sql, after: idx) == "/" {
@@ -259,16 +280,17 @@ enum SQLStatement {
         return sql.index(before: sql.endIndex)
     }
 
-    private static func isWhitespace(_ character: Character) -> Bool {
-        character.unicodeScalars.allSatisfy { CharacterSet.whitespacesAndNewlines.contains($0) }
+    private static func isWhitespace(_ character: Unicode.Scalar) -> Bool {
+        character == " " || character == "\u{FEFF}" || (9...13).contains(character.value)
     }
 
-    private static func isIdentifierStart(_ character: Character) -> Bool {
-        character == "_" || character.isLetter
+    private static func isIdentifierStart(_ character: Unicode.Scalar) -> Bool {
+        character == "_" || (65...90).contains(character.value) ||
+            (97...122).contains(character.value) || character.value >= 128
     }
 
-    private static func isIdentifierPart(_ character: Character) -> Bool {
-        isIdentifierStart(character) || character.isNumber
+    private static func isIdentifierPart(_ character: Unicode.Scalar) -> Bool {
+        isIdentifierStart(character) || (48...57).contains(character.value) || character == "$"
     }
 }
 // swiftlint:enable cyclomatic_complexity

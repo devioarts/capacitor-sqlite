@@ -2,6 +2,30 @@ import XCTest
 @testable import CapacitorSqlitePlugin
 
 class SQLStatementGuardTests: XCTestCase {
+    func testSharedSqlCorpus() throws {
+        let url = try XCTUnwrap(Bundle.module.url(
+            forResource: "sql-guard", withExtension: "tsv", subdirectory: "Fixtures"
+        ))
+        let corpus = try String(contentsOf: url, encoding: .utf8)
+        for line in corpus.split(separator: "\n") where !line.hasPrefix("#") {
+            let fields = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+            let sqlBytes = try XCTUnwrap(Data(base64Encoded: fields[1]))
+            let typeBytes = try XCTUnwrap(Data(base64Encoded: fields[2]))
+            let sql = try XCTUnwrap(String(data: sqlBytes, encoding: .utf8))
+            let type = try XCTUnwrap(String(data: typeBytes, encoding: .utf8))
+            XCTAssertEqual(SQLStatement.type(sql), type, fields[0])
+            XCTAssertEqual(SQLiteHelpers.hasMultipleStatements(sql), fields[3] == "true", fields[0])
+            XCTAssertEqual(SQLStatement.hasConflictClause(sql), fields[4] == "true", fields[0])
+            XCTAssertEqual(SQLStatement.isTransactionControl(sql), fields[5] == "true", fields[0])
+            if try XCTUnwrap(Int(fields[6])) < 0 {
+                XCTAssertThrowsError(try SQLiteHelpers.validateRunInput(sql: sql, valueCount: 0))
+            } else if fields[3] != "true" {
+                XCTAssertNoThrow(try SQLiteHelpers.validateRunInput(
+                    sql: sql, valueCount: try XCTUnwrap(Int(fields[6]))
+                ))
+            }
+        }
+    }
 
     func testAllowsSingleStatementWithTrailingSemicolonsAndComments() {
         XCTAssertFalse(SQLiteHelpers.hasMultipleStatements("SELECT 1"))
@@ -92,4 +116,66 @@ class SQLStatementGuardTests: XCTestCase {
         XCTAssertFalse(SQLiteHelpers.hasMultipleStatements(trigger))
         XCTAssertTrue(SQLiteHelpers.hasMultipleStatements(trigger + "; SELECT 1"))
     }
+    func testKeywordIdentifiersAndTriggerTerminatorsPreserveBoundaries() {
+        let ordinary = [
+            "SELECT begin FROM t",
+            "SELECT end FROM t",
+            "SELECT t . begin FROM t",
+            "UPDATE t SET begin = 1",
+            "DELETE FROM begin",
+            "DROP TABLE begin",
+            "CREATE TABLE begin(begin INTEGER, end INTEGER)",
+            "SELECT CASE WHEN 1 THEN 2 ELSE 3 END"
+        ]
+        let triggers = [
+            "CREATE TRIGGER begin AFTER INSERT ON t BEGIN SELECT 1; END",
+            "CREATE TEMP TRIGGER tr AFTER INSERT ON t BEGIN SELECT end FROM t; SELECT begin FROM t; END",
+            "CREATE TEMPORARY TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; /* gap */ END",
+            "CREATE TRIGGER tr AFTER UPDATE OF begin,end ON t WHEN NEW.begin > 0 BEGIN SELECT NEW.end; END",
+            "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT CASE WHEN NEW.begin THEN " +
+                "CASE WHEN NEW.end THEN 1 ELSE 2 END ELSE 3 END; END",
+            "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT '; END;', \"begin\", `end`, [case]; END",
+            "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; -- END; hidden\nSELECT 2; END",
+            "EXPLAIN CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END",
+            "EXPLAIN QUERY PLAN CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END"
+        ]
+        for sql in ordinary {
+            XCTAssertFalse(SQLiteHelpers.hasMultipleStatements("/* lead */ \(sql); -- done"), sql)
+            XCTAssertTrue(SQLiteHelpers.hasMultipleStatements("\(sql); /* gap */ DELETE FROM t"), sql)
+        }
+        for sql in triggers {
+            XCTAssertFalse(SQLiteHelpers.hasMultipleStatements("/* lead */ \(sql); /* done */"), sql)
+            XCTAssertTrue(SQLiteHelpers.hasMultipleStatements("\(sql); /* gap */ DELETE FROM t"), sql)
+        }
+    }
+
+    func testMalformedWithClauseDoesNotReadPastEnd() {
+        for sql in ["WITH x ", "WITH x -- trailing", "WITH x /* trailing */", "WITH x() "] {
+            XCTAssertEqual(SQLStatement.type(sql), "WITH", sql)
+        }
+    }
+
+    func testScalarBoundariesPreserveQuotesCommentsAndDelimiters() {
+        XCTAssertTrue(SQLiteHelpers.hasMultipleStatements("SELECT 'a'\u{0301}; DROP TABLE victim"))
+        XCTAssertTrue(SQLiteHelpers.hasMultipleStatements("SELECT 1;\u{0301} SELECT 2"))
+        XCTAssertFalse(SQLiteHelpers.hasMultipleStatements("SELECT '\u{0301}; still quoted'"))
+        XCTAssertFalse(SQLiteHelpers.hasMultipleStatements("SELECT 1 -- comment\r; SELECT 2"))
+        let trigger = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 'a'\u{0301}; END"
+        XCTAssertFalse(SQLiteHelpers.hasMultipleStatements(trigger))
+        XCTAssertTrue(SQLiteHelpers.hasMultipleStatements(trigger + "; SELECT 2"))
+        XCTAssertEqual(SQLStatement.type("WITH český AS (SELECT 1) SELECT * FROM český"), "SELECT")
+        XCTAssertEqual(SQLStatement.type("WITH a$b AS (SELECT 1) SELECT * FROM a$b"), "SELECT")
+        XCTAssertFalse(SQLStatement.isQueryResultStatement("UPDATE t SET a = RETURNING\u{0301}"))
+        XCTAssertTrue(SQLStatement.isQueryResultStatement("UPDATE t SET a = 1 \u{FEFF}RETURNING a"))
+        XCTAssertTrue(SQLStatement.isTransactionControl("\u{FEFF}COMMIT"))
+    }
+
+    func testLexicalBindValidationRespectsSQLiteTokens() throws {
+        let valid = ["SELECT a$b, ? FROM t", "SELECT '?', \":name\", [@name], `$name`, ? /* ? */ -- ?"]
+        for sql in valid { XCTAssertNoThrow(try SQLiteHelpers.validateRunInput(sql: sql, valueCount: 1)) }
+        for placeholder in ["?1", ":1", "@1", "$1", ":český", "@\u{0301}", "$$", "\u{FEFF}$name"] {
+            XCTAssertThrowsError(try SQLiteHelpers.validateRunInput(sql: "SELECT \(placeholder)", valueCount: 1))
+        }
+    }
+
 }

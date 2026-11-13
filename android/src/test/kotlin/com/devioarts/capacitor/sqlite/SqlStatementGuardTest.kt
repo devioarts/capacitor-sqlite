@@ -1,11 +1,39 @@
 package com.devioarts.capacitor.sqlite
 
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.util.Base64
 
 class SqlStatementGuardTest {
+    @Test
+    fun sharedSqlCorpus() {
+        val resource = checkNotNull(javaClass.getResourceAsStream("/sql-guard.tsv"))
+        resource.bufferedReader().useLines { lines ->
+            for (line in lines.filter { it.isNotEmpty() && !it.startsWith("#") }) {
+                val fields = line.split('\t')
+                val name = fields[0]
+                val sql = String(Base64.getDecoder().decode(fields[1]), Charsets.UTF_8)
+                val type = String(Base64.getDecoder().decode(fields[2]), Charsets.UTF_8)
+                assertEquals(type, SQLiteHelpers.statementType(sql), name)
+                assertEquals(fields[3].toBoolean(), SQLiteHelpers.hasMultipleStatements(sql), name)
+                assertEquals(fields[4].toBoolean(), SQLiteHelpers.hasConflictClause(sql), name)
+                if (fields[6].toInt() < 0) {
+                    assertThrows(CapacitorSqliteException::class.java) { SQLiteHelpers.validateRunInput(sql, emptyList()) }
+                } else if (!fields[3].toBoolean()) {
+                    SQLiteHelpers.validateRunInput(sql, List(fields[6].toInt()) { null })
+                }
+                if (fields[5].toBoolean()) {
+                    assertThrows(CapacitorSqliteException::class.java) { SQLiteHelpers.requireManagedTransactionStatement(sql) }
+                } else {
+                    SQLiteHelpers.requireManagedTransactionStatement(sql)
+                }
+            }
+        }
+    }
+
     @Test
     fun allowsSingleStatementWithTrailingSemicolonsAndComments() {
         assertFalse(SQLiteHelpers.hasMultipleStatements("SELECT 1"))
@@ -121,21 +149,73 @@ class SqlStatementGuardTest {
     }
 
     @Test
-    fun detectsOrRollbackOnlyAsAdjacentSqlKeywords() {
-        assertTrue(SQLiteHelpers.hasRollbackConflictClause("INSERT OR ROLLBACK INTO t VALUES (1)"))
-        assertTrue(SQLiteHelpers.hasRollbackConflictClause("UPDATE OR /* gap */ ROLLBACK t SET v = 1"))
-        assertFalse(SQLiteHelpers.hasRollbackConflictClause("SELECT 'OR ROLLBACK'"))
-        assertFalse(SQLiteHelpers.hasRollbackConflictClause("SELECT or_rollback FROM t"))
-        assertFalse(SQLiteHelpers.hasRollbackConflictClause("SELECT 1 -- OR ROLLBACK\n"))
-        assertFalse(SQLiteHelpers.hasRollbackConflictClause("INSERT OR IGNORE INTO t VALUES (1)"))
-    }
-
-    @Test
     fun qualifiedNewEndDoesNotCloseTriggerBodyEarly() {
         val trigger =
             "CREATE TRIGGER trg AFTER INSERT ON t BEGIN INSERT INTO log VALUES " +
                 "(NEW.end); INSERT INTO log VALUES (2); END"
         assertFalse(SQLiteHelpers.hasMultipleStatements(trigger))
         assertTrue(SQLiteHelpers.hasMultipleStatements("$trigger; SELECT 1"))
+    }
+
+    @Test
+    fun keywordIdentifiersAndTriggerTerminatorsPreserveBoundaries() {
+        val ordinary =
+            listOf(
+                "SELECT begin FROM t",
+                "SELECT end FROM t",
+                "SELECT t . begin FROM t",
+                "UPDATE t SET begin = 1",
+                "DELETE FROM begin",
+                "DROP TABLE begin",
+                "CREATE TABLE begin(begin INTEGER, end INTEGER)",
+                "SELECT CASE WHEN 1 THEN 2 ELSE 3 END",
+            )
+        val triggers =
+            listOf(
+                "CREATE TRIGGER begin AFTER INSERT ON t BEGIN SELECT 1; END",
+                "CREATE TEMP TRIGGER tr AFTER INSERT ON t BEGIN SELECT end FROM t; SELECT begin FROM t; END",
+                "CREATE TEMPORARY TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; /* gap */ END",
+                "CREATE TRIGGER tr AFTER UPDATE OF begin,end ON t WHEN NEW.begin > 0 BEGIN SELECT NEW.end; END",
+                "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT CASE WHEN NEW.begin THEN " +
+                    "CASE WHEN NEW.end THEN 1 ELSE 2 END ELSE 3 END; END",
+                "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT '; END;', \"begin\", `end`, [case]; END",
+                "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; -- END; hidden\nSELECT 2; END",
+                "EXPLAIN CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END",
+                "EXPLAIN QUERY PLAN CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END",
+            )
+        for (sql in ordinary) {
+            assertFalse(SQLiteHelpers.hasMultipleStatements("/* lead */ $sql; -- done"), sql)
+            assertTrue(SQLiteHelpers.hasMultipleStatements("$sql; /* gap */ DELETE FROM t"), sql)
+        }
+        for (sql in triggers) {
+            assertFalse(SQLiteHelpers.hasMultipleStatements("/* lead */ $sql; /* done */"), sql)
+            assertTrue(SQLiteHelpers.hasMultipleStatements("$sql; /* gap */ DELETE FROM t"), sql)
+        }
+    }
+
+    @Test
+    fun lexicalPreflightAcceptsUnicodeAndDollarIdentifiers() {
+        SQLiteHelpers.validateRunInput("WITH český AS (SELECT ?) SELECT * FROM český", listOf(1))
+        SQLiteHelpers.validateRunInput("UPDATE t SET a\$b=?", listOf(1))
+        for (sql in listOf("SELECT :1", "SELECT @1", "SELECT $1", "SELECT ?1")) {
+            assertThrows(CapacitorSqliteException::class.java) { SQLiteHelpers.validateRunInput(sql, emptyList()) }
+        }
+    }
+
+    @Test
+    fun automaticTransactionsRejectControlStatements() {
+        for (sql in listOf(
+            "BEGIN",
+            "COMMIT\u00A0",
+            "\uFEFFCOMMIT",
+            "/* comment */ COMMIT",
+            "ROLLBACK",
+            "END",
+            "SAVEPOINT x",
+            "RELEASE x",
+        )) {
+            assertThrows(CapacitorSqliteException::class.java) { SQLiteHelpers.requireManagedTransactionStatement(sql) }
+        }
+        SQLiteHelpers.requireManagedTransactionStatement("CREATE TABLE begin(end)")
     }
 }

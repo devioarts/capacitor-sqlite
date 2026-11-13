@@ -1,3 +1,8 @@
+aud*.md
+
+# Local dated audit evidence; fixes, regression tests and rationale remain versioned.
+/docs/audits/
+
 # node files
 dist
 node_modules

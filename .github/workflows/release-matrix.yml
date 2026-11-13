@@ -49,7 +49,7 @@ jobs:
             suite_command: npm run test:suite:android
             stress_command: npm run test:suite:android:stress
           - platform: ios
-            runner: macos-latest
+            runner: macos-15-intel
             timeout: 90
             suite_command: npm run test:suite:ios
             stress_command: npm run test:suite:ios:stress
@@ -59,17 +59,17 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
           cache: npm
 
       - name: Setup Java for Android
         if: matrix.platform == 'android'
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: 21
@@ -84,9 +84,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # file:.. resolves the published dist entry; a clean checkout has no generated output.
+      - name: Build plugin
+        run: npm run build
+
       - name: Install playground dependencies
         if: matrix.platform != 'electron'
         run: npm ci --prefix playground
+
+      # Native playground projects are intentionally ignored and must exist before cap sync.
+      - name: Create native playground project
+        if: matrix.platform == 'android' || matrix.platform == 'ios'
+        working-directory: playground
+        run: npx cap add ${{ matrix.platform }}
 
       - name: Select and boot iOS Simulator
         if: matrix.platform == 'ios'
@@ -104,7 +114,7 @@ jobs:
 
       - name: Run Android suite
         if: matrix.platform == 'android'
-        uses: reactivecircus/android-emulator-runner@v2
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
         with:
           api-level: 35
           target: google_apis
@@ -133,7 +143,7 @@ jobs:
 
       - name: Upload test log
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-matrix-${{ matrix.platform }}-${{ github.run_attempt }}
           path: artifacts/
