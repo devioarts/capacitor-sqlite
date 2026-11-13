@@ -17,6 +17,22 @@ npm install @devioarts/capacitor-sqlite
 npx cap sync
 ```
 
+## Upgrading to 0.2.0
+
+Public TypeScript method signatures and result shapes are unchanged from 0.1.1.
+Validation consistently rejects malformed migrations, bind-count mismatches,
+unsupported placeholders, and multiple statements packed into one SQL string.
+Explicit transaction-control SQL is rejected inside automatic batches and migrations;
+use the transaction methods, or `transaction: false` where supported.
+
+Electron cache databases now use an application-specific directory. Rebuild data
+from the former shared cache directory; those files are not moved automatically.
+
+When upgrading from 0.0.2, replace `getPlatform()` with `getPluginPlatform()`;
+that rename already occurred before this release. `lastInsertId` is conservatively
+`0` for UPSERT and other ambiguous insert paths; use `query()` with `RETURNING`
+when the exact row ID is needed and the platform's SQLite supports it.
+
 ## Platform setup
 
 ### Web
