@@ -1,11 +1,39 @@
 package com.devioarts.capacitor.sqlite
 
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.util.Base64
 
 class SqlStatementGuardTest {
+    @Test
+    fun sharedSqlCorpus() {
+        val resource = checkNotNull(javaClass.getResourceAsStream("/sql-guard.tsv"))
+        resource.bufferedReader().useLines { lines ->
+            for (line in lines.filter { it.isNotEmpty() && !it.startsWith("#") }) {
+                val fields = line.split('\t')
+                val name = fields[0]
+                val sql = String(Base64.getDecoder().decode(fields[1]), Charsets.UTF_8)
+                val type = String(Base64.getDecoder().decode(fields[2]), Charsets.UTF_8)
+                assertEquals(type, SQLiteHelpers.statementType(sql), name)
+                assertEquals(fields[3].toBoolean(), SQLiteHelpers.hasMultipleStatements(sql), name)
+                assertEquals(fields[4].toBoolean(), SQLiteHelpers.hasConflictClause(sql), name)
+                if (fields[6].toInt() < 0) {
+                    assertThrows(CapacitorSqliteException::class.java) { SQLiteHelpers.validateRunInput(sql, emptyList()) }
+                } else if (!fields[3].toBoolean()) {
+                    SQLiteHelpers.validateRunInput(sql, List(fields[6].toInt()) { null })
+                }
+                if (fields[5].toBoolean()) {
+                    assertThrows(CapacitorSqliteException::class.java) { SQLiteHelpers.requireManagedTransactionStatement(sql) }
+                } else {
+                    SQLiteHelpers.requireManagedTransactionStatement(sql)
+                }
+            }
+        }
+    }
+
     @Test
     fun allowsSingleStatementWithTrailingSemicolonsAndComments() {
         assertFalse(SQLiteHelpers.hasMultipleStatements("SELECT 1"))

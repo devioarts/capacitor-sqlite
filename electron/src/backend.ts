@@ -265,10 +265,6 @@ function indexedExecutionError(err: unknown, label: string): SqliteRuntimeError 
 
 export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
   private databases = new Map<string, DatabaseEntry>();
-  // Coalesces concurrent open() calls for the same database.
-  private pendingOpens = new Map<string, Promise<SqliteResult>>();
-  private pendingOpenModes = new Map<string, boolean>();
-  private pendingOpenPaths = new Map<string, string>();
 
   constructor(private readonly paths: ElectronSqliteBackendPaths) {}
 
@@ -371,40 +367,16 @@ export class ElectronSqliteBackend implements CapacitorSqlitePlugin {
       return this.okEmpty();
     }
 
-    const pending = this.pendingOpens.get(key);
-    if (pending) {
-      const pendingReadonly = this.pendingOpenModes.get(key);
-      const pendingPath = this.pendingOpenPaths.get(key);
-      if (pendingReadonly !== readonly || !sameDatabasePath(pendingPath ?? '', dbPath)) {
-        return this.err(
-          'DB_ALREADY_OPEN',
-          'open',
-          new Error(
-            `open: database '${database}' is already opening as ${pendingReadonly ? 'readonly' : 'read/write'} at '${pendingPath}'`,
-          ),
-        );
-      }
-      return pending;
-    }
-
-    const openOp = this._doOpen(key, database, readonly, dbPath, migrations).finally(() => {
-      this.pendingOpens.delete(key);
-      this.pendingOpenModes.delete(key);
-      this.pendingOpenPaths.delete(key);
-    });
-    this.pendingOpens.set(key, openOp);
-    this.pendingOpenModes.set(key, readonly);
-    this.pendingOpenPaths.set(key, dbPath);
-    return openOp;
+    return this._doOpen(key, database, readonly, dbPath, migrations);
   }
 
-  private async _doOpen(
+  private _doOpen(
     key: string,
     database: string,
     readonly: boolean,
     dbPath: string,
     migrations: Migration[],
-  ): Promise<SqliteResult> {
+  ): SqliteResult {
     let db: DatabaseSync | null = null;
     try {
       const openModeError = this.openModeError(key, database, readonly, dbPath);
@@ -930,8 +902,28 @@ function toNumber(v: number | bigint | undefined | null): number {
   return typeof v === 'bigint' ? Number(v) : v;
 }
 
+const metadataStatements = new WeakMap<
+  DatabaseSync,
+  {
+    changes: ReturnType<DatabaseSync['prepare']>;
+    rowid: ReturnType<DatabaseSync['prepare']>;
+  }
+>();
+
+function connectionMetadata(db: DatabaseSync) {
+  let statements = metadataStatements.get(db);
+  if (!statements) {
+    statements = {
+      changes: db.prepare('SELECT total_changes() AS c'),
+      rowid: prepareWithBigInts(db, 'SELECT last_insert_rowid() AS id'),
+    };
+    metadataStatements.set(db, statements);
+  }
+  return statements;
+}
+
 function totalChanges(db: DatabaseSync): number {
-  const row = db.prepare('SELECT total_changes() AS c').get() as { c: number | bigint } | undefined;
+  const row = connectionMetadata(db).changes.get() as { c: number | bigint } | undefined;
   return toNumber(row?.c);
 }
 
@@ -943,7 +935,7 @@ function prepareWithBigInts(db: DatabaseSync, sql: string): ReturnType<DatabaseS
 }
 
 function lastInsertRowId(db: DatabaseSync): bigint {
-  const row = prepareWithBigInts(db, 'SELECT last_insert_rowid() AS id').get() as { id: bigint };
+  const row = connectionMetadata(db).rowid.get() as { id: bigint };
   return row.id;
 }
 

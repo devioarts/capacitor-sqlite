@@ -1,4 +1,5 @@
 const SQL_CACHE_LIMIT = 256;
+const SQLITE_WHITESPACE = /[\t-\r \uFEFF]/;
 
 // SQLite permits non-ASCII identifiers and `$` after their first character.
 // Read whole identifiers so `a$b` is not a bind and `end$tag` is not trigger END.
@@ -38,7 +39,7 @@ function computeHasMultipleSqlStatements(sql: string): boolean {
   for (let i = 0; i < sql.length; i++) {
     const ch = sql[i];
     let token = '';
-    if (/\s/.test(ch)) continue;
+    if (SQLITE_WHITESPACE.test(ch)) continue;
     if (ch === '-' && sql[i + 1] === '-') {
       i = skipLineComment(sql, i);
       continue;
@@ -56,7 +57,10 @@ function computeHasMultipleSqlStatements(sql: string): boolean {
       afterSemicolon = true;
       triggerEnd = false;
       continue;
-    } else if (IDENTIFIER_START.test(ch) && (i === 0 || !IDENTIFIER_PART.test(sql[i - 1]))) {
+    } else if (
+      IDENTIFIER_START.test(ch) &&
+      (i === 0 || SQLITE_WHITESPACE.test(sql[i - 1]) || !IDENTIFIER_PART.test(sql[i - 1]))
+    ) {
       const keyword = readKeyword(sql, i)!;
       token = keyword.keyword;
       i = keyword.end - 1;
@@ -107,6 +111,7 @@ function scanAnonymousBindParameters(sql: string): { count: number; error?: stri
   let placeholders = 0;
   for (let i = 0; i < sql.length; i++) {
     const ch = sql[i];
+    if (SQLITE_WHITESPACE.test(ch)) continue;
     if (ch === "'" || ch === '"' || ch === '`') {
       i = skipQuoted(sql, i, ch);
     } else if (ch === '[') {
@@ -169,7 +174,7 @@ export function isQueryResultStatement(sql: string): boolean {
 // `run-11` (UPSERT) regression-tests this; callers that need the affected row's id for an
 // UPSERT should use `query()` with a `RETURNING` clause instead.
 export function hasConflictClause(sql: string): boolean {
-  return cached(conflictCache, sql, () => hasKeyword(sql, 'CONFLICT'));
+  return cached(conflictCache, sql, () => hasKeyword(sql, 'CONFLICT', 'ON'));
 }
 
 /**
@@ -192,7 +197,7 @@ export function hasRollbackConflictClause(sql: string): boolean {
 function hasTailContent(sql: string, start: number): boolean {
   for (let i = start; i < sql.length; i++) {
     const ch = sql[i];
-    if (/\s/.test(ch) || ch === ';') {
+    if (SQLITE_WHITESPACE.test(ch) || ch === ';') {
       continue;
     }
     if (ch === '-' && sql[i + 1] === '-') {
@@ -261,7 +266,7 @@ function skipIgnorable(sql: string, start: number): number {
   let i = start;
   while (i < sql.length) {
     const ch = sql[i];
-    if (/\s/.test(ch) || ch === ';') {
+    if (SQLITE_WHITESPACE.test(ch) || ch === ';') {
       i++;
       continue;
     }
@@ -285,21 +290,31 @@ function readKeyword(sql: string, start: number): { keyword: string; end: number
   return { keyword: sql.slice(start, end).toUpperCase(), end };
 }
 
-function hasKeyword(sql: string, target: string): boolean {
+function hasKeyword(sql: string, target: string, precededBy?: string): boolean {
+  let previous = '';
   for (let i = 0; i < sql.length; i++) {
     const ch = sql[i];
     if (ch === "'" || ch === '"' || ch === '`') {
       i = skipQuoted(sql, i, ch);
+      previous = '';
     } else if (ch === '[') {
       i = skipBracketIdentifier(sql, i);
+      previous = '';
     } else if (ch === '-' && sql[i + 1] === '-') {
       i = skipLineComment(sql, i);
     } else if (ch === '/' && sql[i + 1] === '*') {
       i = skipBlockComment(sql, i);
-    } else if (IDENTIFIER_START.test(ch) && (i === 0 || !IDENTIFIER_PART.test(sql[i - 1]))) {
+    } else if (
+      !SQLITE_WHITESPACE.test(ch) &&
+      IDENTIFIER_START.test(ch) &&
+      (i === 0 || SQLITE_WHITESPACE.test(sql[i - 1]) || !IDENTIFIER_PART.test(sql[i - 1]))
+    ) {
       const keyword = readKeyword(sql, i);
-      if (keyword?.keyword === target) return true;
+      if (keyword?.keyword === target && (!precededBy || previous === precededBy)) return true;
+      previous = keyword?.keyword ?? '';
       if (keyword) i = keyword.end - 1;
+    } else if (!SQLITE_WHITESPACE.test(ch)) {
+      previous = '';
     }
   }
   return false;
@@ -317,7 +332,10 @@ function keywords(sql: string): string[] {
       i = skipLineComment(sql, i);
     } else if (ch === '/' && sql[i + 1] === '*') {
       i = skipBlockComment(sql, i);
-    } else if (IDENTIFIER_START.test(ch) && (i === 0 || !IDENTIFIER_PART.test(sql[i - 1]))) {
+    } else if (
+      IDENTIFIER_START.test(ch) &&
+      (i === 0 || SQLITE_WHITESPACE.test(sql[i - 1]) || !IDENTIFIER_PART.test(sql[i - 1]))
+    ) {
       const keyword = readKeyword(sql, i);
       if (keyword) {
         result.push(keyword.keyword);
@@ -377,7 +395,7 @@ function skipBracketIdentifier(sql: string, start: number): number {
 
 function skipLineComment(sql: string, start: number): number {
   for (let i = start + 2; i < sql.length; i++) {
-    if (sql[i] === '\n' || sql[i] === '\r') return i;
+    if (sql[i] === '\n') return i;
   }
   return sql.length - 1;
 }

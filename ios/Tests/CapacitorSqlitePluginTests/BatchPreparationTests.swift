@@ -160,4 +160,79 @@ final class BatchPreparationTests: XCTestCase {
     private func foreignKeys() throws -> Int64? {
         try database.query(statement: "PRAGMA foreign_keys").first?["foreign_keys"] as? Int64
     }
+
+    func testInvalidLaterMigrationDoesNotCommitEarlierVersion() throws {
+        let connection = Database(name: ":memory:", path: ":memory:")
+        try connection.open()
+        defer { try? connection.close() }
+        try connection.execute(statements: ["CREATE TABLE t(v)"])
+        XCTAssertThrowsError(try connection.open(migrations: [
+            MigrationEntry(version: 1, statements: ["INSERT INTO t VALUES(1)"]),
+            MigrationEntry(version: 2, statements: ["INSERT INTO t VALUES(2); INSERT INTO t VALUES(3)"])
+        ]))
+        XCTAssertEqual(try connection.getSchemaVersion(), 0)
+        XCTAssertEqual(try connection.query(statement: "SELECT * FROM t").count, 0)
+    }
+
+    func testSafeMigrationRebuildPreservesChildrenAndRestoresForeignKeys() throws {
+        let connection = Database(name: ":memory:", path: ":memory:")
+        try connection.open()
+        defer { try? connection.close() }
+        try connection.execute(statements: [
+            "CREATE TABLE parent(id INTEGER PRIMARY KEY)",
+            "CREATE TABLE child(id INTEGER PRIMARY KEY, parent_id REFERENCES parent(id) ON DELETE CASCADE)",
+            "INSERT INTO parent VALUES(1)", "INSERT INTO child VALUES(1,1)"
+        ])
+        try connection.execute(statements: ["PRAGMA foreign_keys=OFF"], transaction: false)
+        defer { _ = try? connection.execute(statements: ["PRAGMA foreign_keys=ON"], transaction: false) }
+        try connection.open(migrations: [MigrationEntry(version: 1, statements: [
+            "CREATE TABLE parent_new(id INTEGER PRIMARY KEY,extra TEXT)",
+            "INSERT INTO parent_new(id) SELECT id FROM parent", "DROP TABLE parent",
+            "ALTER TABLE parent_new RENAME TO parent"
+        ])])
+        XCTAssertEqual(try connection.query(statement: "SELECT * FROM child").count, 1)
+        XCTAssertEqual(try connection.query(statement: "PRAGMA foreign_key_check").count, 0)
+        try connection.execute(statements: ["PRAGMA foreign_keys=ON"], transaction: false)
+        XCTAssertThrowsError(try connection.run(statement: "INSERT INTO child VALUES(2,999)"))
+    }
+
+    func testSqliteErrorMessagesDoNotContainEnumWrappers() throws {
+        let impl = CapacitorSqlite()
+        try impl.open(database: ":memory:", readonly: false, migrations: [])
+        defer { try? impl.close(database: ":memory:") }
+        try impl.execute(database: ":memory:", statements: [
+            "CREATE TABLE t(id INTEGER PRIMARY KEY)", "INSERT INTO t VALUES(1)"
+        ])
+        let actions: [() throws -> Void] = [
+            { _ = try impl.run(database: ":memory:", statement: "INSERT INTO t VALUES(1)", values: []) },
+            { _ = try impl.runBatch(
+                database: ":memory:", set: [["statement": "INSERT INTO t VALUES(1)"]], transaction: true
+            ) },
+            { _ = try impl.runMany(
+                database: ":memory:", statement: "INSERT INTO t VALUES(?)", valueSets: [[1]],
+                transaction: true, returnResults: false
+            ) }
+        ]
+        for action in actions {
+            XCTAssertThrowsError(try action()) { error in
+                guard case CapacitorSqliteError.failed(_, let message) = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+                XCTAssertEqual(message, "UNIQUE constraint failed: t.id")
+            }
+        }
+        let queries: [() throws -> Void] = [
+            { _ = try impl.query(database: ":memory:", statement: "SELECT * FROM missing", values: []) },
+            { _ = try impl.queryCompact(database: ":memory:", statement: "SELECT * FROM missing", values: []) }
+        ]
+        for query in queries {
+            XCTAssertThrowsError(try query()) { error in
+                guard case CapacitorSqliteError.failed(let code, let message) = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+                XCTAssertEqual(code, "QUERY_FAILED")
+                XCTAssertEqual(message, "no such table: missing")
+            }
+        }
+    }
 }

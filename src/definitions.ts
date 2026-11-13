@@ -147,10 +147,10 @@ export interface QueryOptions {
    * BLOB values should use `Uint8Array`. Android/iOS transport them through a
    * private tagged base64 envelope; Web/Electron retain the typed array.
    *
-   * On Android, `query()` uses a small SQL scanner before calling
-   * `rawQuery(String[])` so numeric, boolean, and BLOB values keep their SQLite
-   * types. The scanner ignores `?` inside strings, quoted identifiers, and SQL
-   * comments, and rejects unsupported numbered/named placeholder forms.
+   * Android binds typed values without rewriting SQL. API 35+ SELECT/EXPLAIN
+   * and DML RETURNING use SQLiteRawStatement; older releases and PRAGMAs use a
+   * typed cursor factory. A SELECT row on Android before API 35 must fit the
+   * system CursorWindow; fetch large TEXT/BLOB cells in chunks with substr().
    */
   values?: SQLiteValues;
 }
@@ -284,7 +284,8 @@ export interface CapacitorSqlitePlugin {
   /**
    * Execute one parameterized statement for many value sets in one plugin call.
    * Unlike `runBatch()`, the SQL text is transported and classified only once.
-   * Native and Electron backends retain one prepared statement for the loop;
+   * Native and Electron backends reuse a prepared statement for ordinary DML.
+   * Android DML RETURNING prepares the row-producing execution per item;
    * sqlite-wasm Worker1 does not expose persistent statement handles, but still
    * benefits from the compact request shape. All value sets are validated before
    * the first write.

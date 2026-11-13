@@ -14,6 +14,68 @@ const workerFile = path.join(__dirname, '..', 'electron', 'dist', 'worker.cjs.js
 const settingsFile = path.join(__dirname, '..', 'electron', 'dist', 'plugin-settings.js');
 const publicPluginFile = path.join(__dirname, '..', 'dist', 'plugin.cjs.js');
 
+test('connection metadata statements are prepared once and recreated after reopen', async () => {
+  const { DatabaseSync } = require('node:sqlite');
+  const ts = require('typescript');
+  const module = { exports: {} };
+  const source = ts.transpileModule(fs.readFileSync(path.join(__dirname, '../electron/src/backend.ts'), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  vm.runInNewContext(source, {
+    module,
+    exports: module.exports,
+    require: (id) => {
+      if (id === '../../src/sql.js') return require('../build/test-p0/sql.js');
+      if (id === '../../src/migrations.js') return require('../build/test-p2/migrations.js');
+      return require(id);
+    },
+  });
+  const { ElectronSqliteBackend } = module.exports;
+  const original = DatabaseSync.prototype.prepare;
+  const metadata = [];
+  DatabaseSync.prototype.prepare = function (sql) {
+    if (/^SELECT (total_changes|last_insert_rowid)\(\)/.test(sql)) metadata.push(sql);
+    return original.call(this, sql);
+  };
+  const temporary = withTempPaths();
+  const backend = new ElectronSqliteBackend(temporary.paths);
+  const database = ':memory:';
+  try {
+    for (let round = 0; round < 2; round++) {
+      assert.equal((await backend.open({ database })).success, true);
+      assert.equal((await backend.execute({ database, statements: ['CREATE TABLE t(v)'] })).success, true);
+      for (let value = 0; value < 3; value++) {
+        const result = await backend.run({ database, statement: 'INSERT INTO t VALUES(?)', values: [value] });
+        assert.equal(result.data.changes, 1);
+      }
+      assert.equal(
+        (
+          await backend.runMany({
+            database,
+            statement: 'INSERT INTO t VALUES(?)',
+            values: [[3], [4]],
+            returnResults: true,
+          })
+        ).data.changes,
+        2,
+      );
+      assert.equal(metadata.length, (round + 1) * 2);
+      assert.equal((await backend.close({ database })).success, true);
+    }
+    const failed = backend.open({
+      database,
+      migrations: [{ version: 1, statements: ['INSERT INTO missing VALUES(1)'] }],
+    });
+    const retry = backend.open({ database });
+    assert.equal((await failed).success, false);
+    assert.equal((await retry).success, true);
+  } finally {
+    DatabaseSync.prototype.prepare = original;
+    await backend.shutdown();
+    fs.rmSync(temporary.root, { recursive: true, force: true });
+  }
+});
+
 function withTempPaths() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capsqlite-worker-lifecycle-'));
   return { root, paths: { userData: root, temp: root } };

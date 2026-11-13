@@ -204,7 +204,7 @@ internal class Database(
             try {
                 val before = if (transaction) SQLiteHelpers.totalChanges(handle) else 0L
                 for ((sql, values) in validated) {
-                    val reusable = SQLiteHelpers.statementType(sql) in setOf("INSERT", "UPDATE", "DELETE", "REPLACE")
+                    val reusable = SQLiteHelpers.statementType(sql) in SQLiteHelpers.DML_TYPES
                     if (!reusable) {
                         // DDL invalidates cached statements; PRAGMAs must be prepared on every execution.
                         preparedBySql.values.forEach { it.close() }
@@ -268,7 +268,7 @@ internal class Database(
                 throw CapacitorSqliteException("TRANSACTION_FAILED", "runMany: a transaction is already active on '$name'")
             }
             val perItem = if (returnResults) ArrayList<RunResult>(valueSets.size) else null
-            val reusable = SQLiteHelpers.statementType(statement) in setOf("INSERT", "UPDATE", "DELETE", "REPLACE")
+            val reusable = SQLiteHelpers.statementType(statement) in SQLiteHelpers.DML_TYPES
             var prepared: SQLiteHelpers.PreparedRunStatement? = null
             if (transaction) SQLiteHelpers.beginTransaction(handle)
             try {

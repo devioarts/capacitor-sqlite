@@ -4,7 +4,7 @@
 
 |               | Scope                                        | Purpose                                                                                 |
 | ------------- | -------------------------------------------- | --------------------------------------------------------------------------------------- |
-| **Automated** | 439 tests · 76 groups · 12 stress benchmarks · 24 diagnostics | Cross-platform behavioral, compatibility, and performance-regression coverage           |
+| **Automated** | 450 tests · 76 groups · 12 stress benchmarks · 24 diagnostics | Cross-platform behavioral, compatibility, and performance-regression coverage           |
 | **Manual**    | 11 scenarios                                 | OS lifecycle, storage-failure, profiler, and native-environment checks outside JS reach |
 
 Tests are part of the example app (`playground/`).  
@@ -47,7 +47,8 @@ these preparation steps itself. iOS deployment and its inspector runner both use
 `com.devioarts.capacitor.sqlite`, matching `playground/capacitor.config.ts`; deployment
 replaces the test app without uninstalling its existing data.
 
-Audit regression cases live in `playground/src/tests/auditRegressionTests.ts` and run
+Audit regression cases live in `playground/src/tests/auditRegressionTests.ts` and
+`playground/src/tests/novemberRegressionTests.ts` and run
 through the same public plugin API on every platform. The transaction recovery cases
 also cover schema-level rollback and preparation errors on every supported backend.
 Native Android instrumentation tests exercise WAL connection counters, transaction
@@ -366,7 +367,7 @@ precise timing control, or native profiling tools.
 | `sqlite3_column_blob()` returns NULL for zero-length BLOBs                                                               | iOS                      | blob-03                    |
 | `:memory:` DB survives `close()` due to the connection pool                                                              | Android                  | mdb-02 (skip)              |
 | `compileStatement` does not support SELECT                                                                               | Android                  | run-08 (skip)              |
-| `rawQuery(String[])` binds all values as TEXT; query binding preserves types by inlining safe typed literals              | Android                  | qph-01..13                 |
+| Android queries bind typed values through SQLiteRawStatement (API 35+ SELECT/DML) or a cursor factory              | Android                  | qph-01..13                 |
 | `node:sqlite` stores JS numbers as REAL; integer semantics are preserved with `BigInt` where needed                       | Electron                 | run-05 · bool-02           |
 | `directory` accepts logical locations only (`default`, `documents`, `library`, `cache`)                                  | All                      | manual review · extras tab |
 | `cache` locations are not intended for cloud backup and may be purged by the OS                                          | iOS · Android · Electron | manual review              |
@@ -377,3 +378,32 @@ precise timing control, or native profiling tools.
 | `WITHOUT ROWID` INSERT → `lastInsertId = 0` (no rowid exists)                                                            | All                      | wrid-04                    |
 | `true`/`false` stored as INTEGER 1/0, read back as `number`                                                              | All                      | bool-01..04                |
 | Web WASM logs every SQLite constraint error to the browser console                                                       | Web                      | expected behaviour         |
+
+
+## November 2026 regression coverage
+
+The shared suite adds 11 cases for CR-comment transaction guards across execute/batch/many/migrations,
+comment bind counting, a `conflict` column, migration preflight, safe FK table rebuilds
+(including failure recovery), and all run methods with RETURNING. Rebuild tests verify
+the documented workflow; arbitrary table-rebuild SQL is not automatically made safe.
+
+The byte-preserving scanner corpus is
+`ios/Tests/CapacitorSqlitePluginTests/Fixtures/sql-guard.tsv`. SQL and expected statement
+types use UTF-8 base64 so CR, LF, BOM and non-ASCII identifiers remain exact. A negative bind count expects rejection. JS, Android
+JVM and both Swift scanners read the same 24 cases without an extra JSON dependency.
+SwiftPM bundles the fixture as a test resource; Gradle uses that directory as test resources.
+
+`test/web-worker.test.cjs` checks the actual worker logic with sqlite-wasm and verifies
+error/messageerror recovery with the installed promiser and a Worker test double. It
+is not a real browser crash test. `test/electron-worker-lifecycle.test.cjs` separately
+counts real node:sqlite metadata preparations and checks close/reopen behavior.
+
+Android instrumentation adds typed-bind and negative-number checks, >2 MB SELECT rows
+on API 35, readonly reads, legacy CursorWindow rejection/chunking, RETURNING failure
+rollback in atomic/autocommit/manual transactions, safe cascade rebuilds and the CR
+transaction guard. Run on API 34 and 35; API 35 exercises SQLiteRawStatement, API 34
+exercises the typed cursor path. Older SQLite versions explicitly skip RETURNING tests.
+
+Swift tests cover invalid UTF-8 in regular/compact rows, late migration validation,
+FK rebuilds and unwrapped SQLite error messages. Native tests and shared public-API
+tests have different scopes; record actual platform results separately.

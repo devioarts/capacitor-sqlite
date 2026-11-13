@@ -1,6 +1,7 @@
 import type { CapacitorSqlitePlugin, Migration, SqliteDirectory } from '../../../src/definitions.js';
 import { assert, assertEqual, assertOk, assertFail, skipTest, type TestCase } from '../helpers/testRunner.js';
 import { buildAuditRegressionTests } from './auditRegressionTests.js';
+import { buildNovemberRegressionTests } from './novemberRegressionTests.js';
 
 // ── Real-world schema helpers ─────────────────────────────────────────────────
 
@@ -43,6 +44,7 @@ export function buildSuiteTests(CapacitorSqlite: CapacitorSqlitePlugin): TestCas
 
   return [
   ...buildAuditRegressionTests(CapacitorSqlite),
+  ...buildNovemberRegressionTests(CapacitorSqlite),
   {
     id: 'audit-01', group: 'Regression', name: 'Negative query parameters preserve arithmetic operators',
     fn: async () => {

@@ -55,6 +55,8 @@ extension CapacitorSqlite {
         // QUERY_FAILED. Keeping this here also protects future direct helper paths.
         case SQLiteError.invalidParams(let message):
             return .failed(code: "INVALID_PARAMS", message: message)
+        case let error as SQLiteError:
+            return .failed(code: fallback, message: error.message)
         case DatabaseError.invalidParams(let message):
             return .failed(code: "INVALID_PARAMS", message: message)
         case DatabaseError.notOpen(let message):

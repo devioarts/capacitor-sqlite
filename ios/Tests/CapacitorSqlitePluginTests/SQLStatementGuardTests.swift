@@ -2,6 +2,30 @@ import XCTest
 @testable import CapacitorSqlitePlugin
 
 class SQLStatementGuardTests: XCTestCase {
+    func testSharedSqlCorpus() throws {
+        let url = try XCTUnwrap(Bundle.module.url(
+            forResource: "sql-guard", withExtension: "tsv", subdirectory: "Fixtures"
+        ))
+        let corpus = try String(contentsOf: url, encoding: .utf8)
+        for line in corpus.split(separator: "\n") where !line.hasPrefix("#") {
+            let fields = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+            let sqlBytes = try XCTUnwrap(Data(base64Encoded: fields[1]))
+            let typeBytes = try XCTUnwrap(Data(base64Encoded: fields[2]))
+            let sql = try XCTUnwrap(String(data: sqlBytes, encoding: .utf8))
+            let type = try XCTUnwrap(String(data: typeBytes, encoding: .utf8))
+            XCTAssertEqual(SQLStatement.type(sql), type, fields[0])
+            XCTAssertEqual(SQLiteHelpers.hasMultipleStatements(sql), fields[3] == "true", fields[0])
+            XCTAssertEqual(SQLStatement.hasConflictClause(sql), fields[4] == "true", fields[0])
+            XCTAssertEqual(SQLStatement.isTransactionControl(sql), fields[5] == "true", fields[0])
+            if try XCTUnwrap(Int(fields[6])) < 0 {
+                XCTAssertThrowsError(try SQLiteHelpers.validateRunInput(sql: sql, valueCount: 0))
+            } else if fields[3] != "true" {
+                XCTAssertNoThrow(try SQLiteHelpers.validateRunInput(
+                    sql: sql, valueCount: try XCTUnwrap(Int(fields[6]))
+                ))
+            }
+        }
+    }
 
     func testAllowsSingleStatementWithTrailingSemicolonsAndComments() {
         XCTAssertFalse(SQLiteHelpers.hasMultipleStatements("SELECT 1"))

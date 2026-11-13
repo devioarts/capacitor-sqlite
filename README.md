@@ -194,6 +194,56 @@ await CapacitorSqlite.open({
 });
 ```
 
+### Rebuilding tables with foreign keys
+
+The plugin enables `foreign_keys` on writable connections. SQLite treats `DROP TABLE`
+as an implicit DELETE for foreign-key actions. Rebuilding a referenced table can
+therefore delete child rows with `ON DELETE CASCADE`, even if the migration succeeds.
+`PRAGMA foreign_keys=OFF` **inside a migration has no effect** because each migration
+already runs in a transaction.
+
+For a rebuild, keep one connection open, stop all other application use of that
+connection, disable foreign keys **outside** a transaction, apply the migration,
+check integrity, and restore enforcement even after failure:
+
+```ts
+const database = 'myapp';
+const opened = await CapacitorSqlite.open({ database });
+if (!opened.success) throw new Error(opened.error.message);
+const disabled = await CapacitorSqlite.execute({
+  database, transaction: false, statements: ['PRAGMA foreign_keys=OFF'],
+});
+if (!disabled.success) throw new Error(disabled.error.message);
+try {
+  const migrated = await CapacitorSqlite.open({
+    database,
+    migrations: [{ version: 2, statements: [
+      'CREATE TABLE parent_new(id INTEGER PRIMARY KEY, extra TEXT)',
+      'INSERT INTO parent_new(id) SELECT id FROM parent',
+      'DROP TABLE parent',
+      'ALTER TABLE parent_new RENAME TO parent',
+    ] }],
+  });
+  if (!migrated.success) throw new Error(migrated.error.message);
+  const checked = await CapacitorSqlite.query({ database, statement: 'PRAGMA foreign_key_check' });
+  if (!checked.success) throw new Error(checked.error.message);
+  if (checked.data.rows.length) throw new Error('Foreign-key violations after migration');
+} finally {
+  const restored = await CapacitorSqlite.execute({
+    database, transaction: false, statements: ['PRAGMA foreign_keys=ON'],
+  });
+  if (!restored.success) throw new Error(restored.error.message);
+}
+```
+
+Do not close/reopen between disabling enforcement and migrating: a new connection
+re-enables foreign keys. A failed version rolls back its own changes; earlier
+versions remain committed. `foreign_key_check` runs after those commits and cannot
+undo them. On any migration/check/restore failure, stop using the database and
+handle recovery before resuming writes. Enabling foreign keys does not repair
+existing violations. Back up persistent data before schema rebuilds and preserve
+indexes, triggers, views, and all required columns in the application's migration.
+
 ## Batch inserts
 
 `runBatch()` executes multiple statements in a single native call — significantly faster than looping `run()` because it avoids repeated JS→native bridge roundtrips:
@@ -215,13 +265,14 @@ single-row `run()` calls.
 With its default `transaction: true`, `runBatch()` validates every item's shape, value
 types and placeholder count before the first write. SQL is prepared in execution order
 inside the transaction, so a later statement can use a table or column created earlier
-in the same batch. Native and Electron backends reuse prepared DML statements; PRAGMA
+in the same batch. Native and Electron backends reuse prepared ordinary DML statements; PRAGMA
 statements are prepared on each occurrence because preparation itself can change
 connection settings. `transaction: false` deliberately retains per-statement autocommit
 semantics, including earlier successful SQL when a later SQL preparation/execution fails.
 
 When every operation uses the same SQL, `runMany()` avoids repeating that SQL in every
-item. Android, iOS, and Electron prepare one reusable statement for the loop; Web's
+item. Android, iOS, and Electron reuse prepared statements for ordinary DML.
+Android row-producing DML with RETURNING prepares its execution per item; Web's
 sqlite-wasm Worker1 keeps the same compact request even though it does not expose a
 persistent prepared-statement handle:
 
@@ -385,11 +436,10 @@ The plugin exposes positional arrays, not named bind objects. The number of supp
 values must exactly equal the number of real anonymous `?` placeholders; placeholders
 inside strings, quoted identifiers, and SQL comments are ignored by the count scanner.
 
-On Android, `query()` has to use `SQLiteDatabase.rawQuery(sql, String[])`, which
-only accepts string bind arguments. To preserve SQLite types, the plugin scans SQL
-before `rawQuery()` and safely inlines numeric, boolean, and BLOB values as SQL
-literals. The scanner ignores `?` inside string literals, quoted identifiers, and
-SQL comments, and rejects unsupported numbered/named placeholder forms.
+Android binds numeric, boolean, BLOB, text and NULL values through typed native
+bindings. It does not interpolate values into SQL. The SQL scanner validates the
+anonymous-placeholder contract while ignoring string literals, quoted identifiers,
+and SQL comments.
 
 ## SQL trust boundary
 
@@ -402,6 +452,12 @@ Do not pass user-authored SQL into the plugin. Bind user data through `values`
 instead of string concatenation. Parameter binding protects values, but it does not
 make dangerous SQL commands safe if the SQL text itself is untrusted.
 
+Name/directory validation applies to the main database opened through `open()`.
+It does not restrict paths embedded in trusted SQL: `ATTACH DATABASE` can access
+other SQLite files and `VACUUM INTO` can write an export wherever the host process
+has filesystem permission. These commands are not a path-sandbox escape because
+this API does not provide an SQL sandbox.
+
 ## Platform notes
 
 |              | iOS                                  | Android                   | Web                                              | Electron                  |
@@ -410,6 +466,21 @@ make dangerous SQL commands safe if the SQL text itself is untrusted.
 | WAL mode     | ✓                                    | ✓                         | Not supported by sqlite-wasm                     | ✓                         |
 | `:memory:`   | ✓                                    | ✓                         | ✓                                                | ✓                         |
 | Min version  | iOS 15                               | API 24                    | OPFS VFS + SharedArrayBuffer support; Safari 17+ | Electron 40+ (Node 24+)   |
+
+### SQLite feature versions on Android
+
+Android uses the device's system SQLite; the minimum Android API level does not
+promise every SQL feature. Call `getVersion({ database })` on an open database and
+check its returned SQLite version before using optional syntax:
+
+| Feature | Minimum SQLite version |
+| --- | --- |
+| UPSERT (`ON CONFLICT ... DO UPDATE`) | 3.24.0 |
+| Window functions | 3.25.0 |
+| DML `RETURNING` | 3.35.0 |
+| STRICT tables | 3.37.0 |
+
+A feature's syntax support does not remove platform transport limits described below.
 
 ### Cross-platform caveats
 
@@ -420,10 +491,16 @@ correctness-sensitive code:
   `run().statement`, each `runBatch().set[].statement`, and each migration statement
   must contain exactly one SQL statement. Multiple statements packed into one string
   (`"INSERT …; INSERT …"`) return a failure on every platform.
-- **Android `query()` placeholder scanning.** Android's `rawQuery()` accepts only
-  string bind args, so the plugin scans SQL and inlines numeric, boolean, and BLOB
-  `?` values as SQL literals to preserve types. Use only anonymous `?`
+- **Android typed query bindings.** Values are bound as their SQLite types without
+  rewriting SQL. API 35+ SELECT/EXPLAIN and DML RETURNING use `SQLiteRawStatement`;
+  older releases and PRAGMAs use a typed cursor factory. Use only anonymous `?`
   placeholders; numbered/named placeholders are intentionally not supported.
+- **Android large rows.** Before API 35, each SELECT row must fit the system
+  `CursorWindow` (often around 2 MB, device-dependent), even when the total result
+  spans multiple windows. Read large TEXT/BLOB cells in bounded chunks with
+  `substr(value, ?, ?)`; SQLite offsets start at 1. API 35+ SELECT/EXPLAIN avoids
+  CursorWindow and pins a read-only transaction when no transaction is active.
+  PRAGMA retains its existing autocommit effects and cursor-based transport.
 - **Android row-returning PRAGMA statements.** Android's `execute()` uses
   `SQLiteDatabase.execSQL()`, which rejects SQL that returns a result row. For PRAGMA
   statements such as `journal_mode` that report a value, use `query()` instead; PRAGMA
@@ -434,8 +511,9 @@ correctness-sensitive code:
   SQLite `RETURNING` support, the result must fit in one system `CursorWindow` (its
   capacity is device-dependent). An oversized result returns `QUERY_FAILED` and rolls
   back that statement's changes instead of executing the write again for another
-  window. Split large writes into smaller statements on those releases; plain SELECT
-  queries can still span multiple windows.
+  window. This also applies when `run`, `runBatch`, or `runMany` discard RETURNING
+  rows. Split large writes into smaller statements on those releases; plain SELECT
+  queries can span multiple windows but each row must fit one window.
 - **Call ordering and multi-database scheduling.** Calls against a database are serialized
   for safety. Always `await` transaction boundaries (`beginTransaction` / `commitTransaction` /
   `rollbackTransaction`) before issuing dependent work. On **both** Android and iOS, every
@@ -476,6 +554,31 @@ correctness-sensitive code:
   that counter did not change—for example after inserting into a `WITHOUT ROWID` table,
   replacing the same explicit rowid, or reusing a deleted rowid. Use `query()` with
   `RETURNING` whenever application correctness depends on the exact affected id.
+
+### Bounded reads and worker failures
+
+`query()` materializes its complete result in memory and transports it to JavaScript.
+There is no implicit row limit or streaming cursor. Bound large reads in application
+SQL, for example keyset pagination over a unique increasing primary key:
+
+```ts
+await CapacitorSqlite.query({
+  database: 'myapp',
+  statement: 'SELECT id, name FROM items WHERE id > ? ORDER BY id LIMIT ?',
+  values: [lastSeenId, 1000],
+});
+```
+
+On iOS, malformed UTF-8 in a TEXT value is decoded with U+FFFD replacements instead
+of failing the entire query. Query `CAST(value AS BLOB)` when the original bytes matter.
+
+On web worker `error`/`messageerror`, pending calls fail, all connection handles become
+invalid, and further operations require explicit `open()`. A fresh worker is created
+on that reopen; `:memory:` and connection-local TEMP data are lost. Persistent OPFS
+commits remain subject to SQLite/storage guarantees. A failed write's outcome can be
+unknown: inspect persistent state before retrying it. The plugin does not replay
+writes automatically. Only worker startup has a time limit; this does not introduce
+a query timeout for long-running SQL.
 
 ## Testing
 
@@ -742,7 +845,8 @@ runMany(options: RunManyOptions) => Promise<SqliteResult<RunManyResult>>
 
 Execute one parameterized statement for many value sets in one plugin call.
 Unlike `runBatch()`, the SQL text is transported and classified only once.
-Native and Electron backends retain one prepared statement for the loop;
+Native and Electron backends reuse a prepared statement for ordinary DML.
+Android DML RETURNING prepares the row-producing execution per item;
 sqlite-wasm Worker1 does not expose persistent statement handles, but still
 benefits from the compact request shape. All value sets are validated before
 the first write.
@@ -1023,11 +1127,11 @@ buffer as needed.
 
 #### QueryOptions
 
-| Prop            | Type                                                  | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| --------------- | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`database`**  | <code>string</code>                                   |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| **`statement`** | <code>string</code>                                   | Result-producing statement using anonymous `?` placeholders for bound values.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| **`values`**    | <code><a href="#sqlitevalues">SQLiteValues</a></code> | Positional values bound to anonymous `?` placeholders, in order. The value count must exactly match the placeholder count; `?` inside SQL strings, quoted identifiers, and comments is not counted. `number` values must be finite; integer `number` values must be within `Number.MAX_SAFE_INTEGER`. BLOB values should use <a href="#uint8array">`Uint8Array`</a>. Android/iOS transport them through a private tagged base64 envelope; Web/Electron retain the typed array. On Android, `query()` uses a small SQL scanner before calling `rawQuery(String[])` so numeric, boolean, and BLOB values keep their SQLite types. The scanner ignores `?` inside strings, quoted identifiers, and SQL comments, and rejects unsupported numbered/named placeholder forms. |
+| Prop            | Type                                                  | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| --------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`database`**  | <code>string</code>                                   |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| **`statement`** | <code>string</code>                                   | Result-producing statement using anonymous `?` placeholders for bound values.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| **`values`**    | <code><a href="#sqlitevalues">SQLiteValues</a></code> | Positional values bound to anonymous `?` placeholders, in order. The value count must exactly match the placeholder count; `?` inside SQL strings, quoted identifiers, and comments is not counted. `number` values must be finite; integer `number` values must be within `Number.MAX_SAFE_INTEGER`. BLOB values should use <a href="#uint8array">`Uint8Array`</a>. Android/iOS transport them through a private tagged base64 envelope; Web/Electron retain the typed array. Android binds typed values without rewriting SQL. API 35+ SELECT/EXPLAIN and DML RETURNING use SQLiteRawStatement; older releases and PRAGMAs use a typed cursor factory. A SELECT row on Android before API 35 must fit the system CursorWindow; fetch large TEXT/BLOB cells in chunks with substr(). |
 
 
 ### Type Aliases

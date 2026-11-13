@@ -50,7 +50,7 @@ extension Database {
             throw DatabaseError.invalidParams(message)
         } catch {
             if transaction { try? rollbackTransactionUnsafe() }
-            throw DatabaseError.run("\(error)")
+            throw DatabaseError.run((error as? SQLiteError)?.message ?? "\(error)")
         }
     }
 

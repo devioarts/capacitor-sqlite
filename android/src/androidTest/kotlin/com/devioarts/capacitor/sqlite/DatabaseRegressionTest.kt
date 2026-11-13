@@ -242,4 +242,125 @@ class DatabaseRegressionTest {
             db.run("INSERT INTO t VALUES(?)", listOf(1))
             assertEquals(1L, count(db))
         }
+
+    @Test
+    fun returningRunMethodsDrainRowsAndKeepRollback() =
+        withDatabase { db ->
+            val parts = db.getVersion().split('.').map { it.toInt() }
+            org.junit.Assume.assumeTrue(parts[0] > 3 || parts[0] == 3 && parts[1] >= 35)
+            db.execute(listOf("CREATE TABLE t(id INTEGER PRIMARY KEY, v UNIQUE)"))
+            assertEquals(2L, db.run("INSERT INTO t VALUES(1,10),(2,20) RETURNING id").changes)
+            assertEquals(2L, db.run("UPDATE t SET v=v+1 RETURNING id").changes)
+            assertEquals(0L, db.run("UPDATE t SET v=v+1 WHERE id=999 RETURNING id").changes)
+            assertEquals(2L, db.run("DELETE FROM t RETURNING id").changes)
+            for (transaction in listOf(true, false)) {
+                for (details in listOf(true, false)) {
+                    db.execute(listOf("DELETE FROM t"))
+                    val result =
+                        db.runMany(
+                            "INSERT INTO t VALUES(?,?) RETURNING id",
+                            listOf(listOf(1, 10), listOf(2, 20)),
+                            transaction,
+                            details,
+                        )
+                    assertEquals(2L, result.changes)
+                    if (details) assertEquals(listOf(1L, 1L), result.results?.map { it.changes })
+                    assertEquals(2L, db.runBatch(listOf(mapOf("statement" to "DELETE FROM t RETURNING id")), transaction).changes)
+                    fails {
+                        db.runMany(
+                            "INSERT INTO t VALUES(?,?) RETURNING id",
+                            listOf(listOf(1, 10), listOf(2, 10)),
+                            transaction,
+                            details,
+                        )
+                    }
+                    assertEquals(if (transaction) 0L else 1L, count(db))
+                    db.execute(listOf("DELETE FROM t"))
+                }
+            }
+            db.beginTransaction()
+            db.run("INSERT INTO t VALUES(1,10) RETURNING id")
+            db.rollbackTransaction()
+            assertEquals(0L, count(db))
+        }
+
+    @Test
+    fun typedQueryBindingsAndLargeSelectRows() =
+        withDatabase { db ->
+            val row =
+                db.query(
+                    "SELECT typeof(?) AS i, typeof(?) AS r, typeof(?) AS b, typeof(?) AS n, 1-? AS a, -? AS z, hex(?) AS bytes",
+                    listOf(7, 1.5, byteArrayOf(0, -1), null, -1, -1.5, listOf(0, 255)),
+                )[0]
+            assertEquals("integer", row["i"])
+            assertEquals("real", row["r"])
+            assertEquals("blob", row["b"])
+            assertEquals("null", row["n"])
+            assertEquals(2L, row["a"])
+            assertEquals(1.5, row["z"])
+            assertEquals("00FF", row["bytes"])
+            assertEquals(7L, db.query("SELECT ? AS v -- c\r; SELECT ? @ignored", listOf(7))[0]["v"])
+            if (Build.VERSION.SDK_INT >= 35) {
+                assertEquals(3_000_000, (db.query("SELECT zeroblob(?) AS b", listOf(3_000_000))[0]["b"] as ByteArray).size)
+                assertEquals(3_000_000, (db.query("SELECT printf('%.*c', ?, 'x') AS s", listOf(3_000_000))[0]["s"] as String).length)
+                val readonly = Database("readonly", db.path, true)
+                try {
+                    readonly.open()
+                    assertEquals(3_000_000, (readonly.query("SELECT zeroblob(?) AS b", listOf(3_000_000))[0]["b"] as ByteArray).size)
+                } finally {
+                    readonly.close()
+                }
+            } else {
+                assertTrue(fails { db.query("SELECT zeroblob(3000000)") } is android.database.sqlite.SQLiteBlobTooBigException)
+            }
+            assertEquals(100_000, (db.query("SELECT substr(zeroblob(3000000), ?, ?) AS b", listOf(1, 100_000))[0]["b"] as ByteArray).size)
+            db.query("PRAGMA foreign_keys=OFF")
+            assertEquals(0L, db.query("PRAGMA foreign_keys")[0]["foreign_keys"])
+            db.query("PRAGMA foreign_keys=ON")
+            assertEquals(1L, db.query("PRAGMA foreign_keys")[0]["foreign_keys"])
+        }
+
+    @Test
+    fun safeMigrationRebuildPreservesChildrenAndRestoresForeignKeys() =
+        withDatabase { db ->
+            db.execute(
+                listOf(
+                    "CREATE TABLE parent(id INTEGER PRIMARY KEY)",
+                    "CREATE TABLE child(id INTEGER PRIMARY KEY, parent_id REFERENCES parent(id) ON DELETE CASCADE)",
+                    "INSERT INTO parent VALUES(1)",
+                    "INSERT INTO child VALUES(1,1)",
+                ),
+            )
+            db.execute(listOf("PRAGMA foreign_keys=OFF"), false)
+            try {
+                db.open(
+                    listOf(
+                        MigrationEntry(
+                            1,
+                            listOf(
+                                "CREATE TABLE parent_new(id INTEGER PRIMARY KEY,extra TEXT)",
+                                "INSERT INTO parent_new(id) SELECT id FROM parent",
+                                "DROP TABLE parent",
+                                "ALTER TABLE parent_new RENAME TO parent",
+                            ),
+                        ),
+                    ),
+                )
+                assertTrue(db.query("PRAGMA foreign_key_check").isEmpty())
+            } finally {
+                db.execute(listOf("PRAGMA foreign_keys=ON"), false)
+            }
+            assertEquals(1L, db.query("SELECT count(*) AS n FROM child")[0]["n"])
+            fails { db.run("INSERT INTO child VALUES(2,999)") }
+        }
+
+    @Test
+    fun hiddenCommitAndConflictColumn() =
+        withDatabase { db ->
+            db.execute(listOf("CREATE TABLE t(id INTEGER PRIMARY KEY, conflict)"))
+            val hidden = "-- c\r\u200b\ufeff-- c\nEND"
+            fails { db.execute(listOf("INSERT INTO t VALUES(1,1)", hidden, "INSERT INTO missing VALUES(1)")) }
+            assertEquals(0L, count(db))
+            assertEquals(1L, db.run("INSERT INTO t(conflict) VALUES(?)", listOf(1)).lastInsertId)
+        }
 }

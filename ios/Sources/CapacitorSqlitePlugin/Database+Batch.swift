@@ -108,8 +108,8 @@ extension Database {
             diagnostics?.set("dbExecuteLoopMs", start: loopStart)
         } catch SQLiteError.invalidParams(let message) {
             throw DatabaseError.invalidParams(message)
-        } catch {
-            throw DatabaseError.run("\(error)")
+        } catch let error as SQLiteError {
+            throw DatabaseError.run(error.message)
         }
     }
 

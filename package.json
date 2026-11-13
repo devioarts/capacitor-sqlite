@@ -77,7 +77,7 @@
     "test:p1": "npm run test:p0 && npm run verify:web && npm run verify:electron && npm run test:electron:worker",
     "test:p2": "npm run test:p1 && npm run test:p2:js",
     "test:p2:js": "tsc --ignoreConfig --target es2017 --module commonjs --outDir build/test-p2 src/migrations.ts && node --test test/migration-validation.test.cjs",
-    "test:electron:worker": "node --test test/electron-worker-lifecycle.test.cjs test/native-query-validation.test.cjs test/package-import.test.cjs",
+    "test:electron:worker": "node --test test/electron-worker-lifecycle.test.cjs test/native-query-validation.test.cjs test/package-import.test.cjs test/web-worker.test.cjs",
     "test:suite:web": "node test/suite/run-web-cdp.mjs",
     "test:suite:web:stress": "node test/suite/run-web-cdp.mjs --stress",
     "test:suite:web:stress-only": "node test/suite/run-web-cdp.mjs --stress-only",

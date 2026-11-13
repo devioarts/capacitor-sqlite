@@ -16,3 +16,10 @@ na simulátoru není ověřením fyzického zařízení.
 
 Důvod oprav musí zůstat dohledatelný i bez lokální složky: v regresních testech,
 stručných komentářích u netriviálních změn a přehledu v `CHANGELOG.md`.
+
+
+Listopadové regrese jsou v `novemberRegressionTests.ts`, nativních testech a společném
+byte-preserving scanner korpusu `ios/Tests/CapacitorSqlitePluginTests/Fixtures/sql-guard.tsv`.
+SwiftPM jej balí jako test resource; proto se `ios/Tests` nesmí pouze vyškrtnout z npm
+balíčku bez odpovídající změny Package.swift. API kontrakty (důvěryhodné SQL, kompletní
+query výsledky a documents fallback) se odlišují od oprav funkčních chyb.

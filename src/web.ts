@@ -204,14 +204,11 @@ function indexedExecutionError(err: unknown, label: string): SqliteRuntimeError 
 
 export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlugin {
   private promiser: Promiser | null = null;
+  private worker: Worker | null = null;
   // Stores the in-flight init Promise so concurrent callers coalesce on one worker.
   private initPromise: Promise<Promiser> | null = null;
 
   private openDbs = new Map<string, DbEntry>();
-  // Stores in-flight open Promises so concurrent open() calls for the same db coalesce.
-  private pendingOpens = new Map<string, Promise<SqliteResult>>();
-  private pendingOpenModes = new Map<string, boolean>();
-  private pendingOpenDirectories = new Map<string, SqliteDirectory>();
   private spCounter = 0;
   // Per-database serial queue: ensures only one operation runs at a time on each connection.
   private dbQueues = new Map<string, Promise<void>>();
@@ -252,7 +249,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
     );
     this.dbQueues.set(database, tail);
     tail.finally(() => {
-      if (this.dbQueues.get(database) === tail && !this.openDbs.has(database) && !this.pendingOpens.has(database)) {
+      if (this.dbQueues.get(database) === tail && !this.openDbs.has(database)) {
         this.dbQueues.delete(database);
       }
     });
@@ -328,31 +325,7 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
         return this.okEmpty();
       }
 
-      const pending = this.pendingOpens.get(database);
-      if (pending) {
-        const pendingReadonly = this.pendingOpenModes.get(database);
-        const pendingDirectory = this.pendingOpenDirectories.get(database);
-        if (pendingReadonly !== readonly || pendingDirectory !== directory) {
-          return this.err(
-            'DB_ALREADY_OPEN',
-            'open',
-            new Error(
-              `open: database '${database}' is already opening as ${pendingReadonly ? 'readonly' : 'read/write'}`,
-            ),
-          );
-        }
-        return pending;
-      }
-
-      const openOp = this._doOpen(database, readonly, directory, migrations).finally(() => {
-        this.pendingOpens.delete(database);
-        this.pendingOpenModes.delete(database);
-        this.pendingOpenDirectories.delete(database);
-      });
-      this.pendingOpens.set(database, openOp);
-      this.pendingOpenModes.set(database, readonly);
-      this.pendingOpenDirectories.set(database, directory);
-      return openOp;
+      return this._doOpen(database, readonly, directory, migrations);
     });
   }
 
@@ -978,61 +951,71 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
   }
 
   private getOrCreatePromiser(): Promise<Promiser> {
-    // Store the Promise itself (not the result) so concurrent callers coalesce
-    // on a single worker — duplicate workers cause dbId collisions (sqlite-wasm #113).
     if (!this.initPromise) {
-      this.initPromise = new Promise<Promiser>((resolve, reject) => {
-        const holder: { ref?: Promiser } = {};
-        let worker: Worker | undefined;
-        let settled = false;
-        let timeout: ReturnType<typeof setTimeout> | undefined;
-        const clearReadyTimeout = () => {
-          if (timeout !== undefined) {
-            globalThis.clearTimeout(timeout);
-            timeout = undefined;
-          }
-        };
-        timeout = globalThis.setTimeout(() => {
-          if (settled) return;
-          settled = true;
-          worker?.terminate();
-          reject(new Error(`sqlite worker did not become ready within ${WORKER_READY_TIMEOUT_MS}ms`));
-        }, WORKER_READY_TIMEOUT_MS);
-        try {
-          worker = new Worker(new URL('./web-worker.js', import.meta.url), { type: 'module' });
-          holder.ref = sqlite3Worker1Promiser({
-            worker,
-            onready: () => {
-              if (settled) return;
-              settled = true;
-              clearReadyTimeout();
-              resolve(holder.ref as Promiser);
-            },
-          }) as any;
-        } catch (err) {
-          if (!settled) {
-            settled = true;
-            clearReadyTimeout();
-            worker?.terminate();
-            reject(err);
-          }
+      const worker = new Worker(new URL('./web-worker.js', import.meta.url), { type: 'module' });
+      this.worker = worker;
+      let rejectLost!: (error: Error) => void;
+      let failure: Error | null = null;
+      const requests = new Set<(error: Error) => void>();
+      const lost = new Promise<never>((_, reject) => {
+        rejectLost = reject;
+      });
+      // Failure can occur while no request is pending.
+      void lost.catch(() => undefined);
+      const fail = (error: Error) => {
+        if (failure) return;
+        failure = error;
+        globalThis.clearTimeout(timeout);
+        worker.terminate();
+        if (this.worker === worker) {
+          this.worker = null;
+          this.initPromise = null;
+          this.promiser = null;
+          this.openDbs.clear();
         }
-      })
-        .then((p) => {
+        rejectLost(error);
+        for (const reject of requests) reject(error);
+        requests.clear();
+      };
+      const timeout = globalThis.setTimeout(() => {
+        fail(new Error(`sqlite worker did not become ready within ${WORKER_READY_TIMEOUT_MS}ms`));
+      }, WORKER_READY_TIMEOUT_MS);
+      worker.addEventListener('error', () =>
+        fail(new Error('SQLite worker failed; operation outcome is unknown. Reopen databases before continuing.')),
+      );
+      worker.addEventListener('messageerror', () =>
+        fail(
+          new Error(
+            'SQLite worker response could not be decoded; operation outcome is unknown. Reopen databases before continuing.',
+          ),
+        ),
+      );
+      this.initPromise = Promise.race([sqlite3Worker1Promiser({ worker }), lost])
+        .then((factory) => {
+          const p = factory as Promiser;
+          globalThis.clearTimeout(timeout);
           const syncConnectionState = (message: any) => {
             if (typeof message?.inTransaction !== 'boolean') return;
             for (const entry of this.openDbs.values()) {
               if (entry.dbId === message.dbId) {
                 entry.inTransaction = message.inTransaction;
-                // Rowid survives rollback; failed execute/query/migrations must not leave an unrelated ID cached.
                 entry.lastInsertRowId = integerResult(message.lastInsertRowId);
                 break;
               }
             }
           };
-          this.promiser = async (type, args) => {
+          const promiser: Promiser = async (type, args) => {
             try {
-              const response = await p(type, args);
+              let rejectRequest!: (error: Error) => void;
+              const response = await new Promise<any>((resolve, reject) => {
+                rejectRequest = reject;
+                if (failure) {
+                  reject(failure);
+                  return;
+                }
+                requests.add(reject);
+                p(type, args).then(resolve, reject);
+              }).finally(() => requests.delete(rejectRequest));
               syncConnectionState(response);
               return response;
             } catch (error) {
@@ -1040,12 +1023,13 @@ export class CapacitorSqliteWeb extends WebPlugin implements CapacitorSqlitePlug
               throw error;
             }
           };
-          return this.promiser;
+          if (failure) throw failure;
+          this.promiser = promiser;
+          return promiser;
         })
-        .catch((err) => {
-          this.initPromise = null;
-          this.promiser = null;
-          throw err;
+        .catch((error) => {
+          fail(error instanceof Error ? error : new Error(extractMessage(error)));
+          throw error;
         });
     }
     return this.initPromise;

@@ -39,7 +39,7 @@ void sqlite3InitModule().then((sqlite3) => {
         case 'exec': {
           if (!db) throw new Error(`Unknown database '${dbId}'`);
           const before = args.countChanges ? db.changes(true, true) : undefined;
-          result = { ...args };
+          result = {};
           if (args.returnValue === 'resultRows') {
             result.resultRows = db.exec(args.sql!, { bind: args.bind, rowMode: 'object', returnValue: 'resultRows' });
           } else {

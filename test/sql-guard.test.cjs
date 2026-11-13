@@ -14,10 +14,21 @@ const {
 } = require('../build/test-p0/sql.js');
 
 test('managed transactions reject only actual transaction boundaries, not trigger bodies', () => {
-  for (const sql of ['BEGIN', '/* comment */ COMMIT', '\uFEFFCOMMIT', 'COMMIT\u00a0', 'END', 'ROLLBACK TO x', 'SAVEPOINT x', 'RELEASE x']) {
+  for (const sql of [
+    'BEGIN',
+    '/* comment */ COMMIT',
+    '\uFEFFCOMMIT',
+    'COMMIT\u00a0',
+    'END',
+    'ROLLBACK TO x',
+    'SAVEPOINT x',
+    'RELEASE x',
+  ]) {
     assert.throws(() => assertManagedTransactionStatement(sql), /transaction: false/);
   }
-  assert.doesNotThrow(() => assertManagedTransactionStatement('CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END'));
+  assert.doesNotThrow(() =>
+    assertManagedTransactionStatement('CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END'),
+  );
   assert.doesNotThrow(() => assertManagedTransactionStatement('SELECT "COMMIT"'));
 });
 
@@ -277,3 +288,23 @@ for (const sql of triggerBoundarySql) {
     assert.equal(hasMultipleSqlStatements(`${sql}; /* gap */ DELETE FROM t`), true);
   });
 }
+
+test('shared SQL corpus agrees across TS, Kotlin and both Swift scanners', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const corpus = fs.readFileSync(
+    path.join(__dirname, '../ios/Tests/CapacitorSqlitePluginTests/Fixtures/sql-guard.tsv'),
+    'utf8',
+  );
+  for (const line of corpus.split('\n').filter((line) => line && !line.startsWith('#'))) {
+    const [name, encodedSql, encodedType, multiple, conflict, managed, count] = line.split('\t');
+    const sql = Buffer.from(encodedSql, 'base64').toString('utf8');
+    assert.equal(sqlStatementType(sql), Buffer.from(encodedType, 'base64').toString('utf8'), name);
+    assert.equal(hasMultipleSqlStatements(sql), multiple === 'true', name);
+    assert.equal(hasConflictClause(sql), conflict === 'true', name);
+    if (Number(count) < 0) assert.throws(() => assertAnonymousBindParameterCount(sql, 0), /named placeholders/, name);
+    else assert.doesNotThrow(() => assertAnonymousBindParameterCount(sql, Number(count)), name);
+    if (managed === 'true') assert.throws(() => assertManagedTransactionStatement(sql), /transaction/, name);
+    else assert.doesNotThrow(() => assertManagedTransactionStatement(sql), name);
+  }
+});

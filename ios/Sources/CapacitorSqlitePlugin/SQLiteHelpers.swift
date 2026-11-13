@@ -10,6 +10,14 @@ enum SQLiteError: Error {
     case prepare(String)
     case query(String)
     case version(String)
+
+    var message: String {
+        switch self {
+        case .invalidParams(let message), .open(let message), .close(let message),
+             .execute(let message), .prepare(let message), .query(let message), .version(let message):
+            return message
+        }
+    }
 }
 
 enum SQLiteHelpers {
@@ -19,29 +27,11 @@ enum SQLiteHelpers {
         private let conflictClause: Bool
         private var statement: OpaquePointer?
 
-        init(db: OpaquePointer, sql: String, values: [Any], bindInitialValues: Bool = true) throws {
-            self.db = db
-            self.insertLike = SQLStatement.isInsertLike(sql)
-            self.conflictClause = SQLStatement.hasConflictClause(sql)
-            if SQLiteHelpers.hasMultipleStatements(sql) {
-                throw SQLiteError.invalidParams("SQL string must contain exactly one statement")
-            }
-            var prepared: OpaquePointer?
-            guard sqlite3_prepare_v2(db, sql, -1, &prepared, nil) == SQLITE_OK else {
-                let message = String(validatingUTF8: sqlite3_errmsg(db)) ?? "prepare failed"
-                throw SQLiteError.prepare(message)
-            }
-            statement = prepared
-            do {
-                if bindInitialValues {
-                    try bind(values: values)
-                } else {
-                    try validate(values: values)
-                }
-            } catch {
-                close()
-                throw error
-            }
+        convenience init(db: OpaquePointer, sql: String, values: [Any], bindInitialValues: Bool = true) throws {
+            try self.init(
+                db: db, sql: sql, normalizedValues: SQLiteHelpers.normalizeBindValues(values),
+                bindInitialValues: bindInitialValues
+            )
         }
 
         init(
@@ -74,26 +64,9 @@ enum SQLiteHelpers {
             }
         }
 
-        func validate(values: [Any]) throws {
-            guard let statement else { throw SQLiteError.prepare("statement is closed") }
-            try SQLiteHelpers.validateBindValues(stmt: statement, values: values)
-        }
-
         func validate(normalizedValues: SQLiteBindValues) throws {
             guard let statement else { throw SQLiteError.prepare("statement is closed") }
             try SQLiteHelpers.validateNormalizedBindValues(stmt: statement, values: normalizedValues)
-        }
-
-        func bind(values: [Any]) throws {
-            guard let statement else { throw SQLiteError.prepare("statement is closed") }
-            let resetCode = sqlite3_reset(statement)
-            guard resetCode == SQLITE_OK else {
-                let db = sqlite3_db_handle(statement)
-                let message = db.flatMap { String(validatingUTF8: sqlite3_errmsg($0)) } ?? "reset failed"
-                throw SQLiteError.execute(message)
-            }
-            sqlite3_clear_bindings(statement)
-            try SQLiteHelpers.bind(stmt: statement, values: values)
         }
 
         func bindNormalized(values: SQLiteBindValues) throws {

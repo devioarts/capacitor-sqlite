@@ -27,8 +27,7 @@ enum SQLStatement {
 
     // SQLite token boundaries are scalar/byte boundaries, never Swift grapheme clusters.
     private static func computeType(_ sql: String.UnicodeScalarView) -> String {
-        let first = readKeyword(sql, from: skipIgnorable(sql, from: sql.startIndex))
-        guard let first else { return "" }
+        guard let first = readKeyword(sql, from: skipIgnorable(sql, from: sql.startIndex)) else { return "" }
         if first.keyword != "WITH" { return first.keyword }
         return withMainStatementType(sql, from: first.end) ?? first.keyword
     }
@@ -71,7 +70,7 @@ enum SQLStatement {
         cache: NSCache<NSString, NSNumber>
     ) -> Bool {
         if let cached = cache.object(forKey: sql as NSString) { return cached.boolValue }
-        let result = hasKeyword(sql.unicodeScalars, target: target)
+        let result = hasKeyword(sql.unicodeScalars, target: target, precededBy: target == "CONFLICT" ? "ON" : nil)
         cache.setObject(NSNumber(value: result), forKey: sql as NSString)
         return result
     }
@@ -157,14 +156,17 @@ enum SQLStatement {
         return (String(sql[start..<end]).uppercased(), end)
     }
 
-    private static func hasKeyword(_ sql: String.UnicodeScalarView, target: String) -> Bool {
+    private static func hasKeyword(_ sql: String.UnicodeScalarView, target: String, precededBy: String? = nil) -> Bool {
+        var previous = ""
         var idx = sql.startIndex
         while idx < sql.endIndex {
             let character = sql[idx]
             if character == "'" || character == "\"" || character == "`" {
                 idx = skipQuoted(sql, from: idx, quote: character)
+                previous = ""
             } else if character == "[" {
                 idx = skipBracketIdentifier(sql, from: idx)
+                previous = ""
             } else if character == "-", nextChar(sql, after: idx) == "-" {
                 idx = skipLineComment(sql, from: idx)
             } else if character == "/", nextChar(sql, after: idx) == "*" {
@@ -173,9 +175,12 @@ enum SQLStatement {
                       idx == sql.startIndex || isWhitespace(sql[sql.index(before: idx)]) ||
                         !isIdentifierPart(sql[sql.index(before: idx)]) {
                 if let keyword = readKeyword(sql, from: idx) {
-                    if keyword.keyword == target { return true }
+                    if keyword.keyword == target && (precededBy == nil || previous == precededBy) { return true }
+                    previous = keyword.keyword
                     idx = sql.index(before: keyword.end)
                 }
+            } else if !isWhitespace(character) {
+                previous = ""
             }
             idx = sql.index(after: idx)
         }

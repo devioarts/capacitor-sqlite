@@ -4,6 +4,13 @@
 
 ### Fixed
 
+- November audits: SQL scanners now end line comments only at LF and use SQLite whitespace rules. CR/Unicode comment combinations can no longer hide transaction-control statements from managed transaction validation. A column named `conflict` no longer suppresses a successful INSERT's row ID.
+- iOS validates every migration's single-statement contract before committing any version, replaces malformed UTF-8 in TEXT with U+FFFD in both row paths, and returns SQLite error messages without enum wrappers. Prepared run initializers share preparation and validation.
+- Android binds query values without rewriting SQL. API 35+ SELECT/EXPLAIN reads use SQLiteRawStatement in a read-only transaction and support rows larger than CursorWindow; PRAGMA keeps its autocommit behavior. Older Android retains the per-row CursorWindow limit.
+- Android run, runBatch and runMany drain DML RETURNING results with rollback protection. The legacy CursorWindow capacity limit also applies when those rows are discarded.
+- Web worker errors and message decoding failures reject pending calls, invalidate handles and allow explicit reopen without replaying writes. Exec replies no longer echo SQL and BLOB binds. Electron reuses per-connection metadata statements; redundant open coalescing state was removed.
+- CI actions are pinned to verified commit revisions of their existing version tags.
+
 - Audit 2026-10-29: iOS SQL scanners use Unicode scalars and check CTE bounds, preventing malformed SQL from crashing and combining marks from hiding a second statement. Shared scanners accept SQLite Unicode/dollar identifiers without mistaking them for bind parameters.
 - Electron write metadata stays in BigInt until the public result conversion, preventing a committed large-rowid INSERT from reporting failure and blocking later writes. Direct Electron `query(null/undefined)` now resolves to `INVALID_PARAMS`.
 - Batches validate inputs without preparing SQL early, then prepare statements in execution order inside their transaction. This preserves dependent DDL and prevents failed preflight from changing connection PRAGMAs; only DML is cached. iOS batch cache keys compare UTF-8 bytes so distinct Unicode SQL literals cannot reuse the wrong statement.
@@ -36,10 +43,12 @@
 
 ### Added
 
+- Shared scanner corpus and November public/native/worker regression tests. Documented FK-safe table rebuilds, bounded reads, Android SQLite feature versions and legacy large-cell chunking, trusted SQL filesystem access, and worker-failure recovery limits.
+
 - Additional scanner regression cases on JS/Android/iOS, end-to-end SQL rejection and trigger tests, special-column round-trips, seven native iOS RETURNING tests, and a main-process Electron disposal test covering queued writes, rollback, repeated disposal, and worker restart.
 
 - Regression coverage for all six fixes, including Electron cache isolation across applications and restarts, both query result paths, Android numeric literal rewriting, and Web transaction recovery across SQL methods.
-- The shared suite now contains 439 tests in 76 groups, including 22 audit regressions; native and JS unit tests cover bridge validation and prepared-statement cleanup separately.
+- The shared suite now contains 450 tests in 76 groups, including 33 audit regressions; native and JS unit tests cover bridge validation and prepared-statement cleanup separately.
 
 ## [0.1.1] - 2026-07-12
 

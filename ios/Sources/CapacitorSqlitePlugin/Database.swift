@@ -236,7 +236,7 @@ final class Database {
         } catch SQLiteError.invalidParams(let msg) {
             throw DatabaseError.invalidParams(msg)
         } catch let err as SQLiteError {
-            throw DatabaseError.run("\(err)")
+            throw DatabaseError.run(err.message)
         }
     }
 
@@ -247,7 +247,7 @@ final class Database {
         } catch SQLiteError.invalidParams(let msg) {
             throw DatabaseError.invalidParams(msg)
         } catch let err as SQLiteError {
-            throw DatabaseError.query("\(err)")
+            throw DatabaseError.query(err.message)
         }
     }
 
@@ -256,7 +256,7 @@ final class Database {
         do {
             return try SQLiteHelpers.getSQLiteVersion(db: handle)
         } catch let err as SQLiteError {
-            throw DatabaseError.query("\(err)")
+            throw DatabaseError.query(err.message)
         }
     }
 
@@ -265,7 +265,7 @@ final class Database {
         do {
             return try SQLiteHelpers.getUserVersion(db: handle)
         } catch let err as SQLiteError {
-            throw DatabaseError.query("\(err)")
+            throw DatabaseError.query(err.message)
         }
     }
 
@@ -327,10 +327,17 @@ final class Database {
             .sorted { $0.version < $1.version }
 
         // Reject transaction boundaries across the input before any migration can change the database.
-        for migration in migrations where migration.statements.contains(where: SQLStatement.isTransactionControl) {
-            throw DatabaseError.migration(
-                "Migration v\(migration.version): transaction control requires transaction:false"
-            )
+        for migration in migrations {
+            for sql in migration.statements {
+                if SQLiteHelpers.hasMultipleStatements(sql) {
+                    throw DatabaseError.migration("Migration v\(migration.version): expected exactly one statement")
+                }
+                if SQLStatement.isTransactionControl(sql) {
+                    throw DatabaseError.migration(
+                        "Migration v\(migration.version): transaction control requires transaction:false"
+                    )
+                }
+            }
         }
         for migration in pending {
             do {
